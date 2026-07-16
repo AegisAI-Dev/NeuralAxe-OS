@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="NeuralAxe OS mark">
+  <!-- Original NeuralAxe mark (c) 2026 NeuralShield, GPL-3.0.
+       Simple geometry: dark navy tile, green axe head + haft, cyan circuit traces. -->
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="#070d17"/>
+  <!-- axe haft (diagonal, doubles as the "/" stroke of a stylized N) -->
+  <rect x="29.2" y="14" width="5.6" height="38" rx="2.8" fill="#16c784" transform="rotate(24 32 33)"/>
+  <!-- axe head: broad blade sweeping left -->
+  <path d="M34 16
+           C 25 15, 15 19, 11 28
+           C 16 26.5, 20 26.5, 24 28
+           C 20 31, 17.5 35, 17 40
+           C 23 35, 30 33.5, 36 24
+           Z"
+        fill="#16c784"/>
+  <!-- blade edge highlight -->
+  <path d="M11 28 C 16 26.5, 20 26.5, 24 28 C 20 31, 17.5 35, 17 40"
+        fill="none" stroke="#22d3ee" stroke-width="1.6" stroke-linecap="round" opacity="0.85"/>
+  <!-- circuit traces: node-and-track motif (ASIC hint) -->
+  <g stroke="#22d3ee" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.9">
+    <path d="M44 46 h8"/>
+    <path d="M46 38 h6 v8"/>
+  </g>
+  <g fill="#22d3ee">
+    <circle cx="44" cy="46" r="2.4"/>
+    <circle cx="46" cy="38" r="2.4"/>
+  </g>
+  <!-- upright of the stylized N -->
+  <rect x="42" y="14" width="5.6" height="18" rx="2.8" fill="#16c784"/>
+</svg>

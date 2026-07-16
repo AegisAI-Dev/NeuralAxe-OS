@@ -1,4 +1,5 @@
-$primaryColor: #f80421 !default;
+/* NeuralAxe OS accent: clean green (upstream Bitaxe red was #f80421) */
+$primaryColor: #16c784 !default;
 $primaryLightColor: scale-color($primaryColor, $lightness: 30%) !default;
 $primaryDarkColor: scale-color($primaryColor, $lightness: -10%) !default;
 $primaryDarkerColor: scale-color($primaryColor, $lightness: -20%) !default;

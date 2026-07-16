@@ -25,6 +25,7 @@
 #include "filesystem.h"
 #include "input.h"
 #include "log_buffer.h"
+#include "neuralaxe_identity.h"
 
 static GlobalState GLOBAL_STATE;
 
@@ -38,6 +39,8 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "Welcome to the bitaxe - FOSS || GTFO!");
+    ESP_LOGI(TAG, "%s %s (%s) - %s", NEURALAXE_PRODUCT_NAME, NEURALAXE_PRODUCT_VERSION, NEURALAXE_BUILD_CHANNEL, NEURALAXE_VENDOR);
+    ESP_LOGI(TAG, "Based on %s %s | Target: %s %s / %s", NEURALAXE_UPSTREAM_PROJECT, NEURALAXE_UPSTREAM_VERSION, NEURALAXE_TARGET_DEVICE, NEURALAXE_TARGET_BOARD, NEURALAXE_TARGET_ASIC);
 
     if (xTaskCreate(cpu_monitor_task, "cpu_monitor", 4096, (void *)&GLOBAL_STATE, 1, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating cpu monitor task");

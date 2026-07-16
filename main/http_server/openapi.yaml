@@ -457,6 +457,30 @@ components:
         axeOSVersion:
           type: string
           description: AxeOS version
+        productName:
+          type: string
+          description: NeuralAxe OS product name (additive, read-only)
+        productVersion:
+          type: string
+          description: NeuralAxe OS product version (additive, read-only; does not replace firmware version)
+        buildChannel:
+          type: string
+          description: NeuralAxe OS build channel (additive, read-only)
+        upstreamProject:
+          type: string
+          description: Upstream open-source project this build is based on
+        upstreamVersion:
+          type: string
+          description: Upstream project version this build is based on
+        targetBoard:
+          type: string
+          description: NeuralAxe build-target board version (declared, not runtime-detected)
+        targetDevice:
+          type: string
+          description: NeuralAxe build-target device family (declared, not runtime-detected)
+        targetAsic:
+          type: string
+          description: NeuralAxe build-target ASIC model (declared, not runtime-detected)
         voltage:
           type: number
           description: Input voltage

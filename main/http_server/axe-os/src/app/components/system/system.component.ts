@@ -8,6 +8,7 @@ import { LoadingService } from 'src/app/services/loading.service';
 import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
 import { ByteSuffixPipe } from 'src/app/pipes/byte-suffix.pipe';
 import { SystemInfo as ISystemInfo, SystemAsic as ISystemASIC, GenericResponse, } from 'src/app/generated/models';
+import { NEURALAXE } from 'src/app/neuralaxe';
 
 type TableRow = {
   label: string;
@@ -99,7 +100,11 @@ export class SystemComponent implements OnInit, OnDestroy {
       { label: '• Spiram', value: ByteSuffixPipe.transform(data.info.freeHeapSpiram), class: 'pb-3' },
       { label: 'Firmware Version', value: data.info.version },
       { label: 'AxeOS Version', value: data.info.axeOSVersion },
-      { label: 'ESP-IDF Version', value: data.info.idfVersion },
+      { label: 'ESP-IDF Version', value: data.info.idfVersion, class: 'pb-3' },
+      { label: 'Product', value: `${NEURALAXE.productName} ${NEURALAXE.productVersion}` },
+      { label: 'Build Channel', value: NEURALAXE.buildChannel },
+      { label: 'Based On', value: `${NEURALAXE.upstreamProject} ${NEURALAXE.upstreamVersion}` },
+      { label: 'NeuralAxe Target', value: `${NEURALAXE.targetDevice} ${NEURALAXE.targetBoard} / ${NEURALAXE.targetAsic}` },
     ];
   }
 

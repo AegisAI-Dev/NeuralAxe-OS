@@ -5,6 +5,18 @@
 ![GitHub contributors](https://img.shields.io/github/contributors/bitaxeorg/esp-miner)
 ![Alt](https://repobeats.axiom.co/api/embed/70889479b1e002c18a184b05bc5cbf2ed3718579.svg "Repobeats analytics image")
 
+# NeuralAxe OS
+
+**NeuralAxe OS 0.1.0-dev (Development Build)** — a NeuralShield firmware distribution for the Bitaxe Gamma (board 601, BM1370).
+
+NeuralAxe OS is based on the open-source ESP-Miner and AxeOS projects. This build derives from **ESP-Miner / AxeOS v2.14.2** and preserves upstream mining, thermal, power, network, storage, OTA and recovery behavior unchanged; only product identity, restrained branding and additive read-only build metadata differ. Licensed under **GPL-3.0**, same as upstream. All upstream copyright notices and acknowledgements are retained below.
+
+Development builds are produced with the repository devcontainer (`docker build -t espminer-build .devcontainer`, then `GITHUB_ACTIONS=true idf.py build` with a prebuilt `main/http_server/axe-os/dist`); see `docs/NEURALAXE_PHASE_1_BASELINE_REPORT.md` and `docs/NEURALAXE_PHASE_2A_BRANDING_REPORT.md` for the verified baseline and build procedure. Development images are not release-approved for flashing.
+
+Upstream project: [ESP-Miner](https://github.com/bitaxeorg/ESP-Miner) by the Bitaxe/OSMU community — the original README follows.
+
+---
+
 # ESP-Miner
 esp-miner is open source ESP32 firmware for the [Bitaxe](https://github.com/bitaxeorg/bitaxe)
 

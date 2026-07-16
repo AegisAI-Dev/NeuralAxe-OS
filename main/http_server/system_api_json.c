@@ -5,6 +5,7 @@
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "system_api_json.h"
+#include "neuralaxe_identity.h"
 #include "nvs_config.h"
 #include "sv2_protocol.h"
 #include "vcore.h"
@@ -112,6 +113,16 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     cJSON_AddStringToObject(root, "axeOSVersion", g->SYSTEM_MODULE.axeOSVersion ? g->SYSTEM_MODULE.axeOSVersion : "Unknown");
     cJSON_AddStringToObject(root, "idfVersion", esp_get_idf_version());
     cJSON_AddStringToObject(root, "boardVersion", g->DEVICE_CONFIG.board_version ? g->DEVICE_CONFIG.board_version : "Unknown");
+
+    // NeuralAxe OS product identity (additive, read-only; upstream version fields above are unchanged)
+    cJSON_AddStringToObject(root, "productName", NEURALAXE_PRODUCT_NAME);
+    cJSON_AddStringToObject(root, "productVersion", NEURALAXE_PRODUCT_VERSION);
+    cJSON_AddStringToObject(root, "buildChannel", NEURALAXE_BUILD_CHANNEL);
+    cJSON_AddStringToObject(root, "upstreamProject", NEURALAXE_UPSTREAM_PROJECT);
+    cJSON_AddStringToObject(root, "upstreamVersion", NEURALAXE_UPSTREAM_VERSION);
+    cJSON_AddStringToObject(root, "targetBoard", NEURALAXE_TARGET_BOARD);
+    cJSON_AddStringToObject(root, "targetDevice", NEURALAXE_TARGET_DEVICE);
+    cJSON_AddStringToObject(root, "targetAsic", NEURALAXE_TARGET_ASIC);
 
     // Hardware Details
     cJSON_AddNumberToObject(root, "maxPower", g->DEVICE_CONFIG.family.max_power);

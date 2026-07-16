@@ -1,3 +1,11 @@
-<!-- <div class="layout-footer">
-
-</div> -->
+<div class="layout-footer flex flex-column align-items-center gap-1 py-3 text-center">
+    <span class="text-sm text-500">
+        <span class="font-semibold" style="color: var(--primary-color);">{{ neuralaxe.productName }}</span>
+        {{ neuralaxe.productVersion }} ({{ neuralaxe.buildChannel === 'development' ? 'Development Build' : neuralaxe.buildChannel }})
+        &mdash; {{ neuralaxe.vendor }}
+    </span>
+    <span class="text-xs text-500">
+        {{ neuralaxe.attribution }} Upstream: {{ neuralaxe.upstreamProject }} {{ neuralaxe.upstreamVersion }} (GPL-3.0).
+        Target: {{ neuralaxe.targetDevice }} {{ neuralaxe.targetBoard }} / {{ neuralaxe.targetAsic }}.
+    </span>
+</div>
