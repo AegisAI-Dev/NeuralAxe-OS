@@ -1,17 +1,39 @@
 ﻿<div class="layout-topbar">
-    <a routerLink="" class="flex align-items-center gap-2" style="text-decoration: none;">
-        <img src="assets/neuralaxe-mark.svg" width="40" height="40" class="block" alt="NeuralAxe OS" />
-        <span class="flex flex-column select-none">
-            <span class="text-white font-bold" style="font-size: 1.15rem; letter-spacing: 0.02em;">NeuralAxe&nbsp;OS</span>
-            <span class="text-500" style="font-size: 0.7rem;">0.1.0-dev &middot; Development Build</span>
+    <a routerLink="" class="nx-topbar-brand select-none">
+        <img src="assets/neuralaxe-mark.svg" width="42" height="42" class="block" alt="NeuralAxe OS" />
+        <span class="nx-brand-titles">
+            <span class="nx-brand-name">NeuralAxe&nbsp;OS <span class="nx-ver-pill">{{ neuralaxe.productVersion }}</span></span>
+            <span class="nx-brand-sub">Neuralaxe Command Deck</span>
         </span>
     </a>
 
     <ng-container *ngIf="info$ | async as info">
-        <span class="text-500 select-none absolute left-0 bottom-0 ml-6 md:ml-7 mb-1"
-            tooltipPosition="bottom"
-            pTooltip="Hostname"
-        >{{info.hostname}}</span>
+        <div class="nx-topbar-pills select-none">
+            <span class="nx-hpill" pTooltip="Target device" tooltipPosition="bottom">
+                <i class="pi pi-box"></i>{{ neuralaxe.targetDevice }} {{ neuralaxe.targetBoard }}
+            </span>
+            <span class="nx-hpill" pTooltip="ASIC" tooltipPosition="bottom">
+                <i class="pi pi-microchip"></i>{{ info.ASICModel || neuralaxe.targetAsic }}
+            </span>
+            <span class="nx-hpill nx-hpill-ok" *ngIf="!isMiningPaused" pTooltip="Mining active" tooltipPosition="bottom">
+                <span class="nx-live-dot"></span>Online
+            </span>
+            <span class="nx-hpill" *ngIf="isMiningPaused" pTooltip="Mining paused" tooltipPosition="bottom">
+                <i class="pi pi-pause"></i>Paused
+            </span>
+            <span class="nx-hpill" [ngClass]="poolHealthy(info) ? 'nx-hpill-ok' : ''" pTooltip="Stratum state" tooltipPosition="bottom">
+                <i class="pi pi-shield"></i>{{ poolHealthy(info) ? 'Pool Healthy' : 'Fallback Pool' }}
+            </span>
+            <span class="nx-hpill nx-hpill-ok" pTooltip="{{ info.wifiStatus }} ({{ info.wifiRSSI }} dBm)" tooltipPosition="bottom">
+                <i class="pi pi-wifi"></i>Wi-Fi
+            </span>
+        </div>
+
+        <div class="nx-uptime ml-auto mr-3 select-none hidden lg:flex">
+            <label>Uptime</label>
+            <b>{{ uptime(info) }}</b>
+        </div>
+
 
         <ul *ngIf="!isAPMode" class="flex ml-auto list-none p-0 m-0 gap-4 lg:flex-order-2">
             <li *ngIf="dashboardEdit.editMode$ | async" class="hidden md:block">
@@ -42,7 +64,7 @@
                     <i class="pi pi-replay text-xl block"></i>
                 </a>
             </li>
-            <li class="hidden md:block">
+            <li class="hidden md:block" *ngIf="isClassicRoute">
                 <a class="block py-2 text-white cursor-pointer"
                     tooltipPosition="bottom"
                     [pTooltip]="(dashboardEdit.editMode$ | async) ? 'Save Layout' : 'Edit Layout'"

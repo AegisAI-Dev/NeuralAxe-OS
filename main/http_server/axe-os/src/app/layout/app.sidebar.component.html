@@ -1,1 +1,8 @@
- <app-menu></app-menu>
+<app-menu></app-menu>
+
+<div class="nx-device-card select-none" *ngIf="info$ | async as info">
+    <img src="assets/neuralaxe-mark.svg" alt="" aria-hidden="true" />
+    <b>{{ neuralaxe.targetDevice }} {{ neuralaxe.targetBoard }}</b>
+    <small>{{ info.hostname }}</small>
+    <small class="white-space-nowrap">{{ neuralaxe.targetAsic }} &middot; {{ neuralaxe.buildChannel === 'development' ? 'dev' : neuralaxe.buildChannel }}</small>
+</div>

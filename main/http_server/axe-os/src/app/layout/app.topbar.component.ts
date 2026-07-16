@@ -1,4 +1,5 @@
 import { Component, ElementRef, Input, ViewChild, OnInit, OnDestroy } from '@angular/core';
+import { Router } from '@angular/router';
 import { Observable, Subject, takeUntil } from 'rxjs';
 import { ToastrService } from 'ngx-toastr';
 import { SystemApiService } from 'src/app/services/system.service';
@@ -8,6 +9,8 @@ import { SensitiveData } from 'src/app/services/sensitive-data.service';
 import { DashboardEditService } from 'src/app/services/dashboard-edit.service';
 import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
 import { MenuItem } from 'primeng/api';
+import { NEURALAXE } from 'src/app/neuralaxe';
+import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
 
 @Component({
   selector: 'app-topbar',
@@ -16,6 +19,7 @@ import { MenuItem } from 'primeng/api';
 export class AppTopBarComponent implements OnInit, OnDestroy {
   private destroy$ = new Subject<void>();
 
+  public readonly neuralaxe = NEURALAXE;
   public info$: Observable<ISystemInfo>;
   public sensitiveDataHidden: boolean = false;
   public isMiningPaused: boolean = false;
@@ -32,8 +36,14 @@ export class AppTopBarComponent implements OnInit, OnDestroy {
     private toastr: ToastrService,
     private sensitiveData: SensitiveData,
     public dashboardEdit: DashboardEditService,
+    private router: Router,
   ) {
     this.info$ = this.liveDataService.info$;
+  }
+
+  /** The gridstack layout editor only exists on the classic dashboard. */
+  public get isClassicRoute(): boolean {
+    return this.router.url.startsWith('/classic');
   }
 
   ngOnInit() {
@@ -78,5 +88,14 @@ export class AppTopBarComponent implements OnInit, OnDestroy {
       next: () => this.toastr.success('Device restarted'),
       error: () => this.toastr.error('Restart failed')
     });
+  }
+
+  public uptime(info: ISystemInfo): string {
+    const value = DateAgoPipe.transform(info.uptimeSeconds ?? 0, { short: true, intervals: 3, strict: true });
+    return typeof value === 'string' && value ? value : '—';
+  }
+
+  public poolHealthy(info: ISystemInfo): boolean {
+    return (info.isUsingFallbackStratum ?? 0) === 0;
   }
 }

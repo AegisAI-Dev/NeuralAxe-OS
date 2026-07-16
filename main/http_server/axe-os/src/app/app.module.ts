@@ -16,6 +16,7 @@ import { EditComponent } from './components/edit/edit.component';
 import { PoolComponent } from './components/pool/pool.component';
 import { NetworkEditComponent } from './components/network-edit/network.edit.component';
 import { HomeComponent } from './components/home/home.component';
+import { CommandDeckComponent } from './components/command-deck/command-deck.component';
 import { ModalComponent } from './components/modal/modal.component';
 import { TooltipIconComponent } from './components/tooltip-icon/tooltip-icon.component';
 import { TooltipTextIconComponent } from './components/tooltip-text-icon/tooltip-text-icon.component';
@@ -49,6 +50,7 @@ const components = [
   EditComponent,
   NetworkEditComponent,
   HomeComponent,
+  CommandDeckComponent,
   ModalComponent,
   TooltipIconComponent,
   TooltipTextIconComponent,

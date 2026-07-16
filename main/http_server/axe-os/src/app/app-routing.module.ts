@@ -13,6 +13,7 @@ import { DesignComponent } from './components/design/design.component';
 import { PoolComponent } from './components/pool/pool.component';
 import { AppLayoutComponent } from './layout/app.layout.component';
 import { ApModeGuard } from './guards/ap-mode.guard';
+import { CommandDeckComponent } from './components/command-deck/command-deck.component';
 
 const TITLE_PREFIX = 'NeuralAxe OS';
 
@@ -35,8 +36,13 @@ const routes: Routes = [
     children: [
       {
         path: '',
-        component: HomeComponent,
+        component: CommandDeckComponent,
         title: TITLE_PREFIX,
+      },
+      {
+        path: 'classic',
+        component: HomeComponent,
+        title: `${TITLE_PREFIX} Classic`,
       },
       {
         path: 'logs',
