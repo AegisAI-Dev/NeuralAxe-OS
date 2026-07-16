@@ -9,6 +9,10 @@
 # Openapi generator
 **/generated
 
+# Generated Karma JUnit report (karma.conf.js junitReporter) — must never be
+# tracked: every test run rewrites it and would taint `git describe --dirty`.
+/report.xml
+
 # Node
 /node_modules
 npm-debug.log
