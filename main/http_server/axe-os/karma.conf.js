@@ -33,6 +33,13 @@ module.exports = function (config) {
       useBrowserName: false
     },
     port: 9876,
+    // Use HTTP long-polling instead of websockets for the karma<->browser channel.
+    // On Windows, Chromium/Edge teardown after single-run completion aborts the
+    // websocket with a TCP RST, which karma-server sees as an uncaught
+    // 'read ECONNRESET' AFTER all results are in and then exits non-zero despite
+    // a fully green run. Polling sockets close gracefully, so real test failures
+    // still produce their normal non-zero exit while green runs exit 0 reliably.
+    transports: ['polling'],
     colors: true,
     logLevel: config.LOG_INFO,
     autoWatch: true,

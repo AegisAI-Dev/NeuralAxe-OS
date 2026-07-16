@@ -16,4 +16,9 @@ export const NEURALAXE = Object.freeze({
   targetDevice: 'Gamma',
   targetAsic: 'BM1370',
   attribution: 'NeuralAxe OS is based on the open-source ESP-Miner and AxeOS projects.',
+  /**
+   * The only repository NeuralAxe release checks may query.
+   * Official upstream ESP-Miner releases must never be presented as NeuralAxe updates.
+   */
+  updateRepository: 'AegisAI-Dev/NeuralAxe-OS',
 } as const);

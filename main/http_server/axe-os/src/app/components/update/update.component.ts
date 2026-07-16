@@ -1,5 +1,5 @@
 import { Component, ViewChild } from '@angular/core';
-import { Observable, map } from 'rxjs';
+import { Observable, map, catchError, of } from 'rxjs';
 import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
 import { ToastrService } from 'ngx-toastr';
 import { FileUploadHandlerEvent, FileUpload } from 'primeng/fileupload';
@@ -13,6 +13,17 @@ import { SystemInfo } from 'src/app/generated/models';
 
 const IGNORE_RELEASE_CHECK_WARNING = 'IGNORE_RELEASE_CHECK_WARNING';
 
+/**
+ * Result of a manual NeuralAxe release check.
+ * - 'release': a NeuralAxe release is available (never an upstream ESP-Miner release);
+ * - 'none':    the NeuralAxe repository has no suitable release yet;
+ * - 'error':   the check failed (offline, rate limit, ...) — non-destructive, retry later.
+ */
+export type ReleaseCheckResult =
+  | { state: 'release'; release: any }
+  | { state: 'none' }
+  | { state: 'error' };
+
 @Component({
   selector: 'app-update',
   templateUrl: './update.component.html',
@@ -24,7 +35,7 @@ export class UpdateComponent {
   public websiteUpdateProgress: number = 0;
 
   public checkLatestRelease: boolean = false;
-  public latestRelease$: Observable<any>;
+  public latestRelease$: Observable<ReleaseCheckResult>;
 
   public info$: Observable<SystemInfo>;
 
@@ -46,9 +57,15 @@ export class UpdateComponent {
     private githubUpdateService: GithubUpdateService,
     private localStorageService: LocalStorageService,
   ) {
-    this.latestRelease$ = this.githubUpdateService.getReleases().pipe(map(releases => {
-      return (releases as any)[0];
-    }));
+    // Cold observable: no request is made until the user explicitly triggers the
+    // release check (checkLatestRelease gates the subscribing template branch).
+    this.latestRelease$ = this.githubUpdateService.getReleases().pipe(
+      map((releases): ReleaseCheckResult => {
+        const release = (releases as any)[0];
+        return release ? { state: 'release', release } : { state: 'none' };
+      }),
+      catchError(() => of<ReleaseCheckResult>({ state: 'error' }))
+    );
 
     this.info$ = this.liveDataService.info$;
   }

@@ -17,7 +17,9 @@
 
                     <app-modal #privacyModal [headline]="'Privacy Warning'">
                         <p>
-                            Please note, this will connect to <strong>github.com</strong> to check for the latest release.
+                            Please note, this will connect to <strong>github.com</strong> to check the
+                            <strong>NeuralAxe OS</strong> repository (AegisAI-Dev/NeuralAxe-OS) for the latest release.
+                            Official upstream ESP-Miner releases are not offered here.
                         </p>
                         <p class="flex gap-2">
                             <p-checkbox
@@ -34,7 +36,9 @@
                 </ng-container>
 
                 <ng-template #afterCheck>
-                    <ng-container *ngIf="latestRelease$ | async as latestRelease">
+                    <ng-container *ngIf="latestRelease$ | async as checkResult">
+                        <ng-container *ngIf="checkResult.state === 'release'; else noRelease">
+                        <ng-container *ngIf="checkResult.release as latestRelease">
                         <h3>Latest Release:
                             <a style="text-decoration: underline;" target="_blank"
                             [href]="latestRelease.html_url">{{latestRelease.name}}</a>
@@ -60,6 +64,20 @@
                         <app-modal #releaseNotesModal [headline]="latestRelease.name">
                             <div [innerHTML]="simpleMarkdownParser(latestRelease.body)"></div>
                         </app-modal>
+                        </ng-container>
+                        </ng-container>
+
+                        <ng-template #noRelease>
+                            <h3>Latest Release:</h3>
+                            <p *ngIf="checkResult.state === 'none'" class="text-500">
+                                No NeuralAxe OS release is available yet for this development build.
+                                Use the manual www.bin / esp-miner.bin upload below when a build is provided.
+                            </p>
+                            <p *ngIf="checkResult.state === 'error'" class="text-500">
+                                Could not reach the NeuralAxe OS release service (offline or rate-limited).
+                                Nothing was changed on this device. Please try again later.
+                            </p>
+                        </ng-template>
                     </ng-container>
                 </ng-template>
             </div>

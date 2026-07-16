@@ -26,4 +26,9 @@ describe('NEURALAXE product identity', () => {
   it('should be frozen (read-only metadata)', () => {
     expect(Object.isFrozen(NEURALAXE)).toBeTrue();
   });
+
+  it('should pin the update channel to the NeuralAxe repository', () => {
+    expect(NEURALAXE.updateRepository).toBe('AegisAI-Dev/NeuralAxe-OS');
+    expect(NEURALAXE.updateRepository).not.toContain('bitaxeorg');
+  });
 });

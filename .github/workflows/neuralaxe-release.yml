@@ -1,0 +1,136 @@
+# NeuralAxe OS development release build (Phase 2C).
+#
+# MANUAL ONLY: runs exclusively via workflow_dispatch. It never triggers on
+# push, tags or GitHub releases, never creates a GitHub release, and never
+# publishes anything externally — build outputs are attached as private
+# workflow artifacts for owner review only.
+#
+# Board scope is Gamma/601/BM1370 exclusively. Upstream ESP-Miner release
+# workflows (release.yml, release-factory*.yml) are left untouched and remain
+# tied to upstream 'release' events, which do not occur in this repository's
+# development flow.
+name: NeuralAxe Release Build (manual, board 601)
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: "NeuralAxe product version this build must match (e.g. 0.1.0-dev)"
+        required: true
+        default: "0.1.0-dev"
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  neuralaxe-release:
+    runs-on: ubuntu-latest
+    # Guard: never run from forks or a renamed repository.
+    if: github.repository == 'AegisAI-Dev/NeuralAxe-OS'
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Validate version/identity agreement
+        run: |
+          set -euo pipefail
+          HDR_VER=$(grep -oP '#define\s+NEURALAXE_PRODUCT_VERSION\s+"\K[^"]+' main/neuralaxe_identity.h)
+          TS_VER=$(grep -oP "productVersion:\s*'\K[^']+" main/http_server/axe-os/src/app/neuralaxe.ts)
+          echo "header=$HDR_VER frontend=$TS_VER expected=${{ inputs.expected_version }}"
+          test "$HDR_VER" = "${{ inputs.expected_version }}"
+          test "$TS_VER" = "${{ inputs.expected_version }}"
+          BOARD=$(grep -oP '#define\s+NEURALAXE_TARGET_BOARD\s+"\K[^"]+' main/neuralaxe_identity.h)
+          test "$BOARD" = "601"
+
+      - name: Reject dirty or ambiguous source
+        run: |
+          set -euo pipefail
+          git diff --quiet || { echo "working tree dirty"; exit 1; }
+          DESCRIBE=$(git describe --tags --always --dirty)
+          echo "git describe: $DESCRIBE"
+          case "$DESCRIBE" in *-dirty*) echo "dirty build rejected"; exit 1;; esac
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24.14.0'
+
+      - name: Frontend tests
+        working-directory: ./main/http_server/axe-os
+        run: |
+          npm ci
+          npm run test:ci
+
+      - name: Firmware/QEMU tests
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32s3
+          command: GITHUB_ACTIONS="true" idf.py build
+          path: 'test-ci'
+
+      - name: Run tests in QEMU
+        uses: bitaxeorg/esp32-qemu-test-action@main
+        with:
+          path: 'test-ci'
+
+      - name: Check for test failures
+        if: always()
+        run: |
+          FAILURES=$(grep -oP 'failures="\K[0-9]+' report.xml || echo 0)
+          if [ "$FAILURES" -gt 0 ]; then
+            echo "::error ::Detected $FAILURES firmware test failures."
+            exit 1
+          fi
+
+      - name: Build web dist
+        working-directory: ./main/http_server/axe-os
+        run: npm run build
+
+      - name: Reject dirty version string
+        run: |
+          set -euo pipefail
+          REV=$(cat main/http_server/axe-os/dist/axe-os/version.txt)
+          echo "sourceRevision=$REV"
+          case "$REV" in *-dirty*) echo "dirty version string rejected"; exit 1;; esac
+
+      - name: esp-idf build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32s3
+          command: GITHUB_ACTIONS="true" idf.py build
+          path: '.'
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      - run: pip install esptool
+
+      - name: Create merged/factory image
+        run: ./merge_bin.sh ./esp-miner-merged.bin
+
+      - name: Export board-601 release artifacts
+        run: |
+          python3 tools/release/export_release.py \
+            --repo-root . \
+            --merged-bin ./esp-miner-merged.bin \
+            --out ./release-export
+
+      - name: Validate release manifest
+        run: |
+          python3 tools/release/validate_manifest.py \
+            --manifest ./release-export/NeuralAxe-OS-v${{ inputs.expected_version }}-Gamma-601-manifest.json
+
+      - name: Upload release-export as workflow artifact (NOT a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeuralAxe-OS-v${{ inputs.expected_version }}-Gamma-601-release-export
+          path: ./release-export/
