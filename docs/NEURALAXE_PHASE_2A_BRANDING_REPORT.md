@@ -122,6 +122,34 @@ App partition headroom: **61% free**, unchanged (0x26e480 vs baseline 0x26e6d0).
 - **No frozen behavior changed**: BM1370 init/drivers, frequency, core voltage, power management, fan control (auto and manual), temperature targets/limits, thermal shutdown, self-test, Stratum V1/V2, pool logic, Wi-Fi, NVS keys/behavior, OTA logic/partition selection, partition table/flash layout, recovery, display hardware, mining calculations, share validation and error calculations are all byte-for-byte or line-for-line untouched (see change map — no file in those subsystems was edited; bootloader/partition/OTA/NVS artifacts are hash-identical to baseline).
 - **No git command** was run; branch verified by reading `.git` files only.
 
+## Addendum — Clean Committed Rebuild & Pilot-Readiness Validation (2026-07-16)
+
+The initial Phase 2A binaries were built from an uncommitted tree. After the owner committed the work, a correction pass and a full clean rebuild were performed.
+
+**Committed source state:** branch `neuralaxe-v0.1-branding` at **`eec4ead40bbb0a098a9b1be0ac30ae95491e5c19`** ("fix: align NeuralAxe metadata, title, and default theme"; parent `71ce8db` = the 19-file Phase 2A commit). **Clean version string: `v2.14.2-3-geec4ead` — no `-dirty`** (repository's own `git describe` via `generate-version.js`), attesting the tree was byte-identical to the commit at build time.
+
+**Corrected nine-field metadata matrix** (productName, productVersion, buildChannel, **vendor**, upstreamProject, upstreamVersion, targetBoard, targetDevice, targetAsic):
+
+| Layer | Fields present |
+|---|---|
+| Firmware `/api/system/info` (`system_api_json.c`) | **all 9** (vendor added in the correction commit) |
+| OpenAPI `SystemInfo` schema | **all 9**, optional, none in `required` |
+| Frontend dev mocks (`system.service.ts`) | **all 9** |
+| Frontend constant (`neuralaxe.ts`) | all 9 + `attribution` string |
+| Tests | `system.service.spec.ts` asserts all 9 API fields; `neuralaxe.spec.ts` asserts the constant |
+
+**Corrected file count:** the original Phase 2A commit changed **19 files total (13 modified + 6 created, including this report)**. The correction commit (`eec4ead`) touched 9 files: the four metadata-alignment files above, plus three found by the mandated visual smoke test — `app-routing.module.ts` (runtime `TITLE_PREFIX` still said "AxeOS"), `theme.service.ts` and `app.layout.service.ts` (runtime theme defaults still applied upstream red, overriding the SCSS accent) — plus the SCSS alignment (`_variables.scss` → `#4caf50`, the existing "Green" preset) and this report's corrections. Theme presets and users' saved `/api/theme` choices are untouched; only defaults changed.
+
+**Visual smoke test: PASS** at 1280×800 and 375×812 (evidence in the artifact `screenshots/` folder): title and SVG favicon, mark + wordmark + "0.1.0-dev · Development Build" badge, footer identity/attribution, System/About nine-field rows, update-page development warning, navigation/forms/controls all functional, zero console errors, no horizontal overflow, and the green accent now applied coherently (charts, menu, controls).
+
+**Clean rebuild results:** frontend **42/42 PASS** (JUnit 42/0/0; Karma's post-run ECONNRESET teardown crash flipped the process exit code after results were written — documented, results authoritative); firmware **61/61 PASS** in QEMU; firmware full build 0 errors, **235 warning lines — identical to the unmodified baseline count, zero from NeuralAxe files**; bundle-budget warning pre-existing (104.16 kB over).
+
+**Clean binaries** (full table in artifact `BASELINE_COMPARISON.txt`): `esp-miner.bin` 1,645,472 B (+624 vs baseline), SHA-256 `be65ae0555cc77226d5c7f4fd266ad055350e9b8eb1a871993593f6b58e30888`; `www.bin` 3,145,728 B, `e783e0c5fed0d9861303e35ace5a54b16bd3265e0f6e61a8ec51337334c794df`; `esp-miner-merged.bin` 15,802,368 B, `a425a23f1e761363d02f20ce251a7765cab2e535f6ca081a349528fff5f5ec92`; app partition headroom **61%** (0x26e460 free). `partition-table.bin`, `ota_data_initial.bin`, `config-601.cvs` byte-identical to baseline; `bootloader.bin` differs only in the upstream-embedded compile timestamp + image digest (38 bytes; source untouched). Secrets scan clean.
+
+**Artifacts:** clean build at `…\NeuralAxe Build Artifacts\v0.1.0-dev-board601` (with `CLEAN_BUILD_ATTESTATION.txt` and `PILOT_READINESS.txt`); the superseded dirty-tree build archived unmodified at `…\v0.1.0-dev-board601-dirty` (not approved).
+
+**Pilot-readiness verdict: READY FOR CONTROLLED PILOT FLASH** — owner-executed, tuned pilot Gamma only, hash-verified image, v2.14.2 baseline merged image retained as rollback, post-boot verification per `PILOT_READINESS.txt`. No flash was performed in this session; no hardware, miner IP, or flashdump was accessed.
+
 ## 11. Recommendation — Phase 2B Pilot-Flash Readiness
 
 Phase 2A is complete and green. Before a Phase 2B pilot flash of the tuned Gamma, recommend: (1) owner commits the branding changes in GitHub Desktop so the build is reproducible from a clean commit (current binaries were built from a `-dirty` tree — rebuild from the commit for release-grade provenance); (2) a human visual pass of the branded UI in a browser (`npm run start` dev server) — automated tests verify text identity, not aesthetics; (3) keep the v2.14.2 baseline merged image on hand as the tested rollback; (4) pilot-flash procedure, when authorized, should target the tuned Gamma only, never the stock reference device. From the firmware side there is no known blocker: images are upstream-format, layout-identical, and behavior-frozen.
