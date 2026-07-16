@@ -32,6 +32,7 @@ describe('SystemApiService', () => {
       expect(info.productName).toBe('NeuralAxe OS');
       expect(info.productVersion).toBe('0.1.0-dev');
       expect(info.buildChannel).toBe('development');
+      expect(info.vendor).toBe('NeuralShield');
       expect(info.upstreamProject).toBe('ESP-Miner / AxeOS');
       expect(info.upstreamVersion).toBe('v2.14.2');
       expect(info.targetBoard).toBe('601');

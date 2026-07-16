@@ -118,6 +118,7 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     cJSON_AddStringToObject(root, "productName", NEURALAXE_PRODUCT_NAME);
     cJSON_AddStringToObject(root, "productVersion", NEURALAXE_PRODUCT_VERSION);
     cJSON_AddStringToObject(root, "buildChannel", NEURALAXE_BUILD_CHANNEL);
+    cJSON_AddStringToObject(root, "vendor", NEURALAXE_VENDOR);
     cJSON_AddStringToObject(root, "upstreamProject", NEURALAXE_UPSTREAM_PROJECT);
     cJSON_AddStringToObject(root, "upstreamVersion", NEURALAXE_UPSTREAM_VERSION);
     cJSON_AddStringToObject(root, "targetBoard", NEURALAXE_TARGET_BOARD);

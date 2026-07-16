@@ -466,6 +466,9 @@ components:
         buildChannel:
           type: string
           description: NeuralAxe OS build channel (additive, read-only)
+        vendor:
+          type: string
+          description: NeuralAxe OS vendor/project (additive, read-only)
         upstreamProject:
           type: string
           description: Upstream open-source project this build is based on

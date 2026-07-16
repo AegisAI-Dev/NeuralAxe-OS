@@ -25,11 +25,13 @@ NeuralAxe OS identity is visible and coherent across the web UI, firmware log, a
 | Target | Bitaxe **Gamma**, board **601**, **BM1370**, ESP32-S3 N16R8 |
 | Product | **NeuralAxe OS 0.1.0-dev**, development channel, NeuralShield |
 
-**Scope (exact):** user-facing identity (title, topbar, footer, About rows, update-page copy, favicon/mark, README), one theme accent variable, additive read-only build metadata (frontend const, firmware header, 8 optional system-info JSON fields + OpenAPI schema + dev mocks), startup-log identity lines, and tests for all of the above. Nothing else.
+**Scope (exact):** user-facing identity (title, topbar, footer, About rows, update-page copy, favicon/mark, README), one theme accent variable, additive read-only build metadata (frontend const, firmware header, **9** optional system-info JSON fields + OpenAPI schema + dev mocks), startup-log identity lines, and tests for all of the above. Nothing else.
 
 ---
 
 ## 3. Change Map / Exact Files Changed
+
+**19 files total: 13 modified + 6 created (including this report).**
 
 **Modified (13):**
 
@@ -42,10 +44,10 @@ NeuralAxe OS identity is visible and coherent across the web UI, firmware log, a
 | `axe-os/.../system.component.ts` | 4 additive About rows (Product, Build Channel, Based On, NeuralAxe Target) | additive rows only |
 | `axe-os/.../update.component.html` | Informational dev-build/upstream note | copy only; update behavior untouched |
 | `axe-os/.../themes/vela/bitaxe/_variables.scss` | `$primaryColor` `#f80421` → `#16c784` (green accent; base was already dark navy `#070D17`) | cosmetic accent |
-| `axe-os/src/app/services/system.service.ts` | Dev-mock parity for 8 additive fields | dev mocks only |
+| `axe-os/src/app/services/system.service.ts` | Dev-mock parity for 9 additive fields | dev mocks only |
 | `axe-os/src/app/services/system.service.spec.ts` | +2 specs: system-info regression, additive metadata | test only |
-| `main/http_server/openapi.yaml` | 8 additive **optional** SystemInfo properties (none added to `required`) | schema doc |
-| `main/http_server/system_api_json.c` | 8 additive `cJSON_AddStringToObject` fields in `/api/system/info` | additive JSON |
+| `main/http_server/openapi.yaml` | 9 additive **optional** SystemInfo properties (none added to `required`) | schema doc |
+| `main/http_server/system_api_json.c` | 9 additive `cJSON_AddStringToObject` fields in `/api/system/info` | additive JSON |
 | `main/main.c` | 2 identity `ESP_LOGI` lines added **after** the retained upstream banner | log text |
 | `readme.md` | NeuralAxe intro + attribution + dev-build pointer; full upstream README retained below | docs |
 
@@ -70,11 +72,11 @@ NeuralAxe OS identity is visible and coherent across the web UI, firmware log, a
 
 `main/neuralaxe_identity.h` defines: productName "NeuralAxe OS", productVersion "0.1.0-dev", buildChannel "development", vendor "NeuralShield", upstreamProject "ESP-Miner / AxeOS", upstreamVersion "v2.14.2", targetBoard "601", targetDevice "Gamma", targetAsic "BM1370". All values are compile-time string literals — deterministic, no timestamps (the baseline embeds none either).
 
-`GET /api/system/info` now additionally returns these 8 fields (vendor appears in UI only). `version`, `axeOSVersion`, `idfVersion`, `boardVersion` are emitted by the same unchanged code lines as before. The `/api/ws/live` partial stream and every other route are untouched.
+`GET /api/system/info` now additionally returns all **nine** identity fields (productName, productVersion, buildChannel, vendor, upstreamProject, upstreamVersion, targetBoard, targetDevice, targetAsic). `version`, `axeOSVersion`, `idfVersion`, `boardVersion` are emitted by the same unchanged code lines as before. The `/api/ws/live` partial stream and every other route are untouched.
 
 ## 6. API Compatibility Analysis
 
-- All 8 new SystemInfo properties are **optional** (not added to the OpenAPI `required` list) and **read-only** (GET response only; no new endpoints, no mutation paths, no auth, no telemetry).
+- All 9 new SystemInfo properties are **optional** (not added to the OpenAPI `required` list) and **read-only** (GET response only; no new endpoints, no mutation paths, no auth, no telemetry).
 - No existing field, route, NVS key, config field or OTA version field was renamed, removed or retyped.
 - Clients that ignore unknown JSON fields (all existing clients) are unaffected; the regenerated TypeScript client compiles with the fields as optional strings.
 - `targetBoard/targetDevice/targetAsic` are **declared build targets**, distinct from the runtime-detected `boardVersion`/`ASICModel` fields, and documented as such in the schema.

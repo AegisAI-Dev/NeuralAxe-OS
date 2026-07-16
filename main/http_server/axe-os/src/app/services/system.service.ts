@@ -127,6 +127,7 @@ export class SystemApiService {
         productName: "NeuralAxe OS",
         productVersion: "0.1.0-dev",
         buildChannel: "development",
+        vendor: "NeuralShield",
         upstreamProject: "ESP-Miner / AxeOS",
         upstreamVersion: "v2.14.2",
         targetBoard: "601",

@@ -1,5 +1,5 @@
-/* NeuralAxe OS accent: clean green (upstream Bitaxe red was #f80421) */
-$primaryColor: #16c784 !default;
+/* NeuralAxe OS accent: clean green, matching the "Green" runtime theme preset (upstream Bitaxe red was #f80421) */
+$primaryColor: #4caf50 !default;
 $primaryLightColor: scale-color($primaryColor, $lightness: 30%) !default;
 $primaryDarkColor: scale-color($primaryColor, $lightness: -10%) !default;
 $primaryDarkerColor: scale-color($primaryColor, $lightness: -20%) !default;
