@@ -82,6 +82,39 @@ def cross_check_frontend(repo_root: Path, identity: dict) -> None:
             fail(f"identity divergence for '{key}': firmware header='{value}' frontend='{m.group(1)}'")
 
 
+APP_DESC_MAGIC = b"\x32\x54\xcd\xab"  # esp_app_desc_t magic_word 0xABCD5432 (LE)
+
+
+def read_app_desc_version(bin_path: Path) -> str:
+    """Read the version string embedded in an ESP-IDF application binary.
+
+    Layout: esp_image_header_t (24B) + esp_image_segment_header_t (8B) put
+    esp_app_desc_t at file offset 0x20; its version[32] field sits at +0x10,
+    i.e. file offset 0x30. This is the string a live device reports, so it is
+    the authoritative build identity of esp-miner.bin — NOT version.txt.
+    """
+    with bin_path.open("rb") as f:
+        header = f.read(0x60)
+    if len(header) < 0x60 or header[0x20:0x24] != APP_DESC_MAGIC:
+        fail(f"{bin_path.name}: esp_app_desc_t magic not found — not an ESP-IDF app image?")
+    return header[0x30:0x50].split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+
+
+def check_app_binary(bin_path: Path, expected_revision: str | None = None) -> str:
+    version = read_app_desc_version(bin_path)
+    print(f"app_desc version of {bin_path.name}: {version}")
+    if "-dirty" in version:
+        fail(
+            f"{bin_path.name} embeds a dirty build identity ('{version}'). "
+            "Rebuild from a clean committed tree (in the Linux build container set "
+            "'git config --global core.autocrlf true' and 'core.filemode false' so a "
+            "CRLF Windows checkout is not misread as modified)."
+        )
+    if expected_revision and version != expected_revision:
+        fail(f"{bin_path.name} app_desc version '{version}' does not match frontend sourceRevision '{expected_revision}'")
+    return version
+
+
 def read_source_revision(repo_root: Path) -> str:
     version_txt = repo_root / "main" / "http_server" / "axe-os" / "dist" / "axe-os" / "version.txt"
     if not version_txt.is_file():
@@ -97,9 +130,18 @@ def read_source_revision(repo_root: Path) -> str:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo-root", default=".", help="repository root")
-    parser.add_argument("--merged-bin", required=True, help="path to the merged/factory image")
-    parser.add_argument("--out", required=True, help="output directory for release files")
+    parser.add_argument("--merged-bin", help="path to the merged/factory image")
+    parser.add_argument("--out", help="output directory for release files")
+    parser.add_argument("--check-bin", help="standalone mode: verify the app_desc identity of one ESP-IDF app binary and exit")
     args = parser.parse_args()
+
+    if args.check_bin:
+        check_app_binary(Path(args.check_bin).resolve())
+        print("APP DESC OK")
+        return
+
+    if not args.merged_bin or not args.out:
+        parser.error("--merged-bin and --out are required unless --check-bin is used")
 
     repo_root = Path(args.repo_root).resolve()
     merged_bin = Path(args.merged_bin).resolve()
@@ -131,6 +173,10 @@ def main() -> None:
             fail(f"zero-size input for '{label}': {path}")
         if FORBIDDEN_NAME_PATTERNS.search(path.name):
             fail(f"input looks like a private dump and must not be exported: {path.name}")
+
+    # The device-reported firmware identity must be clean and match the
+    # frontend revision (both derive from git describe of the same tree).
+    check_app_binary(sources["ota"], expected_revision=source_revision)
 
     out_dir.mkdir(parents=True, exist_ok=True)
 

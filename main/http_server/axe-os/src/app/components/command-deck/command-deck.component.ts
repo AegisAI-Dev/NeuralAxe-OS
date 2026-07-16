@@ -7,6 +7,7 @@ import { LiveDataService } from 'src/app/services/live-data.service';
 import { SystemApiService } from 'src/app/services/system.service';
 import { NEURALAXE } from 'src/app/neuralaxe';
 import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
+import { DeckFmt, fmtLatency } from './deck-format';
 
 /** One derived, read-only operational insight (frontend-only view model). */
 export interface DeckInsight {
@@ -25,6 +26,7 @@ const SPARK_SERIES_LENGTH = 24;
 })
 export class CommandDeckComponent implements OnInit, OnDestroy {
   public readonly neuralaxe = NEURALAXE;
+  public readonly fmt = DeckFmt;
   public info$: Observable<ISystemInfo>;
   public connected$: Observable<boolean>;
 
@@ -153,7 +155,7 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
       } else if (eff <= 34) {
         insights.push({ icon: 'pi-bolt', severity: 'info', label: 'Good efficiency', detail: `${eff.toFixed(1)} J/TH` });
       } else {
-        insights.push({ icon: 'pi-bolt', severity: 'warn', label: 'Efficiency below par', detail: `${eff.toFixed(1)} J/TH — check cooling/tuning` });
+        insights.push({ icon: 'pi-bolt', severity: 'warn', label: 'Efficiency below par', detail: `${eff.toFixed(1)} J/TH is above the expected range` });
       }
     }
 
@@ -162,7 +164,7 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
     } else if ((info.responseTime ?? 0) <= 150) {
       insights.push({ icon: 'pi-shield', severity: 'ok', label: 'Pool healthy', detail: 'Low latency, high stability' });
     } else {
-      insights.push({ icon: 'pi-shield', severity: 'info', label: 'Pool latency elevated', detail: `${info.responseTime} ms response time` });
+      insights.push({ icon: 'pi-shield', severity: 'info', label: 'Pool latency elevated', detail: `${fmtLatency(info.responseTime)} response time` });
     }
 
     const spread = this.domainSpread(info);
@@ -179,9 +181,12 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
 
   // ---------- formatting helpers ----------
 
-  /** Big hero number, unit-scaled (input is GH/s). */
+  /** Big hero number, unit-scaled (input is GH/s); em dash on invalid data. */
   public heroValue(info: ISystemInfo): string {
-    const gh = info.hashRate ?? 0;
+    const gh = info.hashRate;
+    if (gh === null || gh === undefined || typeof gh !== 'number' || !isFinite(gh)) {
+      return DeckFmt.INVALID;
+    }
     if (gh >= 1000) {
       return (gh / 1000).toFixed(2);
     }
@@ -189,7 +194,16 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
   }
 
   public heroUnit(info: ISystemInfo): string {
-    return (info.hashRate ?? 0) >= 1000 ? 'TH/s' : 'GH/s';
+    const gh = info.hashRate;
+    if (gh === null || gh === undefined || typeof gh !== 'number' || !isFinite(gh)) {
+      return '';
+    }
+    return gh >= 1000 ? 'TH/s' : 'GH/s';
+  }
+
+  /** Millivolt fields scaled to volts, or null when the reading is invalid. */
+  public volts(mv: number | undefined): number | null {
+    return (typeof mv === 'number' && isFinite(mv)) ? mv / 1000 : null;
   }
 
   public uptime(info: ISystemInfo): string {

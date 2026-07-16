@@ -17,7 +17,8 @@ Two version identities exist and must never be merged or falsified:
 
 Rules:
 - Upstream fields `version`, `axeOSVersion`, `firmwareVersion` keep their upstream semantics; NeuralAxe identity is additive only (nine read-only fields + `vendor` in `/api/system/info`).
-- A release build **must not** contain `-dirty` in its source revision; `tools/release/export_release.py` refuses to export one.
+- A release build **must not** contain `-dirty` in its source revision; `tools/release/export_release.py` refuses to export one — it now checks **both** the frontend `version.txt` **and** the `esp_app_desc_t` version embedded in `esp-miner.bin` (the string a live device reports), and fails on mismatch or `-dirty` (`--check-bin` runs the binary check standalone).
+- **Windows/container build requirement (Phase 2D.1 root cause):** ESP-IDF derives the firmware version with `git describe --dirty` *inside the Linux build container*. A Windows checkout (CRLF, `core.autocrlf=true`) is misread there as "every file modified", yielding a false `-dirty` even on a clean commit. Local container builds MUST set `git config --global core.autocrlf true` and `git config --global core.filemode false` (alongside `safe.directory`) before `idf.py build`. This only normalizes line-ending/mode comparison — genuinely modified files still produce an honest `-dirty`. Linux CI checkouts are LF-native and unaffected.
 - No wall-clock build timestamps are embedded in the application. (The ESP-IDF second-stage bootloader embeds its own `__DATE__/__TIME__`; that is upstream baseline behavior and is documented, not extended.)
 
 ## 2. Update-channel policy

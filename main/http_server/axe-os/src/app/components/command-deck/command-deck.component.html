@@ -30,15 +30,15 @@
                 </div>
                 <div class="nx-stat">
                     <label>Efficiency</label>
-                    <span>{{ efficiency(info) !== null ? (efficiency(info) | number: '1.1-1') + ' J/TH' : '—' }}</span>
+                    <span>{{ fmt.num(efficiency(info), 1, ' J/TH') }}</span>
                 </div>
                 <div class="nx-stat">
                     <label>Power</label>
-                    <span>{{ (info.power ?? 0) | number: '1.1-1' }} W</span>
+                    <span>{{ fmt.num(info.power, 1, ' W') }}</span>
                 </div>
                 <div class="nx-stat">
                     <label>ASIC Errors</label>
-                    <span [class.nx-warn-text]="(info.errorPercentage ?? 0) > 2">{{ (info.errorPercentage ?? 0) | number: '1.2-2' }} %</span>
+                    <span [class.nx-warn-text]="(info.errorPercentage ?? 0) > 2">{{ fmt.pct(info.errorPercentage, 2) }}</span>
                 </div>
             </div>
         </section>
@@ -56,7 +56,7 @@
                                 [style.stroke-dashoffset]="gaugeOffset(info.temp ?? 0, 75)" />
                         </svg>
                         <div class="nx-gauge-read">
-                            <b>{{ info.temp ?? 0 | number: '1.0-0' }}°C</b>
+                            <b>{{ fmt.temp(info.temp) }}</b>
                             <small>ASIC Temp</small>
                         </div>
                     </div>
@@ -68,7 +68,7 @@
                                 [style.stroke-dashoffset]="gaugeOffset(info.vrTemp ?? 0, 105)" />
                         </svg>
                         <div class="nx-gauge-read">
-                            <b>{{ info.vrTemp ?? 0 | number: '1.0-0' }}°C</b>
+                            <b>{{ fmt.temp(info.vrTemp) }}</b>
                             <small>VRM Temp</small>
                         </div>
                     </div>
@@ -79,32 +79,33 @@
                                 d="M 20.3 79.7 A 42 42 0 1 1 79.7 79.7"
                                 [style.stroke-dashoffset]="gaugeOffset(info.fanspeed ?? 0, 100)" />
                         </svg>
-                        <div class="nx-gauge-read">
-                            <b>{{ info.fanrpm ?? 0 | number: '1.0-0' }}</b>
-                            <small>RPM · {{ info.fanspeed ?? 0 }}%</small>
+                        <div class="nx-gauge-read nx-gauge-read-fan">
+                            <b>{{ fmt.int(info.fanrpm) }}</b>
+                            <small>RPM</small>
+                            <small class="nx-gauge-sub">Fan {{ fmt.int(info.fanspeed) }}%</small>
                         </div>
                     </div>
                 </div>
                 <div class="nx-bars">
                     <div class="nx-bar-row">
                         <label>Input Voltage</label>
-                        <div class="nx-bar"><span [style.width.%]="((info.voltage ?? 0) / 1000) / 5.5 * 100"></span></div>
-                        <b>{{ (info.voltage ?? 0) / 1000 | number: '1.1-1' }} V</b>
+                        <div class="nx-bar"><span [style.width.%]="(volts(info.voltage) ?? 0) / 5.5 * 100"></span></div>
+                        <b>{{ fmt.num(volts(info.voltage), 1, ' V') }}</b>
                     </div>
                     <div class="nx-bar-row">
                         <label>ASIC Voltage</label>
-                        <div class="nx-bar"><span [style.width.%]="((info.coreVoltageActual ?? 0) / 1000) / 1.4 * 100"></span></div>
-                        <b>{{ (info.coreVoltageActual ?? 0) / 1000 | number: '1.2-2' }} V</b>
+                        <div class="nx-bar"><span [style.width.%]="(volts(info.coreVoltageActual) ?? 0) / 1.4 * 100"></span></div>
+                        <b>{{ fmt.num(volts(info.coreVoltageActual), 2, ' V') }}</b>
                     </div>
                     <div class="nx-bar-row">
                         <label>Frequency</label>
                         <div class="nx-bar"><span class="nx-bar-cyan" [style.width.%]="(info.frequency ?? 0) / 800 * 100"></span></div>
-                        <b>{{ info.frequency ?? 0 }} MHz</b>
+                        <b>{{ fmt.int(info.frequency, ' MHz') }}</b>
                     </div>
                     <div class="nx-bar-row">
                         <label>Target Temp</label>
                         <div class="nx-bar"><span class="nx-bar-cyan" [style.width.%]="(info.temptarget ?? 0) / 75 * 100"></span></div>
-                        <b>{{ info.temptarget ?? 0 }}°C</b>
+                        <b>{{ fmt.temp(info.temptarget) }}</b>
                     </div>
                 </div>
             </section>
@@ -115,26 +116,26 @@
                 <div class="nx-statrow nx-statrow-tight">
                     <div class="nx-stat">
                         <label>Accepted</label>
-                        <span class="nx-ok-text">{{ info.sharesAccepted ?? 0 | number }}</span>
+                        <span class="nx-ok-text">{{ fmt.int(info.sharesAccepted) }}</span>
                     </div>
                     <div class="nx-stat">
                         <label>Rejected</label>
-                        <span [class.nx-warn-text]="(info.sharesRejected ?? 0) > 0">{{ info.sharesRejected ?? 0 | number }}</span>
+                        <span [class.nx-warn-text]="(info.sharesRejected ?? 0) > 0">{{ fmt.int(info.sharesRejected) }}</span>
                     </div>
                     <div class="nx-stat">
                         <label>Pool Latency</label>
-                        <span>{{ info.responseTime ?? 0 }} ms</span>
+                        <span>{{ fmt.latency(info.responseTime) }}</span>
                     </div>
                     <div class="nx-stat">
                         <label>Stability</label>
-                        <span>{{ stability(info) !== null ? (stability(info) | number: '1.2-2') + ' %' : '—' }}</span>
+                        <span>{{ fmt.pct(stability(info), 2) }}</span>
                     </div>
                 </div>
                 <div class="nx-subtitle">Domain Performance (GH/s)</div>
                 <div class="nx-domains">
                     <div class="nx-domain" *ngFor="let d of info.hashrateMonitor?.asics?.[0]?.domains ?? []; let i = index; trackBy: trackByIndex">
                         <label>Domain {{ i + 1 }}</label>
-                        <b>{{ d | number: '1.0-0' }}</b>
+                        <b>{{ fmt.num(d, 0) }}</b>
                         <svg viewBox="0 0 72 20" preserveAspectRatio="none">
                             <polyline [attr.points]="sparkPoints(domainSeries[i] ?? [d])" />
                         </svg>
@@ -150,7 +151,7 @@
                 <div class="nx-pool-cell nx-pool-main">
                     <label>Active Pool</label>
                     <div class="nx-pool-url">
-                        <span>{{ info.isUsingFallbackStratum ? info.fallbackStratumURL : info.stratumURL }}:<em>{{ info.isUsingFallbackStratum ? info.fallbackStratumPort : info.stratumPort }}</em></span>
+                        <span class="nx-ellipsis" [title]="(info.isUsingFallbackStratum ? info.fallbackStratumURL : info.stratumURL) + ':' + (info.isUsingFallbackStratum ? info.fallbackStratumPort : info.stratumPort)">{{ info.isUsingFallbackStratum ? info.fallbackStratumURL : info.stratumURL }}:<em>{{ info.isUsingFallbackStratum ? info.fallbackStratumPort : info.stratumPort }}</em></span>
                         <span class="nx-pill" [ngClass]="info.isUsingFallbackStratum ? 'nx-pill-warn' : 'nx-pill-ok'">
                             {{ info.isUsingFallbackStratum ? 'Fallback' : 'Healthy' }}
                         </span>
@@ -160,7 +161,7 @@
                 </div>
                 <div class="nx-pool-cell">
                     <label>Block Height</label>
-                    <b>{{ info.blockHeight ? (info.blockHeight | number) : '—' }}</b>
+                    <b>{{ info.blockHeight ? fmt.int(info.blockHeight) : '—' }}</b>
                     <label class="mt-2">Best Difficulty</label>
                     <b>{{ (info.bestSessionDiff ?? 0) | diffSuffix }}</b>
                 </div>
@@ -210,7 +211,7 @@
             <div class="nx-block-copy">
                 <div class="nx-panel-title">Block Signal</div>
                 <div class="nx-block-headline">You found {{ info.blockFound === 1 ? 'a block' : info.blockFound + ' blocks' }}</div>
-                <div class="nx-block-height" *ngIf="info.blockHeight">#{{ info.blockHeight | number }}</div>
+                <div class="nx-block-height" *ngIf="info.blockHeight">#{{ fmt.int(info.blockHeight) }}</div>
                 <button type="button" class="p-link nx-block-dismiss" (click)="dismissBlockFound()">Acknowledge</button>
             </div>
         </section>
@@ -236,10 +237,10 @@
                 <div class="nx-status-row">
                     <i class="pi pi-database"></i>
                     <div class="nx-status-main">
-                        <label>Free Heap</label>
+                        <label>Free Memory (Heap)</label>
                         <div class="nx-bar"><span [style.width.%]="heapPercent(info)"></span></div>
                     </div>
-                    <b>{{ (info.freeHeap ?? 0) / 1024 | number: '1.0-0' }} KB</b>
+                    <b>{{ fmt.bytes(info.freeHeap) }}</b>
                 </div>
                 <div class="nx-status-row">
                     <i class="pi pi-wifi"></i>
@@ -249,21 +250,21 @@
                             <span *ngFor="let b of [1,2,3,4]" [class.on]="wifiBars(info.wifiRSSI) >= b"></span>
                         </div>
                     </div>
-                    <b>{{ info.wifiRSSI }} dBm</b>
+                    <b>{{ fmt.int(info.wifiRSSI, ' dBm') }}</b>
                 </div>
                 <div class="nx-status-row">
                     <i class="pi pi-gauge"></i>
                     <div class="nx-status-main">
-                        <label>System Load</label>
+                        <label>System Load (CPU)</label>
                         <div class="nx-bar"><span class="nx-bar-cyan" [style.width.%]="info.cpuUsage ?? 0"></span></div>
                     </div>
-                    <b>{{ (info.cpuUsage ?? 0) | number: '1.0-0' }} %</b>
+                    <b>{{ fmt.pct(info.cpuUsage, 0) }}</b>
                 </div>
                 <div class="nx-status-row">
                     <i class="pi pi-microchip"></i>
                     <div class="nx-status-main">
                         <label>Firmware</label>
-                        <small class="nx-dim">{{ info.version }}</small>
+                        <small class="nx-dim">{{ info.version || '—' }}</small>
                     </div>
                     <b>{{ info.productVersion || neuralaxe.productVersion }}</b>
                 </div>
