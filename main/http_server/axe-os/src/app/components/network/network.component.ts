@@ -1,6 +1,7 @@
 import { Component, ViewChild, AfterViewInit } from '@angular/core';
 import { FormGroup } from '@angular/forms';
-import { Observable } from 'rxjs';
+import { Observable, asyncScheduler } from 'rxjs';
+import { observeOn } from 'rxjs/operators';
 import { NetworkEditComponent } from '../network-edit/network.edit.component';
 
 @Component({
@@ -16,6 +17,9 @@ export class NetworkComponent implements AfterViewInit {
   constructor() {}
 
   ngAfterViewInit() {
-    this.form$ = this.networkEditComponent.form$;
+    // observeOn(asyncScheduler): form$ is only available after view init, so
+    // emissions are deferred one tick to avoid NG0100 (value changing within
+    // the same change-detection cycle). Display timing only.
+    this.form$ = this.networkEditComponent.form$.pipe(observeOn(asyncScheduler));
   }
 }

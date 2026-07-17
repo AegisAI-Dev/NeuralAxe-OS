@@ -1,6 +1,7 @@
 import { Component, ViewChild, AfterViewInit } from '@angular/core';
 import { FormGroup } from '@angular/forms';
-import { Observable } from 'rxjs';
+import { Observable, asyncScheduler } from 'rxjs';
+import { observeOn } from 'rxjs/operators';
 import { EditComponent } from '../edit/edit.component';
 
 @Component({
@@ -15,6 +16,9 @@ export class SettingsComponent implements AfterViewInit {
   constructor() {}
 
   ngAfterViewInit() {
-    this.form$ = this.editComponent.form$;
+    // observeOn(asyncScheduler): form$ is only available after view init, so
+    // emissions are deferred one tick to avoid NG0100 (value changing within
+    // the same change-detection cycle). Display timing only.
+    this.form$ = this.editComponent.form$.pipe(observeOn(asyncScheduler));
   }
 }
