@@ -1,5 +1,5 @@
 import { Component, ViewChild } from '@angular/core';
-import { Observable, map, catchError, of } from 'rxjs';
+import { Observable, combineLatest, map, catchError, of } from 'rxjs';
 import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
 import { ToastrService } from 'ngx-toastr';
 import { FileUploadHandlerEvent, FileUpload } from 'primeng/fileupload';
@@ -8,6 +8,8 @@ import { LoadingService } from 'src/app/services/loading.service';
 import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { LocalStorageService } from 'src/app/local-storage.service';
+import { WebVersionService } from 'src/app/services/web-version.service';
+import { VersionState, deriveVersionState } from 'src/app/services/version-state';
 import { ModalComponent } from '../modal/modal.component';
 import { SystemInfo } from 'src/app/generated/models';
 import { NEURALAXE } from 'src/app/neuralaxe';
@@ -52,6 +54,14 @@ export class UpdateComponent {
 
   public info$: Observable<SystemInfo>;
 
+  /**
+   * Version-pair state for the "This Device" card. The installed web revision
+   * is read live from /version.txt (WebVersionService); the firmware's
+   * boot-time snapshot is shown separately when stale, and equality between
+   * firmware and web is never faked (services/version-state.ts).
+   */
+  public versionState$: Observable<VersionState>;
+
   public readonly neuralaxe = NEURALAXE;
 
   @ViewChild('firmwareUpload') firmwareUpload!: FileUpload;
@@ -71,6 +81,7 @@ export class UpdateComponent {
     private loadingService: LoadingService,
     private githubUpdateService: GithubUpdateService,
     private localStorageService: LocalStorageService,
+    private webVersionService: WebVersionService,
   ) {
     // Cold observable: no request is made until the user explicitly triggers the
     // release check (checkLatestRelease gates the subscribing template branch).
@@ -83,6 +94,10 @@ export class UpdateComponent {
     );
 
     this.info$ = this.liveDataService.info$;
+
+    this.versionState$ = combineLatest([this.info$, this.webVersionService.installedWebVersion$]).pipe(
+      map(([info, liveWeb]) => deriveVersionState(info.version, info.axeOSVersion, liveWeb))
+    );
   }
 
   /**

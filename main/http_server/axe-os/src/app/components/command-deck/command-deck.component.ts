@@ -1,13 +1,31 @@
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { HttpErrorResponse } from '@angular/common/http';
-import { Observable, Subject, map, takeUntil } from 'rxjs';
+import { Observable, Subject, shareReplay, takeUntil } from 'rxjs';
 import { ToastrService } from 'ngx-toastr';
-import { SystemInfo as ISystemInfo, GenericResponse } from 'src/app/generated/models';
+import { SystemInfo as ISystemInfo, SystemAsic as ISystemASIC, GenericResponse } from 'src/app/generated/models';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { SystemApiService } from 'src/app/services/system.service';
+import { WebVersionService } from 'src/app/services/web-version.service';
+import { VersionState, deriveVersionState } from 'src/app/services/version-state';
 import { NEURALAXE } from 'src/app/neuralaxe';
 import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
 import { DeckFmt, fmtLatency } from './deck-format';
+import {
+  SoloOdds,
+  ThermalHeadroom,
+  bestDiffPctOfNetwork,
+  compactNumber,
+  currentVsAveragePct,
+  currentVsExpectedPct,
+  formatExpectedTime,
+  formatPctCompact,
+  formatProbabilityPct,
+  recentVariabilityPct,
+  rejectRatePct,
+  sharesPerHour,
+  soloOdds,
+  thermalHeadroom,
+} from './deck-intel';
 
 /** One derived, read-only operational insight (frontend-only view model). */
 export interface DeckInsight {
@@ -20,6 +38,21 @@ export interface DeckInsight {
 const HERO_SERIES_LENGTH = 48;
 const SPARK_SERIES_LENGTH = 24;
 
+export type DeckRange = 'live' | '5m' | '15m' | '1h' | 'all';
+export type DeckOverlay = 'none' | 'asicTemp' | 'power' | 'errorPercentage';
+
+const RANGE_MS: { [key in Exclude<DeckRange, 'live' | 'all'>]: number } = {
+  '5m': 5 * 60 * 1000,
+  '15m': 15 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+};
+
+const OVERLAY_META: { [key in Exclude<DeckOverlay, 'none'>]: { label: string; color: string } } = {
+  asicTemp: { label: 'ASIC Temp (°C)', color: '#e6b23c' },
+  power: { label: 'Power (W)', color: '#35c3e6' },
+  errorPercentage: { label: 'ASIC Errors (%)', color: '#ef5350' },
+};
+
 @Component({
   selector: 'app-command-deck',
   templateUrl: './command-deck.component.html',
@@ -27,12 +60,48 @@ const SPARK_SERIES_LENGTH = 24;
 export class CommandDeckComponent implements OnInit, OnDestroy {
   public readonly neuralaxe = NEURALAXE;
   public readonly fmt = DeckFmt;
+  public readonly formatExpectedTime = formatExpectedTime;
+  public readonly formatProbabilityPct = formatProbabilityPct;
+  public readonly formatPctCompact = formatPctCompact;
+  public readonly compactNumber = compactNumber;
   public info$: Observable<ISystemInfo>;
   public connected$: Observable<boolean>;
+  public asic$: Observable<ISystemASIC>;
 
   public heroSeries: number[] = [];
+  public tempSeries: number[] = [];
+  public powerSeries: number[] = [];
+  public errorSeries: number[] = [];
   public domainSeries: number[][] = [];
   public insights: DeckInsight[] = [];
+
+  /** Live /version.txt revision; null when unavailable (never substituted). */
+  public installedWebVersion: string | null = null;
+  public versionState: VersionState | null = null;
+
+  /** Advanced telemetry drawer (secondary expert info), collapsed by default. */
+  public drawerOpen = false;
+
+  // ---- hero chart state (Stage 5) ----
+  public selectedRange: DeckRange = 'live';
+  public selectedOverlay: DeckOverlay = 'none';
+  public readonly ranges: { id: DeckRange; label: string }[] = [
+    { id: 'live', label: 'Live' },
+    { id: '5m', label: '5 min' },
+    { id: '15m', label: '15 min' },
+    { id: '1h', label: '1 h' },
+    { id: 'all', label: 'All' },
+  ];
+  public readonly overlays: { id: DeckOverlay; label: string }[] = [
+    { id: 'none', label: 'Hashrate only' },
+    { id: 'asicTemp', label: '+ ASIC Temp' },
+    { id: 'power', label: '+ Power' },
+    { id: 'errorPercentage', label: '+ ASIC Errors' },
+  ];
+  /** User-facing note when history cannot be shown (warm-up, logging off …). */
+  public historyNote: string | null = null;
+  private historyPoints: { t: number; hashrate: number; overlay: number | null }[] = [];
+  private lastInfo: ISystemInfo | null = null;
 
   public chartData: any;
   public chartOptions: any;
@@ -42,16 +111,32 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
   constructor(
     private liveDataService: LiveDataService,
     private systemService: SystemApiService,
+    private webVersionService: WebVersionService,
     private toastr: ToastrService,
   ) {
     this.info$ = this.liveDataService.info$;
     this.connected$ = this.liveDataService.connected$;
+    this.asic$ = this.systemService.getAsicSettings().pipe(
+      shareReplay({ refCount: true, bufferSize: 1 })
+    );
   }
 
   ngOnInit(): void {
     this.initChart();
+    this.webVersionService.installedWebVersion$
+      .pipe(takeUntil(this.destroy$))
+      .subscribe(v => {
+        this.installedWebVersion = v;
+        if (this.lastInfo) {
+          this.versionState = deriveVersionState(this.lastInfo.version, this.lastInfo.axeOSVersion, v);
+        }
+      });
     this.info$.pipe(takeUntil(this.destroy$)).subscribe(info => {
+      this.lastInfo = info;
       this.pushSample(this.heroSeries, info.hashRate ?? 0, HERO_SERIES_LENGTH);
+      this.pushSample(this.tempSeries, info.temp ?? 0, HERO_SERIES_LENGTH);
+      this.pushSample(this.powerSeries, info.power ?? 0, HERO_SERIES_LENGTH);
+      this.pushSample(this.errorSeries, info.errorPercentage ?? 0, HERO_SERIES_LENGTH);
       const domains = info.hashrateMonitor?.asics?.[0]?.domains ?? [];
       domains.forEach((value, i) => {
         if (!this.domainSeries[i]) {
@@ -59,8 +144,11 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
         }
         this.pushSample(this.domainSeries[i], value ?? 0, SPARK_SERIES_LENGTH);
       });
+      this.versionState = deriveVersionState(info.version, info.axeOSVersion, this.installedWebVersion);
       this.insights = this.deriveInsights(info);
-      this.updateChart();
+      if (this.selectedRange === 'live') {
+        this.updateChart();
+      }
     });
   }
 
@@ -95,19 +183,171 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
       },
       elements: { line: { borderWidth: 1.5 }, point: { radius: 0 } },
     };
-    this.chartData = { labels: [], datasets: [] };
+    this.updateChart();
+  }
+
+  /** Range selection; anything but Live loads a history snapshot. */
+  public setRange(range: DeckRange): void {
+    if (this.selectedRange === range) {
+      return;
+    }
+    this.selectedRange = range;
+    if (range === 'live') {
+      this.historyNote = null;
+      this.updateChart();
+    } else {
+      this.loadHistory();
+    }
+  }
+
+  public setOverlay(overlay: DeckOverlay): void {
+    if (this.selectedOverlay === overlay) {
+      return;
+    }
+    this.selectedOverlay = overlay;
+    if (this.selectedRange === 'live') {
+      this.updateChart();
+    } else {
+      this.loadHistory();
+    }
+  }
+
+  private overlayLiveSeries(): number[] | null {
+    switch (this.selectedOverlay) {
+      case 'asicTemp': return this.tempSeries;
+      case 'power': return this.powerSeries;
+      case 'errorPercentage': return this.errorSeries;
+      default: return null;
+    }
+  }
+
+  private applyOverlayAxis(hasOverlay: boolean): void {
+    const scales: any = {
+      x: { display: false },
+      y: {
+        position: 'right',
+        grid: { color: 'rgba(56, 214, 154, 0.08)' },
+        border: { display: false },
+        ticks: { color: '#5e7f93', font: { size: 10 }, maxTicksLimit: 4 },
+      },
+    };
+    if (hasOverlay) {
+      const meta = OVERLAY_META[this.selectedOverlay as Exclude<DeckOverlay, 'none'>];
+      scales.y1 = {
+        position: 'left',
+        grid: { drawOnChartArea: false },
+        border: { display: false },
+        ticks: { color: meta.color, font: { size: 10 }, maxTicksLimit: 4 },
+      };
+    }
+    this.chartOptions = { ...this.chartOptions, scales };
   }
 
   private updateChart(): void {
+    const overlaySeries = this.overlayLiveSeries();
+    this.applyOverlayAxis(!!overlaySeries);
+    const datasets: any[] = [{
+      data: [...this.heroSeries],
+      borderColor: '#2fe6a0',
+      backgroundColor: 'rgba(47, 230, 160, 0.08)',
+      fill: true,
+      tension: 0.35,
+      yAxisID: 'y',
+    }];
+    if (overlaySeries) {
+      const meta = OVERLAY_META[this.selectedOverlay as Exclude<DeckOverlay, 'none'>];
+      datasets.push({
+        data: [...overlaySeries],
+        borderColor: meta.color,
+        fill: false,
+        tension: 0.35,
+        yAxisID: 'y1',
+      });
+    }
     this.chartData = {
       labels: this.heroSeries.map((_, i) => i),
-      datasets: [{
-        data: [...this.heroSeries],
-        borderColor: '#2fe6a0',
-        backgroundColor: 'rgba(47, 230, 160, 0.08)',
-        fill: true,
+      datasets,
+    };
+  }
+
+  /**
+   * Load a history snapshot from the device's rolling statistics buffer.
+   * Only ever triggered by an explicit range/overlay selection — never on
+   * page load. No data is invented: if the buffer does not cover the chosen
+   * window (warm-up or logging disabled), an explicit note is shown instead.
+   */
+  private loadHistory(): void {
+    const overlayKey = this.selectedOverlay === 'none' ? 'hashrate' : this.selectedOverlay;
+    this.systemService.getStatistics(overlayKey, 'hashrate')
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: stats => {
+          const idxHashrate = stats.labels.indexOf('hashrate');
+          const idxOverlay = this.selectedOverlay === 'none' ? -1 : stats.labels.indexOf(this.selectedOverlay);
+          const idxTimestamp = stats.labels.indexOf('timestamp');
+          if (idxHashrate === -1 || idxTimestamp === -1 || !stats.statistics?.length) {
+            this.historyPoints = [];
+            this.renderHistory('No history is available yet — the device has not logged any statistics.');
+            return;
+          }
+
+          const points = stats.statistics
+            .map(row => ({
+              t: row[idxTimestamp],
+              hashrate: row[idxHashrate] || 0,
+              overlay: idxOverlay !== -1 ? (row[idxOverlay] ?? null) : null,
+            }))
+            .sort((a, b) => a.t - b.t);
+
+          const latest = points[points.length - 1].t;
+          const windowed = this.selectedRange === 'all'
+            ? points
+            : points.filter(p => latest - p.t <= RANGE_MS[this.selectedRange as Exclude<DeckRange, 'live' | 'all'>]);
+
+          this.historyPoints = windowed;
+          if (windowed.length < 2) {
+            this.renderHistory('Not enough logged history for this range yet — the buffer is still warming up.');
+            return;
+          }
+
+          const coveredMs = latest - windowed[0].t;
+          const requestedMs = this.selectedRange === 'all' ? coveredMs : RANGE_MS[this.selectedRange as Exclude<DeckRange, 'live' | 'all'>];
+          this.renderHistory(coveredMs < requestedMs * 0.8
+            ? `Only ${Math.max(1, Math.round(coveredMs / 60000))} min of history is available so far.`
+            : null);
+        },
+        error: () => {
+          this.historyPoints = [];
+          this.renderHistory('Could not load history from the device — showing nothing rather than made-up data.');
+        }
+      });
+  }
+
+  private renderHistory(note: string | null): void {
+    this.historyNote = note;
+    const hasOverlay = this.selectedOverlay !== 'none' && this.historyPoints.some(p => p.overlay !== null);
+    this.applyOverlayAxis(hasOverlay);
+    const datasets: any[] = [{
+      data: this.historyPoints.map(p => p.hashrate),
+      borderColor: '#2fe6a0',
+      backgroundColor: 'rgba(47, 230, 160, 0.08)',
+      fill: true,
+      tension: 0.35,
+      yAxisID: 'y',
+    }];
+    if (hasOverlay) {
+      const meta = OVERLAY_META[this.selectedOverlay as Exclude<DeckOverlay, 'none'>];
+      datasets.push({
+        data: this.historyPoints.map(p => p.overlay ?? 0),
+        borderColor: meta.color,
+        fill: false,
         tension: 0.35,
-      }],
+        yAxisID: 'y1',
+      });
+    }
+    this.chartData = {
+      labels: this.historyPoints.map(p => p.t),
+      datasets,
     };
   }
 
@@ -138,6 +378,59 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
     return ((Math.max(...domains) - Math.min(...domains)) / avg) * 100;
   }
 
+  // ---- Stage 4 intelligence (thin wrappers over tested deck-intel) ----
+
+  public rejectRate(info: ISystemInfo): number | null {
+    return rejectRatePct(info.sharesAccepted, info.sharesRejected);
+  }
+
+  public sharesHr(info: ISystemInfo): number | null {
+    return sharesPerHour(info.sharesAccepted, info.uptimeSeconds);
+  }
+
+  public vsExpected(info: ISystemInfo): number | null {
+    return currentVsExpectedPct(info.hashRate, info.expectedHashrate);
+  }
+
+  public vsHourAverage(info: ISystemInfo): number | null {
+    return currentVsAveragePct(info.hashRate, info.hashRate_1h);
+  }
+
+  public variability(): number | null {
+    return recentVariabilityPct(this.heroSeries);
+  }
+
+  public odds(info: ISystemInfo): SoloOdds | null {
+    return soloOdds(info.networkDifficulty, info.hashRate);
+  }
+
+  public bestSessionPct(info: ISystemInfo): number | null {
+    return bestDiffPctOfNetwork(info.bestSessionDiff, info.networkDifficulty);
+  }
+
+  public bestAllTimePct(info: ISystemInfo): number | null {
+    return bestDiffPctOfNetwork(info.bestDiff, info.networkDifficulty);
+  }
+
+  public headroom(info: ISystemInfo): ThermalHeadroom {
+    return thermalHeadroom(info.temp, info.temptarget, (info.autofanspeed ?? 0) == 1, info.fanspeed);
+  }
+
+  /** Measured minus configured core voltage in mV; null without both readings. */
+  public voltageDeltaMv(info: ISystemInfo): number | null {
+    const configured = info.coreVoltage;
+    const measured = info.coreVoltageActual;
+    if (typeof configured !== 'number' || !isFinite(configured) || configured <= 0
+      || typeof measured !== 'number' || !isFinite(measured) || measured <= 0) {
+      return null;
+    }
+    return measured - configured;
+  }
+
+  public fallbackConfigured(info: ISystemInfo): boolean {
+    return !!(info.fallbackStratumURL && String(info.fallbackStratumURL).trim() !== '');
+  }
+
   public deriveInsights(info: ISystemInfo): DeckInsight[] {
     const insights: DeckInsight[] = [];
 
@@ -160,11 +453,15 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
     }
 
     if ((info.isUsingFallbackStratum ?? 0) !== 0) {
-      insights.push({ icon: 'pi-shield', severity: 'warn', label: 'Fallback pool active', detail: 'Primary pool unreachable' });
+      insights.push({ icon: 'pi-shield', severity: 'warn', label: 'Fallback pool active', detail: 'Mining on the fallback pool' });
     } else if ((info.responseTime ?? 0) <= 150) {
       insights.push({ icon: 'pi-shield', severity: 'ok', label: 'Pool healthy', detail: 'Low latency, high stability' });
     } else {
       insights.push({ icon: 'pi-shield', severity: 'info', label: 'Pool latency elevated', detail: `${fmtLatency(info.responseTime)} response time` });
+    }
+
+    if ((info.isUsingFallbackStratum ?? 0) === 0 && !this.fallbackConfigured(info)) {
+      insights.push({ icon: 'pi-share-alt', severity: 'info', label: 'No fallback pool', detail: 'Only the primary pool is configured' });
     }
 
     const spread = this.domainSpread(info);
@@ -173,6 +470,16 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
         insights.push({ icon: 'pi-sliders-h', severity: 'warn', label: 'Mild domain imbalance', detail: 'Hash domains drift apart — informational' });
       } else {
         insights.push({ icon: 'pi-sliders-h', severity: 'ok', label: 'Domains balanced', detail: `Spread ${spread.toFixed(1)}%` });
+      }
+    }
+
+    // Version-pair integrity (shared rules in services/version-state.ts).
+    const vs = this.versionState;
+    if (vs) {
+      if (vs.status === 'mismatch') {
+        insights.push({ icon: 'pi-clone', severity: 'warn', label: 'Firmware / web mismatch', detail: `Firmware ${vs.firmware} vs web ${vs.installedWeb} — install both from one release` });
+      } else if (vs.status === 'match' && vs.restartPending) {
+        insights.push({ icon: 'pi-refresh', severity: 'info', label: 'Web update restart pending', detail: `Installed pair matches; restart refreshes the boot snapshot (${vs.bootWeb})` });
       }
     }
 

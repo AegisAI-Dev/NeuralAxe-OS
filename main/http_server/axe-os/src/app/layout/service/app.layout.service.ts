@@ -1,6 +1,6 @@
 import { Injectable, effect, signal } from '@angular/core';
 import { BehaviorSubject, Subject } from 'rxjs';
-import { ThemeService } from '../../services/theme.service';
+import { ThemeService, applyAccentColors } from '../../services/theme.service';
 import { LocalStorageService } from '../../local-storage.service';
 
 const STATIC_MENU_DESKTOP_INACTIVE = 'STATIC_MENU_DESKTOP_INACTIVE'
@@ -100,12 +100,9 @@ export class LayoutService {
                         ...this._config,
                         colorScheme: settings.colorScheme,
                     };
-                    // Apply accent colors if they exist
-                    if (settings.accentColors) {
-                        Object.entries(settings.accentColors).forEach(([key, value]) => {
-                            document.documentElement.style.setProperty(key, value);
-                        });
-                    }
+                    // Apply accent colors if they exist (allowlist-filtered:
+                    // semantic operational colors can never be overridden)
+                    applyAccentColors(settings.accentColors);
                 } else {
                     // Save default green dark theme if no settings exist (NeuralAxe OS default = the "Green" preset)
                     this.themeService.saveThemeSettings({
@@ -216,9 +213,7 @@ export class LayoutService {
         this.themeService.getThemeSettings().subscribe(
             settings => {
                 if (settings && settings.accentColors) {
-                    Object.entries(settings.accentColors).forEach(([key, value]) => {
-                        document.documentElement.style.setProperty(key, value);
-                    });
+                    applyAccentColors(settings.accentColors);
                 }
             },
             error => console.error('Error loading accent colors:', error)

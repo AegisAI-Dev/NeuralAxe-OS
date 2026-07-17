@@ -6,6 +6,7 @@ import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { LoadingService } from 'src/app/services/loading.service';
 import { WebVersionService } from 'src/app/services/web-version.service';
+import { deriveVersionState } from 'src/app/services/version-state';
 import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
 import { DeckFmt, INVALID } from 'src/app/components/command-deck/deck-format';
 import { SystemInfo as ISystemInfo, SystemAsic as ISystemASIC, GenericResponse, } from 'src/app/generated/models';
@@ -154,21 +155,23 @@ export class SystemComponent implements OnInit, OnDestroy {
    * the next restart. Values are never substituted for one another.
    */
   private versionRows(info: ISystemInfo, installedWebVersion: string | null): TableRow[] {
+    const vs = deriveVersionState(info.version, info.axeOSVersion, installedWebVersion);
+
     const rows: TableRow[] = [
       { label: 'Firmware Revision', value: text(info.version), copyValue: info.version || undefined, tooltip: 'From the running firmware image (esp_app_desc)' },
     ];
 
-    if (installedWebVersion) {
+    if (vs.installedWeb) {
       rows.push({
         label: 'Web Revision (installed)',
-        value: installedWebVersion,
-        copyValue: installedWebVersion,
+        value: vs.installedWeb,
+        copyValue: vs.installedWeb,
         tooltip: 'Read live from /version.txt on the www partition',
       });
-      if (text(info.axeOSVersion) !== INVALID && info.axeOSVersion !== installedWebVersion) {
+      if (vs.restartPending) {
         rows.push({
           label: 'Web Revision (at boot)',
-          value: info.axeOSVersion,
+          value: vs.bootWeb!,
           valueClass: 'text-orange-500',
           tooltip: 'The firmware reports the web version it saw at boot. A web-only update does not restart the device, so this refreshes on the next restart.',
         });
@@ -180,6 +183,24 @@ export class SystemComponent implements OnInit, OnDestroy {
         copyValue: info.axeOSVersion || undefined,
         tooltip: 'Reported by the firmware from its boot-time read of /version.txt (live file unavailable)',
       });
+    }
+
+    if (vs.status === 'mismatch') {
+      rows.push({
+        label: 'Pair Status',
+        value: 'Version mismatch',
+        valueClass: 'text-red-500',
+        tooltip: 'The installed web interface and the running firmware come from different builds. Update both www.bin and esp-miner.bin from the same release.',
+      });
+    } else if (vs.status === 'match' && vs.restartPending) {
+      rows.push({
+        label: 'Pair Status',
+        value: 'Match — restart pending',
+        valueClass: 'text-orange-500',
+        tooltip: 'Informational: the installed pair matches; the firmware boot snapshot refreshes on the next restart.',
+      });
+    } else if (vs.status === 'match') {
+      rows.push({ label: 'Pair Status', value: 'Firmware & web match', valueClass: 'text-green-500' });
     }
 
     rows.push({ label: 'ESP-IDF Version', value: text(info.idfVersion) });

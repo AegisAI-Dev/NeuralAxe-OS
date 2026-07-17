@@ -8,6 +8,7 @@ import { ChartModule } from 'primeng/chart';
 import { TooltipModule } from 'primeng/tooltip';
 
 import { CommandDeckComponent } from './command-deck.component';
+import { WebVersionService } from 'src/app/services/web-version.service';
 import { HashSuffixPipe } from 'src/app/pipes/hash-suffix.pipe';
 import { DiffSuffixPipe } from 'src/app/pipes/diff-suffix.pipe';
 import { AddressPipe } from 'src/app/pipes/address.pipe';
@@ -122,6 +123,48 @@ describe('CommandDeckComponent', () => {
       expect(component.deriveInsights(above).some(i => i.label === 'Mild domain imbalance')).toBeTrue();
     });
 
+    it('adds a version mismatch warning only for a live-verified mismatch', () => {
+      component.installedWebVersion = 'v2.14.2-13-g388287da';
+      component.versionState = {
+        firmware: 'v2.14.2-15-g723e61dc', installedWeb: 'v2.14.2-13-g388287da',
+        bootWeb: 'v2.14.2-13-g388287da', webSource: 'live', restartPending: false, status: 'mismatch',
+      };
+      const insights = component.deriveInsights(baseInfo());
+      const mismatch = insights.find(i => i.label.includes('mismatch'));
+      expect(mismatch?.severity).toBe('warn');
+      expect(mismatch?.detail).toContain('one release');
+    });
+
+    it('reports a stale boot snapshot as an informational restart note, never a warning', () => {
+      component.versionState = {
+        firmware: 'v2.14.2-15-g723e61dc', installedWeb: 'v2.14.2-15-g723e61dc',
+        bootWeb: 'v2.14.2-13-g388287da', webSource: 'live', restartPending: true, status: 'match',
+      };
+      const insights = component.deriveInsights(baseInfo());
+      const note = insights.find(i => i.label.includes('restart pending'));
+      expect(note?.severity).toBe('info');
+      expect(insights.some(i => i.label.includes('mismatch'))).toBeFalse();
+    });
+
+    it('adds no version insight while the state is unknown or unverified', () => {
+      component.versionState = null;
+      expect(component.deriveInsights(baseInfo()).some(i => i.label.toLowerCase().includes('mismatch'))).toBeFalse();
+      component.versionState = {
+        firmware: 'v2.14.2', installedWeb: null, bootWeb: 'v2.14.2',
+        webSource: 'boot-snapshot', restartPending: false, status: 'unverified',
+      };
+      expect(component.deriveInsights(baseInfo()).some(i => i.label.toLowerCase().includes('mismatch'))).toBeFalse();
+    });
+
+    it('notes a missing fallback pool as information without touching pool health', () => {
+      const insights = component.deriveInsights(baseInfo()); // baseInfo has no fallbackStratumURL
+      expect(insights.find(i => i.icon === 'pi-shield')?.severity).toBe('ok');
+      expect(insights.find(i => i.label === 'No fallback pool')?.severity).toBe('info');
+
+      const withFallback = component.deriveInsights(baseInfo({ fallbackStratumURL: 'solo.ckpool.org' } as any));
+      expect(withFallback.some(i => i.label === 'No fallback pool')).toBeFalse();
+    });
+
     it('never suggests tuning actions or claims AI in insight copy', () => {
       const all = [
         ...component.deriveInsights(baseInfo()),
@@ -135,6 +178,106 @@ describe('CommandDeckComponent', () => {
         expect(text).not.toContain('automatic');
       }
     });
+  });
+});
+
+describe('CommandDeckComponent (hero chart ranges & overlays)', () => {
+  let component: CommandDeckComponent;
+  let fixture: ComponentFixture<CommandDeckComponent>;
+  let systemService: SystemApiService;
+
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      declarations: [CommandDeckComponent, HashSuffixPipe, DiffSuffixPipe, AddressPipe],
+      imports: [ChartModule, TooltipModule],
+      providers: [provideRouter([]), provideHttpClient(), provideToastr()]
+    }).compileComponents();
+
+    fixture = TestBed.createComponent(CommandDeckComponent);
+    component = fixture.componentInstance;
+    systemService = TestBed.inject(SystemApiService);
+    fixture.detectChanges();
+  });
+
+  function statsResponse(spanMinutes: number, stepSeconds: number = 30) {
+    const points = Math.floor((spanMinutes * 60) / stepSeconds) + 1;
+    const statistics: number[][] = [];
+    for (let i = 0; i < points; i++) {
+      statistics.push([1200 + i, 58 + (i % 3), i * stepSeconds * 1000]);
+    }
+    return of({
+      currentTimestamp: (points - 1) * stepSeconds * 1000,
+      labels: ['hashrate', 'asicTemp', 'timestamp'],
+      statistics,
+    } as any);
+  }
+
+  it('defaults to the live rolling series with a single hashrate dataset', () => {
+    expect(component.selectedRange).toBe('live');
+    expect(component.selectedOverlay).toBe('none');
+    expect(component.chartData.datasets.length).toBe(1);
+  });
+
+  it('adds an overlay dataset on its own axis in live mode', () => {
+    component.heroSeries = [1, 2, 3];
+    component.tempSeries = [55, 56, 57];
+    component.setOverlay('asicTemp');
+    expect(component.chartData.datasets.length).toBe(2);
+    expect(component.chartData.datasets[1].yAxisID).toBe('y1');
+    expect(component.chartOptions.scales.y1).toBeTruthy();
+
+    component.setOverlay('none');
+    expect(component.chartData.datasets.length).toBe(1);
+    expect(component.chartOptions.scales.y1).toBeUndefined();
+  });
+
+  it('loads a history snapshot only on explicit range selection and windows it', () => {
+    const statsSpy = spyOn(systemService, 'getStatistics').and.returnValue(statsResponse(120));
+    expect(statsSpy).not.toHaveBeenCalled();  // nothing on page load
+
+    component.setRange('15m');
+    expect(statsSpy).toHaveBeenCalledTimes(1);
+    // 15 min at 30 s cadence → 31 points inside the window
+    expect(component.chartData.datasets[0].data.length).toBe(31);
+    expect(component.historyNote).toBeNull(); // fully covered window → no note
+  });
+
+  it('keeps the full buffer for the All range', () => {
+    spyOn(systemService, 'getStatistics').and.returnValue(statsResponse(120));
+    component.setRange('all');
+    expect(component.chartData.datasets[0].data.length).toBe(241);
+  });
+
+  it('notes partial coverage honestly instead of inventing history', () => {
+    spyOn(systemService, 'getStatistics').and.returnValue(statsResponse(10));
+    component.setRange('1h');
+    expect(component.historyNote).toContain('10 min');
+  });
+
+  it('shows an explicit empty state when no statistics exist', () => {
+    spyOn(systemService, 'getStatistics').and.returnValue(of({
+      currentTimestamp: 0, labels: ['hashrate', 'timestamp'], statistics: [],
+    } as any));
+    component.setRange('1h');
+    expect(component.historyNote).toContain('No history');
+    expect(component.chartData.datasets[0].data.length).toBe(0);
+  });
+
+  it('includes the overlay column in history mode when selected', () => {
+    spyOn(systemService, 'getStatistics').and.returnValue(statsResponse(30));
+    component.selectedOverlay = 'asicTemp';
+    component.setRange('15m');
+    expect(component.chartData.datasets.length).toBe(2);
+    expect(component.chartData.datasets[1].data[0]).toBeGreaterThanOrEqual(58);
+  });
+
+  it('returning to Live restores the rolling series and clears notes', () => {
+    spyOn(systemService, 'getStatistics').and.returnValue(statsResponse(10));
+    component.setRange('1h');
+    expect(component.historyNote).toBeTruthy();
+    component.setRange('live');
+    expect(component.historyNote).toBeNull();
+    expect(component.selectedRange).toBe('live');
   });
 });
 
@@ -162,7 +305,11 @@ describe('CommandDeckComponent (rendered with live-like data)', () => {
     await TestBed.configureTestingModule({
       declarations: [CommandDeckComponent, HashSuffixPipe, DiffSuffixPipe, AddressPipe],
       imports: [ChartModule, TooltipModule],
-      providers: [provideRouter([]), provideHttpClient(), provideToastr()]
+      providers: [
+        provideRouter([]), provideHttpClient(), provideToastr(),
+        // The real service XHRs /version.txt in its constructor — not allowed inside fakeAsync.
+        { provide: WebVersionService, useValue: { installedWebVersion$: of(null) } },
+      ]
     }).compileComponents();
 
     const systemService = TestBed.inject(SystemApiService);

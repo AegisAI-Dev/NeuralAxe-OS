@@ -71,7 +71,79 @@
                 Status reflects the configuration currently running on the device.
                 Response time is reported for the active pool only.
             </small>
+
+            <h3 class="nx-section-heading">Pool Switching</h3>
+            <div class="card mb-3">
+                <p class="text-sm text-500 mt-0">
+                    Makes the other configured pool the preferred mining pool, then restarts the device.
+                    Both pool configurations are preserved exactly — including passwords, certificates and
+                    all advanced options — only the stored pool preference changes. Nothing happens without
+                    the confirmation below.
+                </p>
+                <div class="flex gap-3 align-items-center flex-wrap">
+                    <button pButton type="button"
+                        [disabled]="!switchGate(live).allowed || switchBusy"
+                        (click)="openSwitchDialog(live, poolSwitchModal)">
+                        Switch Active Pool &amp; Restart…
+                    </button>
+                    <small *ngIf="switchGate(live).reason as gateReason" class="text-500">{{ gateReason }}</small>
+                </div>
+            </div>
         </ng-container>
+
+        <app-modal #poolSwitchModal [headline]="'Switch Active Pool'" [closable]="!switchBusy">
+            <ng-container *ngIf="switchPlan as plan">
+                <div class="nx-kv mb-3">
+                    <div class="nx-kv-row">
+                        <label>Mining now</label>
+                        <b sensitive-data class="nx-ellipsis">{{ plan.activeNow.host }}:{{ plan.activeNow.port }} ({{ plan.activeNow.role }})</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Standby now</label>
+                        <b sensitive-data class="nx-ellipsis">{{ plan.standbyNow.host }}:{{ plan.standbyNow.port }} ({{ plan.standbyNow.role }})</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>After restart</label>
+                        <b sensitive-data class="nx-ellipsis">{{ plan.activeAfter.host }}:{{ plan.activeAfter.port }} ({{ plan.activeAfter.role }}) — active</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>New standby</label>
+                        <b sensitive-data class="nx-ellipsis">{{ plan.standbyAfter.host }}:{{ plan.standbyAfter.port }} ({{ plan.standbyAfter.role }})</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Worker (new active)</label>
+                        <b sensitive-data pTooltip="Masked for privacy">{{ plan.activeAfter.worker | address: { length: 20 } }}</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Passwords</label>
+                        <b>Unchanged — kept on the device, never displayed</b>
+                    </div>
+                </div>
+
+                <div class="nx-note nx-note-warn mb-2">
+                    The device restarts and mining reconnects to
+                    <b sensitive-data>{{ plan.activeAfter.host }}</b>.
+                    Session share statistics reset on reconnect.
+                </div>
+                <div class="nx-note mb-3">
+                    <ng-container *ngIf="plan.patch.useFallbackStratum; else backToPrimary">
+                        While the fallback pool is preferred, the device will <b class="text-500">not</b>
+                        automatically return to the primary pool. Switch back the same way at any time.
+                    </ng-container>
+                    <ng-template #backToPrimary>
+                        Restores normal behavior: the primary pool is preferred and automatic
+                        failover to the fallback stays active.
+                    </ng-template>
+                </div>
+
+                <div class="flex gap-3 mt-2 mb-3">
+                    <button pButton type="button" class="p-button-secondary"
+                        [disabled]="switchBusy" (click)="cancelSwitch(poolSwitchModal)">Cancel</button>
+                    <button pButton type="button"
+                        [disabled]="switchBusy" (click)="confirmSwitch(poolSwitchModal)">Switch &amp; Restart</button>
+                </div>
+            </ng-container>
+        </app-modal>
 
         <div class="grid">
         <div class="col-12 xl:col-6" *ngFor="let pool of pools">

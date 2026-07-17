@@ -19,6 +19,18 @@
   --nx-red: #ef5350;
   --nx-text: #e8f1f8;
   --nx-text-dim: #5e7f93;
+
+  /* ---- semantic operational colors (Stage 2G) ----
+     FIXED meanings, deliberately separate from the user accent theme:
+     green = healthy/success, cyan = neutral technical info, amber = caution,
+     red = actual error/danger, gray = inactive/unknown. The accent theme
+     apply path is allowlist-filtered (theme.service.ts) so these can never
+     be overridden by a stored theme payload. */
+  --nx-sem-ok: var(--nx-green);
+  --nx-sem-info: var(--nx-cyan);
+  --nx-sem-warn: var(--nx-amber);
+  --nx-sem-danger: var(--nx-red);
+  --nx-sem-neutral: #64788a;
 }
 
 /* ---------- deck grid ---------- */
@@ -89,9 +101,25 @@
   margin: 0.9rem 0 0.5rem;
 }
 
-.nx-ok-text { color: var(--nx-green); }
-.nx-warn-text { color: var(--nx-amber); }
+.nx-ok-text { color: var(--nx-sem-ok); }
+.nx-warn-text { color: var(--nx-sem-warn); }
+.nx-danger-text { color: var(--nx-sem-danger); }
+.nx-info-text { color: var(--nx-sem-info); }
+.nx-neutral-text { color: var(--nx-sem-neutral); }
 .nx-dim { color: var(--nx-text-dim); }
+
+/* ---------- semantic telemetry meters ----------
+   Applied via styleClass on PrimeNG progress bars that display OPERATIONAL
+   TELEMETRY (power, temperature, fan …). These override the accent-driven
+   --progressbar-value-bg so a red accent theme can never make healthy
+   telemetry look dangerous. Severity is computed from tested threshold
+   helpers (services/semantic-status.ts), never from the theme. */
+
+.p-progressbar.nx-meter-ok .p-progressbar-value { background: var(--nx-sem-ok); }
+.p-progressbar.nx-meter-info .p-progressbar-value { background: var(--nx-sem-info); }
+.p-progressbar.nx-meter-warn .p-progressbar-value { background: var(--nx-sem-warn); }
+.p-progressbar.nx-meter-danger .p-progressbar-value { background: var(--nx-sem-danger); }
+.p-progressbar.nx-meter-neutral .p-progressbar-value { background: var(--nx-sem-neutral); }
 
 /* ---------- hero ---------- */
 
@@ -147,6 +175,69 @@
 .nx-live-off .nx-live-dot { background: var(--nx-text-dim); box-shadow: none; animation: none; }
 
 .nx-hero-chart { min-width: 0; }
+
+/* ---------- hero chart controls (range + overlay chips) ---------- */
+
+.nx-chart-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin-top: 0.7rem;
+}
+
+.nx-chip-group { display: inline-flex; flex-wrap: wrap; gap: 0.3rem; }
+
+.nx-chip {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--nx-line);
+  border-radius: 999px;
+  color: var(--nx-text-dim);
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 0.22rem 0.6rem;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.nx-chip:hover { color: var(--nx-text); border-color: var(--nx-line-bright); }
+
+.nx-chip:focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 1px; }
+
+.nx-chip-on {
+  color: var(--nx-green);
+  border-color: rgba(47, 230, 160, 0.45);
+  background: var(--nx-green-dim);
+}
+
+/* ---------- thermal headroom line ---------- */
+
+.nx-headroom { display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem; }
+.nx-headroom small { font-size: 0.7rem; }
+
+/* ---------- advanced telemetry drawer ---------- */
+
+.nx-drawer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--nx-cyan);
+}
+
+.nx-drawer-toggle:focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 2px; }
+
+.nx-drawer-toggle i { font-size: 0.8rem; }
+
+.nx-drawer-body .nx-kv-row { grid-template-columns: 110px minmax(0, 1fr); }
 
 /* ---------- stat rows ---------- */
 
@@ -594,6 +685,14 @@
 .layout-main .card .card {
   background: rgba(0, 0, 0, 0.22);
   box-shadow: none;
+}
+
+/* A modal dialog nested inside a card (e.g. the pool-switch confirmation)
+   must stay a fully opaque overlay — the translucent nested-card surface
+   would let the page bleed through the dialog. */
+.layout-main .card .modal.card {
+  background: linear-gradient(180deg, var(--nx-panel-2) 0%, var(--nx-panel) 100%);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45), 0 16px 40px rgba(0, 0, 0, 0.6);
 }
 
 .layout-main .card > h2:first-child,

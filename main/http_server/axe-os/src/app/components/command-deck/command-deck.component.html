@@ -16,17 +16,48 @@
                     </div>
                 </div>
                 <div class="nx-hero-chart">
-                    <p-chart type="line" [data]="chartData" [options]="chartOptions" height="120"></p-chart>
+                    <p-chart type="line" [data]="chartData" [options]="chartOptions" height="120"
+                        [attr.aria-label]="'Hashrate chart, range ' + selectedRange"></p-chart>
                 </div>
             </div>
+
+            <div class="nx-chart-controls">
+                <div role="group" aria-label="Chart time range" class="nx-chip-group">
+                    <button *ngFor="let r of ranges" type="button" class="nx-chip"
+                        [class.nx-chip-on]="selectedRange === r.id"
+                        [attr.aria-pressed]="selectedRange === r.id"
+                        (click)="setRange(r.id)">{{ r.label }}</button>
+                </div>
+                <div role="group" aria-label="Chart overlay" class="nx-chip-group">
+                    <button *ngFor="let o of overlays" type="button" class="nx-chip"
+                        [class.nx-chip-on]="selectedOverlay === o.id"
+                        [attr.aria-pressed]="selectedOverlay === o.id"
+                        (click)="setOverlay(o.id)">{{ o.label }}</button>
+                </div>
+            </div>
+            <div *ngIf="historyNote" class="nx-note mt-2">{{ historyNote }}</div>
+
             <div class="nx-statrow">
                 <div class="nx-stat">
                     <label>Expected</label>
                     <span>{{ (info.expectedHashrate ?? 0) | hashSuffix }}</span>
                 </div>
                 <div class="nx-stat">
+                    <label>vs Expected</label>
+                    <span [class.nx-warn-text]="(vsExpected(info) ?? 100) < 90"
+                        pTooltip="Current hashrate as a percentage of the model-expected hashrate">{{ fmt.pct(vsExpected(info), 1) }}</span>
+                </div>
+                <div class="nx-stat">
                     <label>Average (1h)</label>
                     <span>{{ (info.hashRate_1h ?? 0) | hashSuffix }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>vs 1h Avg</label>
+                    <span pTooltip="Current hashrate as a percentage of the one-hour average">{{ fmt.pct(vsHourAverage(info), 1) }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Variability</label>
+                    <span pTooltip="Spread of the recent hashrate samples (standard deviation / mean). Lower is steadier; hashrate naturally fluctuates.">{{ fmt.pct(variability(), 1) }}</span>
                 </div>
                 <div class="nx-stat">
                     <label>Efficiency</label>
@@ -108,9 +139,24 @@
                         <b>{{ fmt.temp(info.temptarget) }}</b>
                     </div>
                 </div>
+
+                <div class="nx-headroom mt-3" *ngIf="headroom(info) as hr">
+                    <span class="nx-pill" [ngClass]="{
+                        'nx-pill-ok': hr.state === 'at-target' || hr.state === 'below-target',
+                        'nx-pill-warn': hr.state === 'above-target' || (hr.fanSaturated && hr.state !== 'overheat'),
+                        'nx-pill-err': hr.state === 'overheat'
+                    }">{{ hr.label }}</span>
+                    <small class="nx-dim ml-2" *ngIf="hr.deltaC !== null">
+                        {{ hr.deltaC > 0 ? '+' : '' }}{{ hr.deltaC.toFixed(1) }} °C vs target
+                    </small>
+                    <small class="nx-dim ml-2" *ngIf="voltageDeltaMv(info) as dv"
+                        pTooltip="Measured ASIC voltage minus the configured core voltage. A small negative offset under load is normal.">
+                        · Vcore {{ fmt.volts(info.coreVoltageActual) }} vs {{ fmt.int(info.coreVoltage, ' mV') }} set ({{ dv > 0 ? '+' : '' }}{{ fmt.int(dv, ' mV') }})
+                    </small>
+                </div>
             </section>
 
-            <!-- MINING HEALTH -->
+            <!-- MINING HEALTH / SESSION PERFORMANCE -->
             <section class="nx-panel">
                 <div class="nx-panel-title nx-cyan">Mining Health</div>
                 <div class="nx-statrow nx-statrow-tight">
@@ -123,12 +169,31 @@
                         <span [class.nx-warn-text]="(info.sharesRejected ?? 0) > 0">{{ fmt.int(info.sharesRejected) }}</span>
                     </div>
                     <div class="nx-stat">
-                        <label>Pool Latency</label>
-                        <span>{{ fmt.latency(info.responseTime) }}</span>
+                        <label>Reject Rate</label>
+                        <span [class.nx-warn-text]="(rejectRate(info) ?? 0) > 2"
+                            pTooltip="Rejected shares as a percentage of all submitted shares this session">{{ fmt.pct(rejectRate(info), 2) }}</span>
                     </div>
                     <div class="nx-stat">
                         <label>Stability</label>
                         <span>{{ fmt.pct(stability(info), 2) }}</span>
+                    </div>
+                </div>
+                <div class="nx-statrow nx-statrow-tight mt-2">
+                    <div class="nx-stat">
+                        <label>Uptime</label>
+                        <span>{{ uptime(info) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Shares / Hour</label>
+                        <span pTooltip="Accepted shares divided by session uptime">{{ fmt.num(sharesHr(info), 0) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Pool Latency</label>
+                        <span>{{ fmt.latency(info.responseTime) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Pool Difficulty</label>
+                        <span>{{ info.poolDifficulty ? (info.poolDifficulty | diffSuffix) : '—' }}</span>
                     </div>
                 </div>
                 <div class="nx-subtitle">Domain Performance (GH/s)</div>
@@ -158,6 +223,14 @@
                     </div>
                     <label class="mt-2">Worker</label>
                     <div class="nx-worker" sensitive-data>{{ (info.isUsingFallbackStratum ? info.fallbackStratumUser : info.stratumUser) | address }}</div>
+                    <label class="mt-2">Fallback</label>
+                    <div class="text-sm" [class.nx-dim]="!fallbackConfigured(info)">
+                        <ng-container *ngIf="fallbackConfigured(info); else noFallback">
+                            Configured<span *ngIf="info.isUsingFallbackStratum"> — currently active</span>
+                            <span class="nx-dim"> (reachability is only known while it is in use)</span>
+                        </ng-container>
+                        <ng-template #noFallback>Not configured</ng-template>
+                    </div>
                 </div>
                 <div class="nx-pool-cell">
                     <label>Block Height</label>
@@ -171,6 +244,66 @@
                     <label class="mt-2">All-Time Best</label>
                     <b>{{ (info.bestDiff ?? 0) | diffSuffix }}</b>
                 </div>
+            </div>
+        </section>
+
+        <!-- ADVANCED TELEMETRY DRAWER (secondary expert info, collapsed by default) -->
+        <section class="nx-panel">
+            <button type="button" class="nx-drawer-toggle" (click)="drawerOpen = !drawerOpen"
+                [attr.aria-expanded]="drawerOpen" aria-controls="nx-drawer-body">
+                <i class="pi" [ngClass]="drawerOpen ? 'pi-angle-down' : 'pi-angle-right'" aria-hidden="true"></i>
+                Advanced Telemetry
+                <span class="nx-dim ml-2 text-xs" *ngIf="!drawerOpen">board, revisions, memory, raw values</span>
+            </button>
+            <div *ngIf="drawerOpen" id="nx-drawer-body" class="nx-drawer-body mt-3">
+                <div class="grid">
+                    <div class="col-12 md:col-6 xl:col-3">
+                        <div class="nx-subtitle mt-0">Board &amp; ASIC</div>
+                        <div class="nx-kv" *ngIf="asic$ | async as asic; else drawerPending">
+                            <div class="nx-kv-row"><label>Device</label><b>{{ asic.deviceModel || '—' }}</b></div>
+                            <div class="nx-kv-row"><label>Board</label><b>{{ info.boardVersion || '—' }}</b></div>
+                            <div class="nx-kv-row"><label>ASIC</label><b>{{ (asic.asicCount > 1 ? asic.asicCount + 'x ' : '') + (asic.ASICModel || '—') }}</b></div>
+                            <div class="nx-kv-row"><label>Reset Reason</label><b>{{ info.resetReason || '—' }}</b></div>
+                        </div>
+                    </div>
+                    <div class="col-12 md:col-6 xl:col-3">
+                        <div class="nx-subtitle mt-0">Revisions</div>
+                        <div class="nx-kv">
+                            <div class="nx-kv-row"><label>Firmware</label><b>{{ info.version || '—' }}</b></div>
+                            <div class="nx-kv-row"><label>Web (installed)</label>
+                                <b>{{ versionState?.installedWeb || 'unavailable' }}</b></div>
+                            <div class="nx-kv-row" *ngIf="versionState?.restartPending"><label>Web (at boot)</label>
+                                <b class="nx-warn-text">{{ versionState?.bootWeb }}</b></div>
+                            <div class="nx-kv-row" *ngIf="!versionState?.installedWeb"><label>Web (at boot)</label>
+                                <b>{{ info.axeOSVersion || '—' }}</b></div>
+                            <div class="nx-kv-row"><label>OTA Partition</label><b>{{ info.runningPartition || '—' }}</b></div>
+                            <div class="nx-kv-row"><label>ESP-IDF</label><b>{{ info.idfVersion || '—' }}</b></div>
+                        </div>
+                    </div>
+                    <div class="col-12 md:col-6 xl:col-3">
+                        <div class="nx-subtitle mt-0">Memory</div>
+                        <div class="nx-kv">
+                            <div class="nx-kv-row"><label>Free Heap</label><b>{{ fmt.bytes(info.freeHeap) }}</b></div>
+                            <div class="nx-kv-row"><label>Internal</label><b>{{ fmt.bytes(info.freeHeapInternal) }}</b></div>
+                            <div class="nx-kv-row"><label>SPIRAM</label><b>{{ fmt.bytes(info.freeHeapSpiram) }}</b></div>
+                            <div class="nx-kv-row"><label>CPU</label><b>{{ fmt.pct(info.cpuUsage, 0) }}</b></div>
+                        </div>
+                    </div>
+                    <div class="col-12 md:col-6 xl:col-3">
+                        <div class="nx-subtitle mt-0">Configured Tuning</div>
+                        <div class="nx-kv">
+                            <div class="nx-kv-row"><label>Frequency</label><b>{{ fmt.int(info.frequency, ' MHz') }}</b></div>
+                            <div class="nx-kv-row"><label>Core Voltage</label><b>{{ fmt.int(info.coreVoltage, ' mV') }}</b></div>
+                            <div class="nx-kv-row"><label>Fan Mode</label><b>{{ info.autofanspeed ? 'Automatic' : 'Manual' }}</b></div>
+                            <div class="nx-kv-row"><label>Target Temp</label><b>{{ fmt.temp(info.temptarget) }}</b></div>
+                            <div class="nx-kv-row"><label>Min Fan</label><b>{{ fmt.int(info.minFanSpeed, ' %') }}</b></div>
+                            <div class="nx-kv-row"><label>Worker</label><b sensitive-data class="nx-ellipsis">{{ (info.isUsingFallbackStratum ? info.fallbackStratumUser : info.stratumUser) | address: { length: 16 } }}</b></div>
+                        </div>
+                    </div>
+                </div>
+                <ng-template #drawerPending>
+                    <div class="nx-dim text-sm">Loading…</div>
+                </ng-template>
             </div>
         </section>
     </div>
@@ -228,6 +361,42 @@
                     </div>
                 </li>
             </ul>
+        </section>
+
+        <!-- SOLO MINING ODDS -->
+        <section class="nx-panel">
+            <div class="nx-panel-title nx-cyan">Solo Mining Odds</div>
+            <ng-container *ngIf="odds(info) as o; else oddsPending">
+                <div class="nx-kv">
+                    <div class="nx-kv-row">
+                        <label>Avg. time to block</label>
+                        <b pTooltip="Expected hashes for one block (network difficulty × 2³²) divided by the current hashrate">{{ formatExpectedTime(o.expectedSecondsToBlock) }}</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Chance per day</label>
+                        <b pTooltip="1 − exp(−86400 s / expected time to block)">{{ formatProbabilityPct(o.dailyBlockProbability) }}</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Roughly</label>
+                        <b>1 in {{ compactNumber(o.oneInNDays) }} days</b>
+                    </div>
+                    <div class="nx-kv-row" *ngIf="bestSessionPct(info) !== null">
+                        <label>Session best</label>
+                        <b pTooltip="Best share difficulty this session as a share of the network difficulty">{{ formatPctCompact(bestSessionPct(info)) }} of network</b>
+                    </div>
+                    <div class="nx-kv-row" *ngIf="bestAllTimePct(info) !== null">
+                        <label>All-time best</label>
+                        <b pTooltip="Best share difficulty ever seen on this device as a share of the network difficulty">{{ formatPctCompact(bestAllTimePct(info)) }} of network</b>
+                    </div>
+                </div>
+            </ng-container>
+            <ng-template #oddsPending>
+                <div class="nx-dim text-sm">Waiting for hashrate and network difficulty…</div>
+            </ng-template>
+            <small class="nx-dim block mt-2">
+                Statistical estimate from the current hashrate and network difficulty —
+                not a prediction. A solo block may come far sooner, far later, or never.
+            </small>
         </section>
 
         <!-- SYSTEM STATUS -->

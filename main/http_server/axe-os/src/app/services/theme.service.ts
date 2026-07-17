@@ -11,6 +11,54 @@ export interface ThemeSettings {
   };
 }
 
+/**
+ * The only CSS custom properties a user accent theme may set. Accent themes
+ * style interactive chrome (buttons, sliders, checkboxes, highlights, focus)
+ * — they must never be able to override semantic operational colors
+ * (--nx-sem-*, --nx-green, --nx-red, …), which carry fixed meanings like
+ * healthy/caution/error. Theme payloads are stored as free-form JSON in NVS,
+ * so this allowlist is enforced at apply time on every path that writes
+ * theme values to the document.
+ */
+export const ACCENT_COLOR_KEYS: ReadonlyArray<string> = [
+  '--primary-color',
+  '--primary-color-text',
+  '--highlight-bg',
+  '--highlight-text-color',
+  '--focus-ring',
+  '--slider-bg',
+  '--slider-range-bg',
+  '--slider-handle-bg',
+  '--progressbar-bg',
+  '--progressbar-value-bg',
+  '--checkbox-border',
+  '--checkbox-bg',
+  '--checkbox-hover-bg',
+  '--button-bg',
+  '--button-hover-bg',
+  '--button-focus-shadow',
+  '--togglebutton-bg',
+  '--togglebutton-border',
+  '--togglebutton-hover-bg',
+  '--togglebutton-hover-border',
+  '--togglebutton-text-color',
+];
+
+/** Accent entries whose keys are on the allowlist; everything else is dropped. */
+export function filterAccentColors(colors: { [key: string]: string } | undefined | null): [string, string][] {
+  if (!colors) {
+    return [];
+  }
+  return Object.entries(colors).filter(([key]) => ACCENT_COLOR_KEYS.includes(key));
+}
+
+/** Apply an accent-color payload to the document, allowlist-filtered. */
+export function applyAccentColors(colors: { [key: string]: string } | undefined | null): void {
+  filterAccentColors(colors).forEach(([key, value]) => {
+    document.documentElement.style.setProperty(key, value);
+  });
+}
+
 @Injectable({
   providedIn: 'root'
 })

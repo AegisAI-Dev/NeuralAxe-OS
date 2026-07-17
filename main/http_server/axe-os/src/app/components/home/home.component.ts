@@ -13,6 +13,8 @@ import { LoadingService } from 'src/app/services/loading.service';
 import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { WebVersionService } from 'src/app/services/web-version.service';
+import { deriveVersionState } from 'src/app/services/version-state';
+import { meterClass, powerSeverity, inputVoltageSeverity, asicTempSeverity, vrTempSeverity, infoSeverity } from 'src/app/services/semantic-status';
 import { ThemeService } from 'src/app/services/theme.service';
 import { LayoutService } from 'src/app/layout/service/app.layout.service';
 import { SystemInfo as ISystemInfo, SystemStatistics as ISystemStatistics } from 'src/app/generated/models';
@@ -1109,29 +1111,49 @@ export class HomeComponent implements OnInit, OnDestroy {
     updateMessage(!!info.hardware_fault, 'HARDWARE_FAULT', 'error', `${info.hardware_fault}`);
     updateMessage(!info.frequency || info.frequency < 400, 'FREQUENCY_LOW', 'warn', 'Device frequency is set low - See settings');
     updateMessage(!!info.isUsingFallbackStratum, 'FALLBACK_STRATUM', 'warn', 'Using fallback pool - Share stats reset. Check Pool Settings and / or reboot Device.');
-    // Version-pair integrity. The truest web identity is the /version.txt of
-    // the installed www partition (installedWebVersion). The firmware's
-    // axeOSVersion is a boot-time snapshot: after a web-only update it stays
-    // on the pre-update revision until the next restart — an expected state
-    // that deserves an informational note, not a mismatch warning. Without the
-    // live file we fall back to the boot snapshot (upstream behavior);
-    // equality is never faked in either mode.
-    const webInstalled = this.installedWebVersion;
-    const genuineMismatch = webInstalled
-      ? info.version !== webInstalled
-      : info.version !== info.axeOSVersion;
-    const restartPending = !!webInstalled
-      && info.version === webInstalled
-      && info.axeOSVersion !== webInstalled;
-    updateMessage(genuineMismatch, 'VERSION_MISMATCH', 'warn', webInstalled
-      ? `Firmware (${info.version}) and installed web interface (${webInstalled}) versions do not match. Please update both www.bin and esp-miner.bin from the same release.`
-      : `Firmware (${info.version}) and web interface (${info.axeOSVersion}) versions do not match. Please make sure to update both www.bin and esp-miner.bin.`);
-    updateMessage(restartPending, 'WEB_RESTART_PENDING', 'info', `Web interface updated to ${webInstalled}. The firmware still reports the version it saw at boot (${info.axeOSVersion}) — restart the device when convenient to refresh it.`);
+    // Version-pair integrity, derived by the shared, tested rules in
+    // services/version-state.ts: the installed web identity comes from the
+    // live /version.txt only; the boot snapshot (axeOSVersion) is never
+    // substituted for it. A stale snapshot after a www-only update is an
+    // informational restart note, not a mismatch warning. Without the live
+    // file, a firmware/boot-snapshot difference is reported against the
+    // boot-reported value (it cannot be live-verified).
+    const vs = deriveVersionState(info.version, info.axeOSVersion, this.installedWebVersion);
+    const unverifiedMismatch = vs.status === 'unverified' && !!vs.firmware && !!vs.bootWeb && vs.firmware !== vs.bootWeb;
+    updateMessage(vs.status === 'mismatch' || unverifiedMismatch, 'VERSION_MISMATCH', 'warn', vs.installedWeb
+      ? `Firmware (${vs.firmware}) and installed web interface (${vs.installedWeb}) versions do not match. Please update both www.bin and esp-miner.bin from the same release.`
+      : `Firmware (${vs.firmware}) and web interface (${vs.bootWeb}) versions do not match. Please make sure to update both www.bin and esp-miner.bin.`);
+    updateMessage(vs.status === 'match' && vs.restartPending, 'WEB_RESTART_PENDING', 'info', `Web interface updated to ${vs.installedWeb}. The firmware still reports the version it saw at boot (${vs.bootWeb}) — restart the device when convenient to refresh it.`);
     if (info.coinbaseOutputs && info.coinbaseOutputs.length > 0) {
       let percentage = this.getPayoutPercentage(info);
       updateMessage(percentage > 0 && percentage < 95, 'NOT_SOLO_MINING', 'warn', `Your share of the mining reward is only ${percentage.toFixed(1)}%`);
       updateMessage(percentage === 0, 'NO_MINING_REWARD', 'warn', `You don't have a share in the mining reward`);
     }
+  }
+
+  // ---- semantic telemetry meter classes (Stage 2G) ----
+  // Severity comes from fixed, tested thresholds (services/semantic-status.ts)
+  // so telemetry bars keep their operational meaning under every accent theme.
+
+  public powerMeterClass(info: ISystemInfo): string {
+    return 'p-progressbar--thin ' + meterClass(powerSeverity(info.power, info.maxPower));
+  }
+
+  public inputVoltageMeterClass(info: ISystemInfo): string {
+    // info.voltage is already scaled to volts by the component's info$ mapping.
+    return 'p-progressbar--thin ' + meterClass(inputVoltageSeverity(info.voltage, info.nominalVoltage));
+  }
+
+  public asicTempMeterClass(temp: number | undefined): string {
+    return 'p-progressbar--thin ' + meterClass(asicTempSeverity(temp));
+  }
+
+  public vrTempMeterClass(info: ISystemInfo): string {
+    return 'p-progressbar--thin ' + meterClass(vrTempSeverity(info.vrTemp));
+  }
+
+  public infoMeterClass(value: number | undefined): string {
+    return 'p-progressbar--thin ' + meterClass(infoSeverity(value));
   }
 
   private calculateEfficiency(info: ISystemInfo, key: 'hashRate' | 'hashRate_1m' | 'expectedHashrate'): number {

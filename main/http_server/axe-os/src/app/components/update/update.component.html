@@ -26,10 +26,35 @@
                             <label>Firmware</label>
                             <b [pTooltip]="info.version">{{ info.version || '—' }}</b>
                         </div>
-                        <div class="nx-kv-row">
-                            <label>Web Interface</label>
-                            <b [pTooltip]="info.axeOSVersion">{{ info.axeOSVersion || '—' }}</b>
-                        </div>
+                        <ng-container *ngIf="versionState$ | async as vs">
+                            <div class="nx-kv-row" *ngIf="vs.installedWeb; else bootOnlyWeb">
+                                <label>Web (installed)</label>
+                                <b pTooltip="Read live from /version.txt on the www partition">{{ vs.installedWeb }}</b>
+                            </div>
+                            <ng-template #bootOnlyWeb>
+                                <div class="nx-kv-row">
+                                    <label>Web (at boot)</label>
+                                    <b pTooltip="Reported by the firmware from its boot-time read of /version.txt — the live file could not be read, so the installed revision is unverified">{{ vs.bootWeb || '—' }}</b>
+                                </div>
+                            </ng-template>
+                            <div class="nx-kv-row" *ngIf="vs.restartPending">
+                                <label>Web (at boot)</label>
+                                <b class="text-orange-500" pTooltip="The firmware still reports the web version it saw at boot. A web-only update does not restart the device — restart when convenient to refresh this.">{{ vs.bootWeb }}</b>
+                            </div>
+                            <div class="nx-kv-row">
+                                <label>Pair Status</label>
+                                <b>
+                                    <span *ngIf="vs.status === 'match' && !vs.restartPending" class="nx-pill nx-pill-ok">Firmware &amp; web match</span>
+                                    <span *ngIf="vs.status === 'match' && vs.restartPending" class="nx-pill nx-pill-warn"
+                                        pTooltip="Informational: the installed pair matches; the firmware's boot snapshot refreshes on the next restart.">Match — restart pending</span>
+                                    <span *ngIf="vs.status === 'mismatch'" class="nx-pill nx-pill-err"
+                                        pTooltip="The installed web interface and the running firmware come from different builds. Update both www.bin and esp-miner.bin from the same release.">Version mismatch</span>
+                                    <span *ngIf="vs.status === 'unverified'" class="nx-pill"
+                                        pTooltip="The live /version.txt could not be read, so the installed web revision cannot be verified right now.">Live web version unavailable</span>
+                                    <span *ngIf="vs.status === 'unknown'" class="nx-pill">—</span>
+                                </b>
+                            </div>
+                        </ng-container>
                         <div class="nx-kv-row" *ngIf="info.runningPartition">
                             <label>OTA Partition</label>
                             <b>{{ info.runningPartition }}</b>

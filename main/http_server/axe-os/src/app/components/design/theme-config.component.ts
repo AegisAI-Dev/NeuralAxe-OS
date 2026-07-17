@@ -2,15 +2,61 @@ import { Component, OnInit, OnDestroy } from '@angular/core';
 import { Subject } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
 import { LayoutService } from '../../layout/service/app.layout.service';
-import { ThemeService } from '../../services/theme.service';
+import { ThemeService, applyAccentColors } from '../../services/theme.service';
 
-interface ThemeOption {
+export interface ThemeOption {
   name: string;
   primaryColor: string;
   accentColors: {
     [key: string]: string;
   };
 }
+
+function accentSet(base: string, hover: string, focusRing: string): { [key: string]: string } {
+  return {
+    '--primary-color': base,
+    '--primary-color-text': '#ffffff',
+    '--highlight-bg': base,
+    '--highlight-text-color': '#ffffff',
+    '--focus-ring': focusRing,
+    // PrimeNG Slider
+    '--slider-bg': '#dee2e6',
+    '--slider-range-bg': base,
+    '--slider-handle-bg': base,
+    // Progress Bar
+    '--progressbar-bg': '#dee2e6',
+    '--progressbar-value-bg': base,
+    // PrimeNG Checkbox
+    '--checkbox-border': base,
+    '--checkbox-bg': base,
+    '--checkbox-hover-bg': hover,
+    // PrimeNG Button
+    '--button-bg': base,
+    '--button-hover-bg': hover,
+    '--button-focus-shadow': `0 0 0 2px #ffffff, 0 0 0 4px ${base}`,
+    // Toggle button
+    '--togglebutton-bg': base,
+    '--togglebutton-border': `1px solid ${base}`,
+    '--togglebutton-hover-bg': hover,
+    '--togglebutton-hover-border': `1px solid ${hover}`,
+    '--togglebutton-text-color': '#ffffff'
+  };
+}
+
+/**
+ * Every selectable accent theme. Accent themes style interactive chrome only
+ * (navigation highlight, buttons, sliders, checkboxes, focus) — semantic
+ * operational colors (--nx-sem-*) carry fixed healthy/caution/error meanings
+ * and are NOT part of an accent set; the apply path enforces this via the
+ * ACCENT_COLOR_KEYS allowlist in theme.service.ts.
+ */
+export const THEME_PRESETS: ThemeOption[] = [
+  { name: 'Orange', primaryColor: '#F7931A', accentColors: accentSet('#F7931A', '#e58617', '0 0 0 0.2rem rgba(247,147,26,0.2)') },
+  { name: 'Red', primaryColor: '#F80421', accentColors: accentSet('#F80421', '#e63c2e', '0 0 0 0.2rem rgba(255,64,50,0.2)') },
+  { name: 'Blue', primaryColor: '#2196f3', accentColors: accentSet('#2196f3', '#1e88e5', '0 0 0 0.2rem rgba(33,150,243,0.2)') },
+  { name: 'Green (Default)', primaryColor: '#4caf50', accentColors: accentSet('#4caf50', '#43a047', '0 0 0 0.2rem rgba(76,175,80,0.2)') },
+  { name: 'Purple', primaryColor: '#b340fa', accentColors: accentSet('#b340fa', '#8e24aa', '0 0 0 0.2rem rgba(156,39,176,0.2)') },
+];
 
 @Component({
   selector: 'app-theme-config',
@@ -35,6 +81,11 @@ interface ThemeOption {
 
         <div class="col-12 mt-4">
           <h5>Theme Colors</h5>
+          <p class="text-sm text-500 mt-0 mb-3">
+            The accent color styles navigation, buttons and controls. Operational
+            status colors (green = healthy, amber = caution, red = error) are fixed
+            and never follow the accent.
+          </p>
           <div class="grid gap-2">
             <div *ngFor="let theme of themes" class="col-4 sm:col-2 theme-color">
               <button pButton [class]="'p-button-rounded p-button-text color-dot'"
@@ -52,171 +103,10 @@ interface ThemeOption {
   `,
   styleUrls: ['./design-component.scss']
 })
-export class ThemeConfigComponent implements OnInit {
+export class ThemeConfigComponent implements OnInit, OnDestroy {
   selectedScheme: string;
   currentColor: string = '';
-  themes: ThemeOption[] = [
-    {
-      name: 'Orange',
-      primaryColor: '#F7931A',
-      accentColors: {
-        '--primary-color': '#F7931A',
-        '--primary-color-text': '#ffffff',
-        '--highlight-bg': '#F7931A',
-        '--highlight-text-color': '#ffffff',
-        '--focus-ring': '0 0 0 0.2rem rgba(247,147,26,0.2)',
-        // PrimeNG Slider
-        '--slider-bg': '#dee2e6',
-        '--slider-range-bg': '#F7931A',
-        '--slider-handle-bg': '#F7931A',
-        // Progress Bar
-        '--progressbar-bg': '#dee2e6',
-        '--progressbar-value-bg': '#F7931A',
-        // PrimeNG Checkbox
-        '--checkbox-border': '#F7931A',
-        '--checkbox-bg': '#F7931A',
-        '--checkbox-hover-bg': '#e58617',
-        // PrimeNG Button
-        '--button-bg': '#F7931A',
-        '--button-hover-bg': '#e58617',
-        '--button-focus-shadow': '0 0 0 2px #ffffff, 0 0 0 4px #F7931A',
-        // Toggle button
-        '--togglebutton-bg': '#F7931A',
-        '--togglebutton-border': '1px solid #F7931A',
-        '--togglebutton-hover-bg': '#e58617',
-        '--togglebutton-hover-border': '1px solid #e58617',
-        '--togglebutton-text-color': '#ffffff'
-      }
-    },
-    {
-      name: 'Red',
-      primaryColor: '#F80421',
-      accentColors: {
-        '--primary-color': '#F80421',
-        '--primary-color-text': '#ffffff',
-        '--highlight-bg': '#F80421',
-        '--highlight-text-color': '#ffffff',
-        '--focus-ring': '0 0 0 0.2rem rgba(255,64,50,0.2)',
-        // PrimeNG Slider
-        '--slider-bg': '#dee2e6',
-        '--slider-range-bg': '#F80421',
-        '--slider-handle-bg': '#F80421',
-        // Progress Bar
-        '--progressbar-bg': '#dee2e6',
-        '--progressbar-value-bg': '#F80421',
-        // PrimeNG Checkbox
-        '--checkbox-border': '#F80421',
-        '--checkbox-bg': '#F80421',
-        '--checkbox-hover-bg': '#e63c2e',
-        // PrimeNG Button
-        '--button-bg': '#F80421',
-        '--button-hover-bg': '#e63c2e',
-        '--button-focus-shadow': '0 0 0 2px #ffffff, 0 0 0 4px #F80421',
-        // Toggle button
-        '--togglebutton-bg': '#F80421',
-        '--togglebutton-border': '1px solid #F80421',
-        '--togglebutton-hover-bg': '#e63c2e',
-        '--togglebutton-hover-border': '1px solid #e63c2e',
-        '--togglebutton-text-color': '#ffffff'
-      }
-    },
-    {
-      name: 'Blue',
-      primaryColor: '#2196f3',
-      accentColors: {
-        '--primary-color': '#2196f3',
-        '--primary-color-text': '#ffffff',
-        '--highlight-bg': '#2196f3',
-        '--highlight-text-color': '#ffffff',
-        '--focus-ring': '0 0 0 0.2rem rgba(33,150,243,0.2)',
-        // PrimeNG Slider
-        '--slider-bg': '#dee2e6',
-        '--slider-range-bg': '#2196f3',
-        '--slider-handle-bg': '#2196f3',
-        // Progress Bar
-        '--progressbar-bg': '#dee2e6',
-        '--progressbar-value-bg': '#2196f3',
-        // PrimeNG Checkbox
-        '--checkbox-border': '#2196f3',
-        '--checkbox-bg': '#2196f3',
-        '--checkbox-hover-bg': '#1e88e5',
-        // PrimeNG Button
-        '--button-bg': '#2196f3',
-        '--button-hover-bg': '#1e88e5',
-        '--button-focus-shadow': '0 0 0 2px #ffffff, 0 0 0 4px #2196f3',
-        // Toggle button
-        '--togglebutton-bg': '#2196f3',
-        '--togglebutton-border': '1px solid #2196f3',
-        '--togglebutton-hover-bg': '#1e88e5',
-        '--togglebutton-hover-border': '1px solid #1e88e5',
-        '--togglebutton-text-color': '#ffffff'
-      }
-    },
-    {
-      name: 'Green (Default)',
-      primaryColor: '#4caf50',
-      accentColors: {
-        '--primary-color': '#4caf50',
-        '--primary-color-text': '#ffffff',
-        '--highlight-bg': '#4caf50',
-        '--highlight-text-color': '#ffffff',
-        '--focus-ring': '0 0 0 0.2rem rgba(76,175,80,0.2)',
-        // PrimeNG Slider
-        '--slider-bg': '#dee2e6',
-        '--slider-range-bg': '#4caf50',
-        '--slider-handle-bg': '#4caf50',
-        // Progress Bar
-        '--progressbar-bg': '#dee2e6',
-        '--progressbar-value-bg': '#4caf50',
-        // PrimeNG Checkbox
-        '--checkbox-border': '#4caf50',
-        '--checkbox-bg': '#4caf50',
-        '--checkbox-hover-bg': '#43a047',
-        // PrimeNG Button
-        '--button-bg': '#4caf50',
-        '--button-hover-bg': '#43a047',
-        '--button-focus-shadow': '0 0 0 2px #ffffff, 0 0 0 4px #4caf50',
-        // Toggle button
-        '--togglebutton-bg': '#4caf50',
-        '--togglebutton-border': '1px solid #4caf50',
-        '--togglebutton-hover-bg': '#43a047',
-        '--togglebutton-hover-border': '1px solid #43a047',
-        '--togglebutton-text-color': '#ffffff'
-      }
-    },
-    {
-      name: 'Purple',
-      primaryColor: '#b340fa',
-      accentColors: {
-        '--primary-color': '#b340fa',
-        '--primary-color-text': '#ffffff',
-        '--highlight-bg': '#b340fa',
-        '--highlight-text-color': '#ffffff',
-        '--focus-ring': '0 0 0 0.2rem rgba(156,39,176,0.2)',
-        // PrimeNG Slider
-        '--slider-bg': '#dee2e6',
-        '--slider-range-bg': '#b340fa',
-        '--slider-handle-bg': '#b340fa',
-        // Progress Bar
-        '--progressbar-bg': '#dee2e6',
-        '--progressbar-value-bg': '#b340fa',
-        // PrimeNG Checkbox
-        '--checkbox-border': '#b340fa',
-        '--checkbox-bg': '#b340fa',
-        '--checkbox-hover-bg': '#8e24aa',
-        // PrimeNG Button
-        '--button-bg': '#b340fa',
-        '--button-hover-bg': '#8e24aa',
-        '--button-focus-shadow': '0 0 0 2px #ffffff, 0 0 0 4px #b340fa',
-        // Toggle button
-        '--togglebutton-bg': '#b340fa',
-        '--togglebutton-border': '1px solid #b340fa',
-        '--togglebutton-hover-bg': '#8e24aa',
-        '--togglebutton-hover-border': '1px solid #8e24aa',
-        '--togglebutton-text-color': '#ffffff'
-      }
-    }
-  ];
+  themes: ThemeOption[] = THEME_PRESETS;
 
   private destroy$ = new Subject<void>();
 
@@ -252,9 +142,9 @@ export class ThemeConfigComponent implements OnInit {
   }
 
   private applyThemeColors(colors: { [key: string]: string }) {
-    Object.entries(colors).forEach(([key, value]) => {
-      document.documentElement.style.setProperty(key, value);
-    });
+    // Allowlist-filtered: accent themes style chrome only and can never
+    // override semantic operational colors (--nx-sem-*).
+    applyAccentColors(colors);
   }
 
   changeColorScheme(scheme: string) {

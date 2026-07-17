@@ -9,6 +9,16 @@ import { SystemApiService } from 'src/app/services/system.service';
 import { DeckFmt } from 'src/app/components/command-deck/deck-format';
 import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
 import { ActivatedRoute } from '@angular/router';
+import {
+  TUNING_BOUNDS,
+  TuningPreset,
+  PendingChange,
+  activeTuningPreset,
+  buildTuningPresets,
+  firmwareRangeValidator,
+  pendingChanges,
+} from './tuning';
+import { SemanticSeverity, asicTempSeverity, fanSaturationSeverity, thermalDeltaSeverity, vrTempSeverity } from 'src/app/services/semantic-status';
 
 type Dropdown = {
   name: string;
@@ -44,6 +54,16 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
 
   public displays = ["NONE", "SSD1306 (128x32)", "SSD1309 (128x64)", "SH1107 (64x128)", "SH1107 (128x128)"];
   public rotations = [0, 90, 180, 270];
+
+  /**
+   * Configuration currently stored on the device — the "Current" side of the
+   * Current/Pending review. Captured when the form loads and refreshed after
+   * every successful save; never mutated by edits.
+   */
+  public baseline: { [key: string]: any } | null = null;
+
+  /** Presets built ONLY from the device-served option lists; [] when unavailable. */
+  public presets: TuningPreset[] = [];
   public displayTimeoutControl: FormControl;
   public statsFrequencyControl: FormControl;
   public statsLimit: number = 720;
@@ -178,12 +198,25 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
             Validators.min(-1),
             Validators.max(this.displayTimeoutMaxValue)
           ]],
-          coreVoltage: [info.coreVoltage, [Validators.required]],
-          frequency: [info.frequency, [Validators.required]],
+          // Numeric bounds mirror the firmware's NVS validation (nvs_config.c):
+          // the form blocks exactly what the device would reject, including
+          // NaN/null/non-finite submissions.
+          coreVoltage: [info.coreVoltage, [
+            firmwareRangeValidator(TUNING_BOUNDS.coreVoltage.min, TUNING_BOUNDS.coreVoltage.max, true)
+          ]],
+          frequency: [info.frequency, [
+            firmwareRangeValidator(TUNING_BOUNDS.frequency.min, TUNING_BOUNDS.frequency.max)
+          ]],
           autofanspeed: [info.autofanspeed == 1, [Validators.required]],
-          minfanspeed: [info.minFanSpeed, [Validators.required]],
-          manualFanSpeed: [info.manualFanSpeed, [Validators.required]],
-          temptarget: [info.temptarget, [Validators.required]],
+          minfanspeed: [info.minFanSpeed, [
+            firmwareRangeValidator(TUNING_BOUNDS.minFanSpeed.min, TUNING_BOUNDS.minFanSpeed.max, true)
+          ]],
+          manualFanSpeed: [info.manualFanSpeed, [
+            firmwareRangeValidator(TUNING_BOUNDS.manualFanSpeed.min, TUNING_BOUNDS.manualFanSpeed.max, true)
+          ]],
+          temptarget: [info.temptarget, [
+            firmwareRangeValidator(TUNING_BOUNDS.temptarget.min, TUNING_BOUNDS.temptarget.max, true)
+          ]],
           overheat_mode: [info.overheat_mode, [Validators.required]],
           statsFrequency: [info.statsFrequency, [
             Validators.required,
@@ -191,6 +224,12 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
             Validators.max(this.statsFrequencyMaxValue)
           ]]
         });
+
+        this.baseline = this.form.getRawValue();
+        this.presets = buildTuningPresets(
+          asic.frequencyOptions, asic.voltageOptions,
+          asic.defaultFrequency, asic.defaultVoltage,
+        );
 
         this.formSubject.next(this.form);
 
@@ -235,24 +274,31 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
     this.destroy$.complete();
   }
 
-  public updateSystem() {
+  public updateSystem(restartAfter: boolean = false) {
     const form = this.form.getRawValue();
 
     if (form.stratumPassword === '*****') {
       delete form.stratumPassword;
     }
 
+    const restartWasNeeded = this.isRestartRequired;
     const deviceUri = this.uri || '';
     this.systemService.updateSystem(deviceUri, form)
       .pipe(this.loadingService.lockUIUntilComplete())
       .subscribe({
         next: () => {
           const successMessage = this.uri ? `Saved settings for ${this.uri}` : 'Saved settings';
-          if (this.isRestartRequired) {
+          if (restartWasNeeded && !restartAfter) {
             this.toastr.warning('You must restart this device after saving for changes to take effect.');
           }
           this.toastr.success(successMessage);
           this.savedChanges = true;
+          // The device now stores the pending values: they are the new baseline.
+          this.baseline = this.form.getRawValue();
+          this.form.markAsPristine();
+          if (restartAfter) {
+            this.restart();
+          }
         },
         error: (err: HttpErrorResponse) => {
           const errorMessage = this.uri ? `Could not save settings for ${this.uri}. ${err.message}` : `Could not save settings. ${err.message}`;
@@ -260,6 +306,117 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
           this.savedChanges = false;
         }
       });
+  }
+
+  /** Explicit Save-then-Restart — never triggered silently. */
+  public applyAndRestart() {
+    this.updateSystem(true);
+  }
+
+  /** Discard unsaved edits and return every control to the stored baseline. */
+  public revertChanges() {
+    if (!this.baseline) {
+      return;
+    }
+    // Aux slider controls first: their valueChanges handlers patch the form
+    // and mark it dirty, so the final patch + markAsPristine must come last.
+    this.displayTimeoutControl.setValue(
+      DISPLAY_TIMEOUT_STEPS.findIndex(x => x === this.baseline!['displayTimeout'])
+    );
+    this.statsFrequencyControl.setValue(
+      STATS_FREQUENCY_STEPS.findIndex(x => x === this.baseline!['statsFrequency'])
+    );
+    this.form.patchValue(this.baseline);
+    this.form.markAsPristine();
+  }
+
+  // ---- presets (existing valid board values only; display + pending fill) ----
+
+  /** Preset matching the pending values, or 'custom' when they diverge. */
+  get activePreset(): string {
+    return activeTuningPreset(
+      this.form?.get('frequency')?.value,
+      this.form?.get('coreVoltage')?.value,
+      this.presets,
+    );
+  }
+
+  /**
+   * Fill the pending frequency/voltage controls with a preset's exact values.
+   * Nothing is saved and nothing restarts — Save / Apply & Restart stay
+   * explicit user actions.
+   */
+  public applyPreset(preset: TuningPreset) {
+    this.form.patchValue({ frequency: preset.frequency, coreVoltage: preset.coreVoltage });
+    this.form.get('frequency')?.markAsDirty();
+    this.form.get('coreVoltage')?.markAsDirty();
+  }
+
+  // ---- Current/Pending review ----
+
+  get pendingList(): PendingChange[] {
+    if (!this.baseline || !this.form) {
+      return [];
+    }
+    return pendingChanges(this.baseline, this.form.getRawValue(), this.noRestartFields);
+  }
+
+  // ---- current operating state (read-only live telemetry helpers) ----
+
+  /** J/TH derived from live power and hashrate; null when hashrate is 0/invalid. */
+  public liveEfficiency(info: ISystemInfo): number | null {
+    const th = (typeof info.hashRate === 'number' && isFinite(info.hashRate) ? info.hashRate : 0) / 1000;
+    if (th <= 0 || typeof info.power !== 'number' || !isFinite(info.power)) {
+      return null;
+    }
+    return info.power / th;
+  }
+
+  /** Signed °C distance from the configured target; null without valid data. */
+  public thermalDelta(info: ISystemInfo): number | null {
+    if (typeof info.temp !== 'number' || !isFinite(info.temp) || info.temp <= 0
+      || typeof info.temptarget !== 'number' || !isFinite(info.temptarget) || info.temptarget <= 0) {
+      return null;
+    }
+    return info.temp - info.temptarget;
+  }
+
+  public thermalDeltaText(info: ISystemInfo): string {
+    const delta = this.thermalDelta(info);
+    if (delta === null) {
+      return DeckFmt.INVALID;
+    }
+    const rounded = Math.round(delta);
+    if (rounded === 0) {
+      return 'At target';
+    }
+    return `${rounded > 0 ? '+' : ''}${rounded} °C vs target`;
+  }
+
+  public tempSeverityClass(info: ISystemInfo): string {
+    return this.severityText(thermalDeltaSeverity(info.temp, info.temptarget));
+  }
+
+  public vrTempSeverityClass(info: ISystemInfo): string {
+    return this.severityText(vrTempSeverity(info.vrTemp));
+  }
+
+  public fanSeverityClass(info: ISystemInfo): string {
+    return this.severityText(fanSaturationSeverity((info.autofanspeed ?? 0) == 1, info.fanspeed));
+  }
+
+  public asicTempClass(temp: number | undefined): string {
+    return this.severityText(asicTempSeverity(temp));
+  }
+
+  private severityText(severity: SemanticSeverity): string {
+    switch (severity) {
+      case 'ok': return 'nx-ok-text';
+      case 'warn': return 'nx-warn-text';
+      case 'danger': return 'nx-danger-text';
+      case 'info': return 'nx-info-text';
+      default: return 'nx-neutral-text';
+    }
   }
 
   disableOverheatMode() {

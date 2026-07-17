@@ -4,6 +4,8 @@ import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { of } from 'rxjs';
 
 import { EditComponent } from './edit.component';
+import { SystemApiService } from 'src/app/services/system.service';
+import { buildTuningPresets, firmwareRangeValidator } from './tuning';
 import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
 import { DropdownModule } from 'primeng/dropdown';
 import { CheckboxModule } from 'primeng/checkbox';
@@ -105,6 +107,118 @@ describe('EditComponent', () => {
       // Configured value untouched by the display of measured telemetry.
       expect(component.form.get('coreVoltage')?.value).toBe(1150);
       expect(component.form.dirty).toBeFalse();
+    });
+
+    it('presets only fill the pending controls — nothing is saved or restarted', () => {
+      setup(1150, [1100, 1150, 1200, 1250, 1300], 1150);
+      component.frequencyOptions = [400, 425, 485, 575];
+      component.defaultFrequency = 485;
+      component.presets = buildTuningPresets([400, 425, 485, 575], [1100, 1150, 1200, 1250, 1300], 485, 1150);
+
+      const systemService = TestBed.inject(SystemApiService);
+      const saveSpy = spyOn(systemService, 'updateSystem');
+      const restartSpy = spyOn(systemService, 'restart');
+
+      const eco = component.presets.find(p => p.id === 'eco')!;
+      component.applyPreset(eco);
+
+      expect(component.form.get('frequency')?.value).toBe(400);
+      expect(component.form.get('coreVoltage')?.value).toBe(1100);
+      expect(component.form.dirty).toBeTrue();
+      expect(saveSpy).not.toHaveBeenCalled();
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(component.activePreset).toBe('eco');
+    });
+
+    it('activePreset falls back to custom when pending values diverge from every preset', () => {
+      setup(1150, [1100, 1150, 1200, 1250, 1300], 1150);
+      component.presets = buildTuningPresets([400, 425, 485, 575], [1100, 1150, 1200, 1250, 1300], 485, 1150);
+      component.form.patchValue({ frequency: 625, coreVoltage: 1150 });
+      expect(component.activePreset).toBe('custom');
+    });
+
+    it('pendingList reports Current → Pending with restart classification', () => {
+      setup(1150, [1100, 1150, 1200], 1150);
+      component.baseline = component.form.getRawValue();
+      component.form.patchValue({ frequency: 485, display: 'SSD1306 (128x32)' });
+
+      const changes = component.pendingList;
+      const freq = changes.find(c => c.field === 'frequency')!;
+      const display = changes.find(c => c.field === 'display')!;
+      expect(freq.current).toBe('625 MHz');
+      expect(freq.pending).toBe('485 MHz');
+      expect(freq.restartRequired).toBeFalse();     // applied live by the firmware
+      expect(display.restartRequired).toBeTrue();   // display change needs a restart
+    });
+
+    it('revertChanges restores the stored baseline and leaves the form pristine', () => {
+      setup(1150, [1100, 1150, 1200], 1150);
+      component.baseline = component.form.getRawValue();
+      component.form.patchValue({ frequency: 400, coreVoltage: 1300, temptarget: 60 });
+      component.form.markAsDirty();
+
+      component.revertChanges();
+
+      expect(component.form.get('frequency')?.value).toBe(625);
+      expect(component.form.get('coreVoltage')?.value).toBe(1150);
+      expect(component.form.get('temptarget')?.value).toBe(55);
+      expect(component.form.dirty).toBeFalse();
+      expect(component.pendingList).toEqual([]);
+    });
+
+    it('Apply & Restart saves first and restarts only after a successful save', () => {
+      setup(1150, [1100, 1150, 1200], 1150);
+      component.baseline = component.form.getRawValue();
+      component.form.patchValue({ frequency: 485 });
+      component.form.markAsDirty();
+
+      const systemService = TestBed.inject(SystemApiService);
+      const calls: string[] = [];
+      spyOn(systemService, 'updateSystem').and.callFake(() => { calls.push('save'); return of(undefined); });
+      spyOn(systemService, 'restart').and.callFake(() => { calls.push('restart'); return of({ message: 'ok' }); });
+
+      component.applyAndRestart();
+
+      expect(calls).toEqual(['save', 'restart']);
+      // After a successful save the pending values become the new baseline.
+      expect(component.baseline?.['frequency']).toBe(485);
+      expect(component.form.dirty).toBeFalse();
+    });
+
+    it('a plain Save never restarts and re-baselines the form', () => {
+      setup(1150, [1100, 1150, 1200], 1150);
+      component.baseline = component.form.getRawValue();
+      component.form.patchValue({ temptarget: 60 });
+      component.form.markAsDirty();
+
+      const systemService = TestBed.inject(SystemApiService);
+      spyOn(systemService, 'updateSystem').and.returnValue(of(undefined));
+      const restartSpy = spyOn(systemService, 'restart');
+
+      component.updateSystem();
+
+      expect(restartSpy).not.toHaveBeenCalled();
+      expect(component.baseline?.['temptarget']).toBe(60);
+      expect(component.pendingList).toEqual([]);
+    });
+
+    it('firmware-range validation invalidates the form for out-of-range or NaN values', () => {
+      setup(1150, [1100, 1150, 1200], 1150);
+      const temp = component.form.get('temptarget')!;
+      temp.setValidators([firmwareRangeValidator(35, 66, true)]);
+
+      temp.setValue(80);
+      temp.updateValueAndValidity();
+      expect(temp.invalid).toBeTrue();
+      expect(component.form.invalid).toBeTrue();   // Save & Apply buttons disable on form.invalid
+
+      temp.setValue(NaN);
+      temp.updateValueAndValidity();
+      expect(temp.invalid).toBeTrue();
+
+      temp.setValue(55);
+      temp.updateValueAndValidity();
+      expect(temp.valid).toBeTrue();
     });
 
     it('guards invalid measured telemetry (no unit confusion, no NaN text)', () => {

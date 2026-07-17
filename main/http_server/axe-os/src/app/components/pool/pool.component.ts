@@ -8,6 +8,8 @@ import { LiveDataService } from 'src/app/services/live-data.service';
 import { DeckFmt } from 'src/app/components/command-deck/deck-format';
 import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
 import { Observable, first } from 'rxjs';
+import { ModalComponent } from 'src/app/components/modal/modal.component';
+import { PoolSwitchGate, PoolSwitchPlan, poolSwitchGate, poolSwitchPlan } from './pool-switch';
 
 type PoolType = 'stratum' | 'fallbackStratum';
 
@@ -62,6 +64,14 @@ export class PoolComponent implements OnInit {
   ];
 
   public asicModel: string = '';
+
+  /**
+   * Snapshot of the switch plan taken when the confirmation dialog opens, so
+   * the dialog contents cannot change under the user while live data updates.
+   * Null while no switch is being confirmed. Never contains credentials.
+   */
+  public switchPlan: PoolSwitchPlan | null = null;
+  public switchBusy: boolean = false;
 
   @Input() uri = '';
 
@@ -184,6 +194,70 @@ export class PoolComponent implements OnInit {
         error: (err: HttpErrorResponse) => {
           const errorMessage = this.uri ? `Failed to restart device at ${this.uri}. ${err.message}` : `Failed to restart device. ${err.message}`;
           this.toastr.error(errorMessage);
+        }
+      });
+  }
+
+  // ---- safe pool switching (Stage 2G) ----
+  // Flips the stored preferred-pool flag (useFallbackStratum) via the
+  // existing PATCH /api/system save path, then uses the existing restart.
+  // Both pool configurations — including write-only passwords — are
+  // preserved exactly because nothing else is written. Automatic fallback
+  // logic in the firmware is untouched. Nothing here runs on page load.
+
+  public switchGate(info: ISystemInfo): PoolSwitchGate {
+    return poolSwitchGate(info, this.form?.dirty ?? false);
+  }
+
+  public openSwitchDialog(info: ISystemInfo, modal: ModalComponent): void {
+    if (!this.switchGate(info).allowed || this.switchBusy) {
+      return;
+    }
+    this.switchPlan = poolSwitchPlan(info);
+    modal.isVisible = true;
+  }
+
+  public cancelSwitch(modal: ModalComponent): void {
+    if (this.switchBusy) {
+      return;
+    }
+    modal.isVisible = false;
+    this.switchPlan = null;
+  }
+
+  public confirmSwitch(modal: ModalComponent): void {
+    const plan = this.switchPlan;
+    if (!plan || this.switchBusy) {
+      return;
+    }
+    this.switchBusy = true;
+    // Only the preference flag is written; no pool fields, no credentials.
+    this.systemService.updateSystem(this.uri, plan.patch)
+      .pipe(this.loadingService.lockUIUntilComplete())
+      .subscribe({
+        next: () => {
+          this.systemService.restart(this.uri)
+            .pipe(this.loadingService.lockUIUntilComplete())
+            .subscribe({
+              next: () => {
+                this.toastr.success(`Switching pools — the device is restarting and will mine on ${plan.activeAfter.host}.`);
+                this.switchBusy = false;
+                this.switchPlan = null;
+                modal.isVisible = false;
+              },
+              error: (err: HttpErrorResponse) => {
+                this.toastr.error(`The preferred pool was saved, but the restart failed (${err.message}). Use the Restart button to apply it.`);
+                this.switchBusy = false;
+                this.switchPlan = null;
+                modal.isVisible = false;
+              }
+            });
+        },
+        error: (err: HttpErrorResponse) => {
+          this.toastr.error(`Could not switch pools — nothing was changed on the device. ${err.message}`);
+          this.switchBusy = false;
+          this.switchPlan = null;
+          modal.isVisible = false;
         }
       });
   }

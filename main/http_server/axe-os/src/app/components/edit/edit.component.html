@@ -1,4 +1,73 @@
 <form *ngIf="form" [formGroup]="form">
+    <ng-container *ngIf="!uri && (measured$ | async) as live">
+        <h3 class="nx-section-heading mt-0">Current Operating State</h3>
+        <div class="card mb-4">
+            <div class="nx-statrow" style="border-top: 0; margin-top: 0; padding-top: 0;">
+                <div class="nx-stat">
+                    <label>Configured Freq</label>
+                    <span>{{ fmt.num(live.frequency, 0, ' MHz') }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Actual Freq</label>
+                    <span>{{ fmt.num(live.actualFrequency, 0, ' MHz') }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Configured Voltage</label>
+                    <span>{{ fmt.int(live.coreVoltage, ' mV') }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Measured Voltage</label>
+                    <span>{{ fmt.volts(live.coreVoltageActual) }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>ASIC Temp</label>
+                    <span [class]="asicTempClass(live.temp)">{{ fmt.temp(live.temp) }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>VRM Temp</label>
+                    <span [class]="vrTempSeverityClass(live)">{{ fmt.temp(live.vrTemp) }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Thermal Delta</label>
+                    <span [class]="tempSeverityClass(live)">{{ thermalDeltaText(live) }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Target Temp</label>
+                    <span>{{ fmt.temp(live.temptarget) }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Fan</label>
+                    <span [class]="fanSeverityClass(live)">{{ fmt.int(live.fanspeed, ' %') }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Fan RPM</label>
+                    <span>{{ fmt.int(live.fanrpm) }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Min Fan</label>
+                    <span>{{ fmt.int(live.minFanSpeed, ' %') }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Power</label>
+                    <span>{{ fmt.num(live.power, 1, ' W') }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Efficiency</label>
+                    <span>{{ fmt.num(liveEfficiency(live), 1, ' J/TH') }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>ASIC Errors</label>
+                    <span [class.nx-warn-text]="(live.errorPercentage ?? 0) > 2">{{ fmt.pct(live.errorPercentage, 2) }}</span>
+                </div>
+            </div>
+            <small class="block text-500 mt-2">
+                Live telemetry — read-only. The controls below edit the pending configuration;
+                nothing is applied until you Save or Apply &amp; Restart.
+            </small>
+        </div>
+    </ng-container>
+
+    <h3 class="nx-section-heading mt-0">Pending Configuration</h3>
     <div class="grid">
         <div class="col-12 xl:col-6">
             <h3 class="nx-section-heading mt-0">Mining Core</h3>
@@ -13,6 +82,9 @@
                         <label for="frequency" class="col-12 md:col-4 md:m-0">Frequency (MHz)</label>
                         <div class="col-12 md:col-8">
                             <input pInputText id="frequency" formControlName="frequency" type="number" />
+                            <small *ngIf="form.get('frequency')?.invalid" class="block text-red-500 mt-1">
+                                Enter a valid frequency between 1 and 65535 MHz (the firmware rejects anything else).
+                            </small>
                         </div>
                     </ng-container>
                     <ng-container *ngIf="!settingsUnlocked">
@@ -34,6 +106,9 @@
                         <label for="coreVoltage" class="col-12 md:col-4 md:m-0">Core Voltage (mV)</label>
                         <div class="col-12 md:col-8">
                             <input pInputText id="coreVoltage" formControlName="coreVoltage" type="number" />
+                            <small *ngIf="form.get('coreVoltage')?.invalid" class="block text-red-500 mt-1">
+                                Enter a whole millivolt value between 1 and 65535 (the firmware rejects anything else).
+                            </small>
                         </div>
                     </ng-container>
                     <ng-container *ngIf="!settingsUnlocked">
@@ -48,6 +123,21 @@
                             ></p-dropdown>
                         </div>
                     </ng-container>
+                </div>
+
+                <div *ngIf="presets.length" class="mt-2 mb-3">
+                    <label class="block mb-2 text-sm">Presets <span class="text-500">(from the board's own valid values — nothing applies until you save)</span></label>
+                    <div class="flex gap-2 flex-wrap">
+                        <button *ngFor="let preset of presets" pButton type="button"
+                            class="p-button-sm"
+                            [class.p-button-secondary]="activePreset !== preset.id"
+                            [attr.aria-pressed]="activePreset === preset.id"
+                            (click)="applyPreset(preset)"
+                            [pTooltip]="'Fills the pending fields with ' + preset.frequency + ' MHz / ' + preset.coreVoltage + ' mV. No save, no restart.'">
+                            {{ preset.label }} · {{ preset.frequency }} MHz / {{ preset.coreVoltage }} mV
+                        </button>
+                        <span class="nx-pill align-self-center" *ngIf="activePreset === 'custom'">Custom</span>
+                    </div>
                 </div>
 
                 <small class="block text-500">
@@ -126,6 +216,14 @@
                     · <b class="text-color">{{ fmt.int(live.fanrpm, ' RPM') }}</b>
                     <span class="text-500">(live telemetry)</span>
                 </div>
+
+                <div class="nx-note mt-3">
+                    Supported thermal controls: automatic fan mode, target temperature (35–66 °C),
+                    minimum fan speed, manual fan speed. Fan curves, temperature-limit tuning,
+                    hysteresis and power-limit controls are
+                    <b class="text-500">not supported by the current firmware contract</b>
+                    and are deliberately not offered here.
+                </div>
             </div>
         </div>
 
@@ -202,14 +300,42 @@
         </div>
     </div>
 
+    <div *ngIf="pendingList.length" class="card mt-3 mb-0">
+        <h3 class="nx-card-title">Pending Changes</h3>
+        <div class="nx-kv">
+            <div class="nx-kv-row" *ngFor="let change of pendingList">
+                <label>{{ change.label }}</label>
+                <b>
+                    <span class="text-500">{{ change.current }}</span>
+                    <i class="pi pi-arrow-right mx-2 text-xs text-500"></i>
+                    <span>{{ change.pending }}</span>
+                    <span class="nx-pill ml-2" [ngClass]="change.restartRequired ? 'nx-pill-warn' : ''">
+                        {{ change.restartRequired ? 'Restart required' : 'Applies after Save' }}
+                    </span>
+                </b>
+            </div>
+        </div>
+        <small class="block text-500 mt-2">
+            Current shows the configuration stored on the device; Pending shows your unsaved edits.
+        </small>
+    </div>
+
     <div class="flex mt-4 gap-3 align-items-center flex-wrap">
         <button pButton [disabled]="!form.dirty || form.invalid" (click)="updateSystem()"
             class="btn btn-primary">Save</button>
 
+        <button pButton [disabled]="!form.dirty || form.invalid" (click)="applyAndRestart()"
+            pTooltip="Save the pending configuration, then restart the device to apply everything at once">
+            Apply &amp; Restart</button>
+
+        <button pButton class="p-button-secondary" [disabled]="!form.dirty" (click)="revertChanges()"
+            pTooltip="Discard the unsaved edits and return to the configuration stored on the device">
+            Revert Unsaved Changes</button>
+
         <button pButton [disabled]="!savedChanges" (click)="restart()">Restart</button>
 
         <span *ngIf="form.dirty && !savedChanges" class="nx-pill nx-pill-warn">Unsaved changes</span>
-        <span *ngIf="savedChanges" class="nx-pill nx-pill-ok">Saved — restart applies device-side changes</span>
+        <span *ngIf="savedChanges && !form.dirty" class="nx-pill nx-pill-ok">Saved — restart applies device-side changes</span>
 
         <button *ngIf="settingsUnlocked" pButton pButton="p-button-danger" (click)="toggleOverclockMode(false)"
             class="p-button-danger ml-auto" pTooltip="Return to safe preset values only">Disable Overclock Mode</button>
