@@ -21,29 +21,56 @@ export class AppMenuComponent implements OnInit {
   }
 
   ngOnInit() {
+    // NeuralAxe information architecture: grouped product sections instead of
+    // the upstream flat page list. Route PATHS are unchanged — only labels and
+    // grouping — so deep links and bookmarks keep working. The Bitcoin
+    // whitepaper stays reachable from the About page (no top-level entry).
     this.model = [
       {
-        label: 'Menu',
+        label: 'Overview',
         items: [
-          { label: 'Overview', icon: 'pi pi-fw pi-th-large', routerLink: ['/'] },
-          { label: 'Classic', icon: 'pi pi-fw pi-home', routerLink: ['classic'] },
+          { label: 'Command Deck', icon: 'pi pi-fw pi-th-large', routerLink: ['/'] },
+        ],
+      },
+      {
+        label: 'Mining',
+        items: [
           { label: 'Scoreboard', icon: 'pi pi-fw pi-trophy', routerLink: ['scoreboard'] },
-          { label: 'Swarm', icon: 'pi pi-fw pi-sitemap', routerLink: ['swarm'] },
-          { label: 'Logs', icon: 'pi pi-fw pi-list', routerLink: ['logs'] },
-          { label: 'System', icon: 'pi pi-fw pi-wave-pulse', routerLink: ['system'] },
-          { separator: true },
-
+          { label: 'Fleet', icon: 'pi pi-fw pi-sitemap', routerLink: ['swarm'] },
+        ],
+      },
+      {
+        label: 'Configuration',
+        items: [
           { label: 'Pools', icon: 'pi pi-fw pi-server', routerLink: ['pool'] },
           { label: 'Network', icon: 'pi pi-fw pi-wifi', routerLink: ['network'] },
-          { label: 'Theme', icon: 'pi pi-fw pi-palette', routerLink: ['design'] },
-          { label: 'Settings', icon: 'pi pi-fw pi-cog', routerLink: ['settings'] },
-          { label: 'Update', icon: 'pi pi-fw pi-sync', routerLink: ['update'] },
-          { separator: true },
-
-          { label: 'About', icon: 'pi pi-fw pi-info-circle', routerLink: ['about'] },
-          { label: 'Whitepaper', icon: 'pi pi-fw pi-bitcoin', command: () => window.open('/bitcoin.pdf', '_blank') },
-        ]
-      }
+          { label: 'Tuning & Thermal', icon: 'pi pi-fw pi-sliders-h', routerLink: ['settings'] },
+          { label: 'Display & Appearance', icon: 'pi pi-fw pi-palette', routerLink: ['design'] },
+        ],
+      },
+      {
+        label: 'System',
+        items: [
+          { label: 'Device Status', icon: 'pi pi-fw pi-wave-pulse', routerLink: ['system'] },
+          { label: 'Logs', icon: 'pi pi-fw pi-list', routerLink: ['logs'] },
+          { label: 'Updates', icon: 'pi pi-fw pi-sync', routerLink: ['update'] },
+        ],
+      },
+      {
+        label: 'Product',
+        items: [
+          { label: 'About NeuralAxe', icon: 'pi pi-fw pi-info-circle', routerLink: ['about'] },
+        ],
+      },
+      {
+        label: 'Advanced',
+        items: [
+          {
+            label: 'Legacy Dashboard', icon: 'pi pi-fw pi-home', routerLink: ['classic'],
+            title: 'Original upstream-compatible monitoring interface',
+          },
+        ],
+      },
     ];
   }
 }

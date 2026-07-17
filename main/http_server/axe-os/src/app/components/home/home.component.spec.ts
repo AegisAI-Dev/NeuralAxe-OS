@@ -84,6 +84,68 @@ describe('HomeComponent', () => {
     expect(component).toBeTruthy();
   });
 
+  describe('version-pair banner (firmware vs installed web revision)', () => {
+    const FW = 'v2.14.2-13-g388287da';
+    const OLD = 'v2.14.2-9-gc630e1a';
+    const noError = { duration: 0, startTime: null };
+
+    function infoWith(version: string, axeOSVersion: string): any {
+      return {
+        version, axeOSVersion,
+        overheat_mode: 0, power_fault: undefined, hardware_fault: undefined,
+        frequency: 625, isUsingFallbackStratum: 0, miningPaused: false,
+        coinbaseOutputs: [],
+      };
+    }
+
+    function messageOf(type: string) {
+      return component.messages.find(m => m.type === type as any);
+    }
+
+    it('shows no mismatch and no restart note for a fully matching pair', () => {
+      component.installedWebVersion = FW;
+      component.handleSystemMessages(infoWith(FW, FW), noError);
+      expect(messageOf('VERSION_MISMATCH')).toBeUndefined();
+      expect(messageOf('WEB_RESTART_PENDING')).toBeUndefined();
+    });
+
+    it('warns on a genuine mismatch between firmware and the installed web artifact', () => {
+      component.installedWebVersion = OLD;
+      component.handleSystemMessages(infoWith(FW, OLD), noError);
+      const msg = messageOf('VERSION_MISMATCH');
+      expect(msg?.severity).toBe('warn');
+      expect(msg?.text).toContain(OLD);
+      expect(msg?.text).toContain(FW);
+      expect(messageOf('WEB_RESTART_PENDING')).toBeUndefined();
+    });
+
+    it('reports the real-device pilot state (web updated, boot snapshot stale) as an informational restart note, not a mismatch', () => {
+      component.installedWebVersion = FW;                 // /version.txt: new pair installed
+      component.handleSystemMessages(infoWith(FW, OLD), noError); // firmware still reports boot-time web
+      expect(messageOf('VERSION_MISMATCH')).toBeUndefined();
+      const note = messageOf('WEB_RESTART_PENDING');
+      expect(note?.severity).toBe('info');
+      expect(note?.text).toContain('restart');
+      expect(note?.text).toContain(OLD);
+    });
+
+    it('falls back honestly to the boot snapshot when the live file is unavailable', () => {
+      component.installedWebVersion = null;               // dev server / fetch failed
+      component.handleSystemMessages(infoWith(FW, OLD), noError);
+      const msg = messageOf('VERSION_MISMATCH');
+      expect(msg?.severity).toBe('warn');                 // no faked equality
+      expect(messageOf('WEB_RESTART_PENDING')).toBeUndefined();
+    });
+
+    it('clears the restart note once boot and installed revisions agree again', () => {
+      component.installedWebVersion = FW;
+      component.handleSystemMessages(infoWith(FW, OLD), noError);
+      expect(messageOf('WEB_RESTART_PENDING')).toBeDefined();
+      component.handleSystemMessages(infoWith(FW, FW), noError);
+      expect(messageOf('WEB_RESTART_PENDING')).toBeUndefined();
+    });
+  });
+
   describe('stale data and visibility state', () => {
     it('should set stale data error when visible and last message is old', () => {
       spyOnProperty(document, 'visibilityState', 'get').and.returnValue('visible');

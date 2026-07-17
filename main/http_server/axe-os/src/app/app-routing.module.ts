@@ -43,7 +43,7 @@ const routes: Routes = [
       {
         path: 'classic',
         component: HomeComponent,
-        title: `${TITLE_PREFIX} Classic`,
+        title: `${TITLE_PREFIX} Legacy Dashboard`,
       },
       {
         path: 'logs',
@@ -53,12 +53,12 @@ const routes: Routes = [
       {
         path: 'system',
         component: SystemComponent,
-        title: `${TITLE_PREFIX} System`,
+        title: `${TITLE_PREFIX} Device Status`,
       },
       {
         path: 'update',
         component: UpdateComponent,
-        title: `${TITLE_PREFIX} Update`,
+        title: `${TITLE_PREFIX} Updates`,
       },
       {
         path: 'network',
@@ -68,12 +68,12 @@ const routes: Routes = [
       {
         path: 'settings',
         component: SettingsComponent,
-        title: `${TITLE_PREFIX} Settings`,
+        title: `${TITLE_PREFIX} Tuning & Thermal`,
       },
       {
         path: 'swarm',
         component: SwarmComponent,
-        title: `${TITLE_PREFIX} Swarm`,
+        title: `${TITLE_PREFIX} Fleet`,
       },
       {
         path: 'scoreboard',
@@ -83,7 +83,7 @@ const routes: Routes = [
       {
         path: 'design',
         component: DesignComponent,
-        title: `${TITLE_PREFIX} Theme`,
+        title: `${TITLE_PREFIX} Display & Appearance`,
       },
       {
         path: 'pool',

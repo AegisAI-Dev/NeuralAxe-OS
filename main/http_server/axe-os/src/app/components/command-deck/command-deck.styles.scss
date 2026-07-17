@@ -686,6 +686,35 @@
   .nx-kv-row { grid-template-columns: 1fr; gap: 0.15rem; }
 }
 
+/* ---------- small controls ---------- */
+
+.nx-copy-btn {
+  background: none;
+  border: 0;
+  padding: 0 0.15rem;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+
+.nx-copy-btn:hover i { color: var(--nx-cyan); }
+
+.nx-destructive-action { border-left: 1px solid var(--nx-line); padding-left: 0.6rem; }
+
+/* ---------- grouped navigation section headings ---------- */
+
+.layout-menu .layout-root-menuitem > .layout-menuitem-root-text {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--nx-text-dim);
+  margin: 1.1rem 0.75rem 0.35rem;
+}
+
+.layout-menu > li:first-child > .layout-menuitem-root-text {
+  margin-top: 0.25rem;
+}
+
 /* ---------- animations ---------- */
 
 @keyframes nx-pulse {

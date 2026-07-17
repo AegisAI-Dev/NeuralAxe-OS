@@ -70,6 +70,14 @@ export function fmtTemp(value: unknown): string {
   return Math.round(value as number) + '°C';
 }
 
+/** Measured voltage telemetry (mV in, displayed as V); em dash for invalid input. */
+export function fmtVolts(millivolts: unknown): string {
+  if (invalid(millivolts) || (millivolts as number) < 0) {
+    return INVALID;
+  }
+  return ((millivolts as number) / 1000).toFixed(2) + ' V';
+}
+
 export const DeckFmt = {
   num: fmtNum,
   int: fmtInt,
@@ -77,5 +85,6 @@ export const DeckFmt = {
   pct: fmtPct,
   bytes: fmtBytes,
   temp: fmtTemp,
+  volts: fmtVolts,
   INVALID,
 };

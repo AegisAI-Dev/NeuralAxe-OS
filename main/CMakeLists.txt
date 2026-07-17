@@ -158,7 +158,27 @@ else()
         DEPENDS ${WEB_UI_STAMP} ${OPENAPI_STAMP}
     )
 
+    # version.txt content depends on GIT STATE, which the source-mtime stamp
+    # above cannot see: a commit that touches no frontend source would pack a
+    # stale web revision into www.bin while the firmware app_desc picks up the
+    # new `git describe` — a mismatched release pair. Refresh version.txt on
+    # every build (cheap: node + git describe), ordered after the web build and
+    # before the spiffs image so the packed identity always matches the build.
+    find_program(NODE_EXECUTABLE node)
+    if(NODE_EXECUTABLE)
+        add_custom_target(web_ui_version ALL
+            COMMAND ${NODE_EXECUTABLE} generate-version.js
+            WORKING_DIRECTORY ${WEB_SRC_DIR}
+            DEPENDS web_ui_dist
+            COMMENT "Refreshing web version.txt from git state"
+            VERBATIM
+        )
+    else()
+        message(WARNING "node not found; version.txt may go stale when only git state changes")
+        add_custom_target(web_ui_version ALL DEPENDS web_ui_dist)
+    endif()
+
     add_dependencies(${COMPONENT_LIB} web_ui_dist)
 
-    spiffs_create_partition_image(www ${WEB_SRC_DIR}/dist/axe-os FLASH_IN_PROJECT DEPENDS web_ui_dist)
+    spiffs_create_partition_image(www ${WEB_SRC_DIR}/dist/axe-os FLASH_IN_PROJECT DEPENDS web_ui_version)
 endif()

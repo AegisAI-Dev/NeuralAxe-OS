@@ -24,3 +24,53 @@ tbody tr {
         padding-bottom: 0;
     }
 }
+
+/* Bounded scroll area: keeps the header visible while long share lists
+   scroll, and gives small screens an explicit horizontal scroll context. */
+.nx-table-scroll {
+    max-height: 65vh;
+    overflow: auto;
+
+    thead th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: var(--nx-panel-2, var(--surface-card));
+        padding-top: 0.25rem;
+    }
+}
+
+tbody tr {
+    transition: background-color 0.15s ease;
+
+    &:hover,
+    &:focus-visible {
+        background: rgba(53, 195, 230, 0.07);
+        outline: none;
+    }
+
+    &:focus-visible {
+        box-shadow: inset 2px 0 0 var(--nx-cyan, #35c3e6);
+    }
+}
+
+/* Top-three ranking: restrained accent, no layout shift. */
+tbody tr.nx-top-rank {
+    background: linear-gradient(90deg, rgba(47, 230, 160, 0.05), transparent 55%);
+}
+
+.nx-rank-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+
+    i {
+        font-size: 0.8rem;
+    }
+
+    &[data-rank="0"] { color: #e6c34a; }
+    &[data-rank="1"] { color: #b8c4ce; }
+    &[data-rank="2"] { color: #cd9060; }
+}

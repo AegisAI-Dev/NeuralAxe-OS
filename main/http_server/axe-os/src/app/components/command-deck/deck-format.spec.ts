@@ -1,4 +1,4 @@
-import { fmtNum, fmtInt, fmtLatency, fmtPct, fmtBytes, fmtTemp, INVALID } from './deck-format';
+import { fmtNum, fmtInt, fmtLatency, fmtPct, fmtBytes, fmtTemp, fmtVolts, INVALID } from './deck-format';
 
 describe('deck-format (real-device formatting battery)', () => {
 
@@ -61,6 +61,22 @@ describe('deck-format (real-device formatting battery)', () => {
     it('rounds temperatures to whole degrees', () => {
       expect(fmtTemp(59.4)).toBe('59°C');
       expect(fmtTemp(53.51)).toBe('54°C');
+    });
+  });
+
+  describe('fmtVolts (measured telemetry, mV in → V out)', () => {
+    it('renders the pilot-device measured voltage correctly', () => {
+      expect(fmtVolts(1140)).toBe('1.14 V');   // observed ~1.14 V on the Gamma 601
+      expect(fmtVolts(1150)).toBe('1.15 V');
+      expect(fmtVolts(1100)).toBe('1.10 V');
+    });
+
+    it('never renders invalid telemetry', () => {
+      expect(fmtVolts(NaN)).toBe(INVALID);
+      expect(fmtVolts(undefined)).toBe(INVALID);
+      expect(fmtVolts(null)).toBe(INVALID);
+      expect(fmtVolts(Infinity)).toBe(INVALID);
+      expect(fmtVolts(-5)).toBe(INVALID);
     });
   });
 });

@@ -1,10 +1,11 @@
 <div [ngClass]="{'card': (form$ | async), 'hidden': !(form$ | async)}">
-    <h2>Settings</h2>
+    <h2>Tuning &amp; Thermal</h2>
 
     <p class="nx-page-desc">
-        Device settings for this miner: frequency and voltage, thermal and fan control,
-        display and statistics. Pool settings are on the Pools page; Wi-Fi and hostname
-        are on the Network page. Changes apply only after you press Save.
+        Mining core, thermal and device settings for this miner. Configured values are
+        stored on the device; measured telemetry is shown separately and never changes
+        your configuration. Pool settings are on the Pools page; Wi-Fi and hostname are
+        on the Network page. Changes apply only after you press Save.
     </p>
 
     <app-edit></app-edit>

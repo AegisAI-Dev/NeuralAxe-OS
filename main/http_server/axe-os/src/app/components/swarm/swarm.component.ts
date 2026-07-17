@@ -415,6 +415,38 @@ export class SwarmComponent implements OnInit, OnDestroy {
     return model + ' (' + asicCountPart + asicModel + ')';
   };
 
+  /**
+   * Fleet device classification (display only, no behavior change):
+   * - 'neuralaxe': the device reports the additive NeuralAxe identity fields
+   *   (productName) — it runs NeuralAxe OS;
+   * - 'compatible': a standard ESP-Miner/AxeOS device — fully controllable
+   *   from here, but NeuralAxe releases do not target it;
+   * - 'unsupported': reports a board other than 601 — NeuralAxe publishes no
+   *   release for it (this never implies e.g. board-702 support).
+   */
+  public deviceClass(axe: any): { kind: 'neuralaxe' | 'compatible' | 'unsupported'; label: string; tooltip: string } {
+    const board = String(axe?.boardVersion ?? '');
+    if (board && !board.startsWith('601')) {
+      return {
+        kind: 'unsupported',
+        label: `Board ${board}`,
+        tooltip: `Board ${board} is not a NeuralAxe release target (Gamma 601 only). The device remains controllable here as an AxeOS miner.`,
+      };
+    }
+    if (axe?.productName) {
+      return {
+        kind: 'neuralaxe',
+        label: 'NeuralAxe',
+        tooltip: `${axe.productName} ${axe.productVersion ?? ''}`.trim() + ' — NeuralAxe-managed device',
+      };
+    }
+    return {
+      kind: 'compatible',
+      label: 'AxeOS',
+      tooltip: 'Compatible ESP-Miner/AxeOS device (not running NeuralAxe OS)',
+    };
+  }
+
 
   public toggleGridView(gridView: boolean): void {
     this.localStorageService.setBool(SWARM_GRID_VIEW, this.gridView = gridView);

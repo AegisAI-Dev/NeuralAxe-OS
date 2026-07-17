@@ -5,7 +5,9 @@ import { ToastrService } from 'ngx-toastr';
 import { LoadingService } from 'src/app/services/loading.service';
 import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
-import { first } from 'rxjs';
+import { DeckFmt } from 'src/app/components/command-deck/deck-format';
+import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
+import { Observable, first } from 'rxjs';
 
 type PoolType = 'stratum' | 'fallbackStratum';
 
@@ -32,6 +34,10 @@ interface IChannelOption {
 export class PoolComponent implements OnInit {
   public form!: FormGroup;
   public savedChanges: boolean = false;
+
+  /** Live device state for the read-only status summary (currently ACTIVE configuration, not unsaved edits). */
+  public info$!: Observable<ISystemInfo>;
+  public readonly fmt = DeckFmt;
 
   public readonly DEFAULT_BITCOIN_ADDRESS = 'bc1qnp980s5fpp8l94p5cvttmtdqy8rvrq74qly2yrfmzkdsntqzlc5qkc4rkq';
 
@@ -68,6 +74,7 @@ export class PoolComponent implements OnInit {
   ) { }
 
   ngOnInit(): void {
+    this.info$ = this.liveDataService.info$;
     this.liveDataService.info$
       .pipe(first(), this.loadingService.lockUIUntilComplete())
       .subscribe(info => {

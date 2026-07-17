@@ -9,6 +9,9 @@ describe('SystemComponent', () => {
   let component: SystemComponent;
   let fixture: ComponentFixture<SystemComponent>;
 
+  const FW = 'v2.14.2-13-g388287da';
+  const OLD = 'v2.14.2-9-gc630e1a';
+
   const asic = {
     ASICModel: 'BM1370',
     asicCount: 1,
@@ -17,15 +20,16 @@ describe('SystemComponent', () => {
   } as SystemAsic;
 
   const info = {
-    version: 'v2.14.2-9-gc630e1a',
-    axeOSVersion: 'v2.14.2-9-gc630e1a',
+    version: FW,
+    axeOSVersion: FW,
     idfVersion: 'v5.4.1',
     boardVersion: '601',
     uptimeSeconds: 3600,
-    resetReason: 'Power on reset',
+    resetReason: 'Reset due to power-on event',
     cpuUsage: 32.456,
     temp: 55.2,
     vrTemp: 60,
+    coreVoltageActual: 1140,
     freeHeap: 8_400_000,
     freeHeapInternal: 130_000,
     freeHeapSpiram: 8_200_000,
@@ -38,7 +42,7 @@ describe('SystemComponent', () => {
     runningPartition: 'ota_0',
   } as SystemInfo;
 
-  const data = { info, asic };
+  const data = { info, asic, installedWebVersion: FW };
 
   beforeEach(async () => {
     await TestBed.configureTestingModule({
@@ -68,15 +72,59 @@ describe('SystemComponent', () => {
     ]);
   });
 
-  it('keeps NeuralAxe identity separate from upstream identity', () => {
-    const sections = component.getSystemSections(data);
-    const product = sections.find(s => s.title === 'NeuralAxe Product')!;
-    expect(product.rows.some(r => r.value.includes('NeuralAxe OS'))).toBeTrue();
-    expect(product.rows.some(r => r.value.includes('ESP-Miner / AxeOS'))).toBeTrue();
+  describe('version identity rows', () => {
+    function firmwareRows(d: { info: SystemInfo; asic: SystemAsic; installedWebVersion: string | null }) {
+      return component.getSystemSections(d).find(s => s.title === 'Firmware & Software')!.rows;
+    }
 
-    const firmware = sections.find(s => s.title === 'Firmware & Software')!;
-    expect(firmware.rows.find(r => r.label === 'Firmware Version')?.value).toBe('v2.14.2-9-gc630e1a');
-    expect(firmware.rows.find(r => r.label === 'Running Partition')?.value).toBe('ota_0');
+    it('shows installed web revision from the live artifact source, with copy actions', () => {
+      const rows = firmwareRows(data);
+      const fwRow = rows.find(r => r.label === 'Firmware Revision')!;
+      const webRow = rows.find(r => r.label === 'Web Revision (installed)')!;
+      expect(fwRow.value).toBe(FW);
+      expect(fwRow.copyValue).toBe(FW);
+      expect(webRow.value).toBe(FW);
+      expect(webRow.copyValue).toBe(FW);
+      expect(rows.some(r => r.label === 'Web Revision (at boot)')).toBeFalse();
+    });
+
+    it('shows the stale boot snapshot separately when it disagrees (restart pending) without substituting values', () => {
+      const staleBoot = { ...data, info: { ...info, axeOSVersion: OLD } as SystemInfo };
+      const rows = firmwareRows(staleBoot);
+      expect(rows.find(r => r.label === 'Web Revision (installed)')?.value).toBe(FW);
+      const bootRow = rows.find(r => r.label === 'Web Revision (at boot)')!;
+      expect(bootRow.value).toBe(OLD);
+      expect(bootRow.tooltip).toContain('restart');
+    });
+
+    it('falls back to the boot-reported revision when the live file is unavailable', () => {
+      const noLive = { ...data, installedWebVersion: null, info: { ...info, axeOSVersion: OLD } as SystemInfo };
+      const rows = firmwareRows(noLive);
+      expect(rows.some(r => r.label === 'Web Revision (installed)')).toBeFalse();
+      const bootRow = rows.find(r => r.label === 'Web Revision (at boot)')!;
+      expect(bootRow.value).toBe(OLD);
+    });
+  });
+
+  describe('reset reason', () => {
+    it('maps the verbose firmware sentence to a readable label and keeps the raw value in the tooltip', () => {
+      const row = component.resetReasonRow('Reset due to power-on event');
+      expect(row.value).toBe('Power-on');
+      expect(row.tooltip).toContain('Reset due to power-on event');
+    });
+
+    it('passes unknown reset reasons through unchanged', () => {
+      const row = component.resetReasonRow('Some future reset cause');
+      expect(row.value).toBe('Some future reset cause');
+      expect(row.tooltip).toBeUndefined();
+    });
+  });
+
+  it('shows measured ASIC voltage in volts, distinct from the configured value', () => {
+    const runtime = component.getSystemSections(data).find(s => s.title === 'Runtime')!;
+    const measured = runtime.rows.find(r => r.label === 'Measured ASIC Voltage')!;
+    expect(measured.value).toBe('1.14 V');
+    expect(measured.tooltip).toContain('configured');
   });
 
   it('formats runtime telemetry with controlled precision', () => {
@@ -86,20 +134,24 @@ describe('SystemComponent', () => {
     expect(runtime.rows.find(r => r.label === 'VR Temperature')?.value).toBe('60°C');
   });
 
-  it('never renders NaN/undefined text when live fields are missing or invalid', () => {
+  it('never renders NaN/undefined/null text when live fields are missing or invalid', () => {
     const brokenData = {
       asic: { ...asic, deviceModel: '', swarmColor: '' } as SystemAsic,
+      installedWebVersion: null,
       info: {
         ...info,
         version: undefined,
+        axeOSVersion: undefined,
         uptimeSeconds: NaN,
         cpuUsage: Infinity,
         temp: undefined,
         vrTemp: null,
+        coreVoltageActual: NaN,
         freeHeap: NaN,
         wifiRSSI: undefined,
         ipv4: undefined,
         hostname: null,
+        resetReason: undefined,
       } as unknown as SystemInfo,
     };
 
@@ -120,7 +172,7 @@ describe('SystemComponent', () => {
     expect(component.getFaultRows(data).length).toBe(0);
 
     const faultData = {
-      asic,
+      ...data,
       info: { ...info, hardware_fault: 'ASIC comms lost', power_fault: 'VR overtemp' } as SystemInfo,
     };
     const rows = component.getFaultRows(faultData);
@@ -129,9 +181,9 @@ describe('SystemComponent', () => {
     expect(rows[1].value).toBe('VR overtemp');
   });
 
-  it('marks private network values as sensitive data', () => {
+  it('marks private network values as sensitive data (including IPv4)', () => {
     const network = component.getSystemSections(data).find(s => s.title === 'Network')!;
-    for (const label of ['Hostname', 'Wi-Fi SSID', 'Wi-Fi IPv6', 'MAC Address']) {
+    for (const label of ['Hostname', 'Wi-Fi SSID', 'Wi-Fi IPv4', 'Wi-Fi IPv6', 'MAC Address']) {
       expect(network.rows.find(r => r.label === label)?.isSensitiveData)
         .withContext(label).toBeTrue();
     }

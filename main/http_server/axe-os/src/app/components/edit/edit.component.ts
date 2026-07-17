@@ -6,6 +6,8 @@ import { forkJoin, startWith, Subject, takeUntil, pairwise, BehaviorSubject, Obs
 import { LoadingService } from 'src/app/services/loading.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { SystemApiService } from 'src/app/services/system.service';
+import { DeckFmt } from 'src/app/components/command-deck/deck-format';
+import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
 import { ActivatedRoute } from '@angular/router';
 
 type Dropdown = {
@@ -46,6 +48,15 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
   public statsFrequencyControl: FormControl;
   public statsLimit: number = 720;
 
+  /**
+   * Live telemetry for the read-only "measured right now" line. Display only —
+   * nothing here ever writes into the form: the configured values (mV / MHz)
+   * and the measured values (V / MHz actual) are deliberately separate.
+   * Only shown for the local device (remote fleet editing has no live stream).
+   */
+  public measured$: Observable<ISystemInfo>;
+  public readonly fmt = DeckFmt;
+
   constructor(
     private fb: FormBuilder,
     private systemService: SystemApiService,
@@ -77,6 +88,8 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
         );
       }
     });
+
+    this.measured$ = this.liveDataService.info$;
 
     this.displayTimeoutControl = new FormControl();
     this.displayTimeoutControl.valueChanges.pipe(pairwise()).subscribe(([prev, next]) => {

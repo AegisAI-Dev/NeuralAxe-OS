@@ -84,6 +84,46 @@ def cross_check_frontend(repo_root: Path, identity: dict) -> None:
 
 APP_DESC_MAGIC = b"\x32\x54\xcd\xab"  # esp_app_desc_t magic_word 0xABCD5432 (LE)
 
+# A git-describe style build revision as embedded in version.txt / app_desc.
+# Compressed web assets hide their strings, so the raw SPIFFS image contains
+# exactly one plain-text match: the version.txt content (verified against the
+# real Phase 2D.1 and 2E www.bin artifacts).
+REVISION_PATTERN = re.compile(rb"v\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{7,12})?(?:-dirty)?")
+
+
+def read_www_revision(www_bin: Path) -> str:
+    """Extract the web revision embedded INSIDE a www.bin SPIFFS image.
+
+    This is the authoritative identity of the web artifact — the same
+    version.txt the firmware reads at boot to report axeOSVersion — as opposed
+    to the host's dist/version.txt, which can be stale or newer than the
+    packed image when build steps run out of order.
+    """
+    data = www_bin.read_bytes()
+    matches = sorted({m.group(0).decode("ascii") for m in REVISION_PATTERN.finditer(data)})
+    if len(matches) == 0:
+        fail(f"{www_bin.name}: no embedded web revision found — is version.txt missing from the image?")
+    if len(matches) > 1:
+        fail(f"{www_bin.name}: multiple distinct revision strings embedded ({matches}) — ambiguous web identity")
+    return matches[0]
+
+
+def check_release_pair(fw_bin: Path, www_bin: Path) -> tuple[str, str]:
+    """RC gate: the firmware and web artifacts of one release pair must carry
+    the same clean source revision. Returns (firmware_revision, web_revision)."""
+    fw_revision = check_app_binary(fw_bin)
+    web_revision = read_www_revision(www_bin)
+    print(f"embedded web revision of {www_bin.name}: {web_revision}")
+    if "-dirty" in web_revision:
+        fail(f"{www_bin.name} embeds a dirty web identity ('{web_revision}'). Rebuild from a clean committed tree.")
+    if fw_revision != web_revision:
+        fail(
+            f"release pair mismatch: firmware '{fw_revision}' != web '{web_revision}'. "
+            "The firmware and web artifacts must be built from the same commit in one "
+            "pipeline run (a stale dist/version.txt or out-of-order build produces this)."
+        )
+    return fw_revision, web_revision
+
 
 def read_app_desc_version(bin_path: Path) -> str:
     """Read the version string embedded in an ESP-IDF application binary.
@@ -133,6 +173,10 @@ def main() -> None:
     parser.add_argument("--merged-bin", help="path to the merged/factory image")
     parser.add_argument("--out", help="output directory for release files")
     parser.add_argument("--check-bin", help="standalone mode: verify the app_desc identity of one ESP-IDF app binary and exit")
+    parser.add_argument("--check-pair", nargs=2, metavar=("ESP_MINER_BIN", "WWW_BIN"),
+                        help="standalone mode: verify a firmware/web release pair carries the same clean revision and exit")
+    parser.add_argument("--screenshot-scan",
+                        help="RC gate: path to a screenshot privacy-scan report that must state 'PRIVACY SCAN: CLEAN'")
     args = parser.parse_args()
 
     if args.check_bin:
@@ -140,8 +184,21 @@ def main() -> None:
         print("APP DESC OK")
         return
 
+    if args.check_pair:
+        fw_revision, _ = check_release_pair(Path(args.check_pair[0]).resolve(), Path(args.check_pair[1]).resolve())
+        print(f"PAIR OK: firmware and web both at {fw_revision}")
+        return
+
     if not args.merged_bin or not args.out:
-        parser.error("--merged-bin and --out are required unless --check-bin is used")
+        parser.error("--merged-bin and --out are required unless --check-bin/--check-pair is used")
+
+    if args.screenshot_scan:
+        scan_report = Path(args.screenshot_scan).resolve()
+        if not scan_report.is_file():
+            fail(f"screenshot privacy-scan report not found: {scan_report}")
+        if "PRIVACY SCAN: CLEAN" not in scan_report.read_text(encoding="utf-8", errors="replace"):
+            fail(f"screenshot privacy scan is not clean: {scan_report}")
+        print(f"screenshot privacy scan verified: {scan_report.name}")
 
     repo_root = Path(args.repo_root).resolve()
     merged_bin = Path(args.merged_bin).resolve()
@@ -177,6 +234,16 @@ def main() -> None:
     # The device-reported firmware identity must be clean and match the
     # frontend revision (both derive from git describe of the same tree).
     check_app_binary(sources["ota"], expected_revision=source_revision)
+
+    # RC gate: firmware and the revision embedded INSIDE www.bin must agree —
+    # dist/version.txt alone cannot prove what was actually packed.
+    firmware_revision, web_revision = check_release_pair(sources["ota"], sources["www"])
+    if web_revision != source_revision:
+        fail(
+            f"stale build order detected: dist/version.txt says '{source_revision}' but "
+            f"the staged www.bin embeds '{web_revision}'. Rebuild so the packed image and "
+            "version.txt come from the same pipeline run."
+        )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -246,6 +313,8 @@ def main() -> None:
         "buildChannel": identity["buildChannel"],
         "vendor": identity["vendor"],
         "sourceRevision": source_revision,
+        "firmwareRevision": firmware_revision,
+        "webRevision": web_revision,
         "upstreamProject": identity["upstreamProject"],
         "upstreamVersion": identity["upstreamVersion"],
         "targetDevice": identity["targetDevice"],

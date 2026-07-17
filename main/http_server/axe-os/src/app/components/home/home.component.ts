@@ -12,6 +12,7 @@ import { ShareRejectionExplanationService } from 'src/app/services/share-rejecti
 import { LoadingService } from 'src/app/services/loading.service';
 import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
+import { WebVersionService } from 'src/app/services/web-version.service';
 import { ThemeService } from 'src/app/services/theme.service';
 import { LayoutService } from 'src/app/layout/service/app.layout.service';
 import { SystemInfo as ISystemInfo, SystemStatistics as ISystemStatistics } from 'src/app/generated/models';
@@ -35,6 +36,7 @@ type MessageType =
   | 'FREQUENCY_LOW'
   | 'FALLBACK_STRATUM'
   | 'VERSION_MISMATCH'
+  | 'WEB_RESTART_PENDING'
   | 'NOT_SOLO_MINING'
   | 'NO_MINING_REWARD'
   | 'HARDWARE_FAULT';
@@ -75,6 +77,9 @@ const WIDGET_DEFAULTS: WidgetDef[] = [
 })
 export class HomeComponent implements OnInit, OnDestroy {
   public messages: ISystemMessage[] = [];
+
+  /** Web revision actually installed on the www partition (null when the live file is unavailable). */
+  public installedWebVersion: string | null = null;
 
   public info$!: Observable<ISystemInfo>;
   public stats$!: Observable<ISystemStatistics>;
@@ -212,11 +217,13 @@ export class HomeComponent implements OnInit, OnDestroy {
     private loadingService: LoadingService,
     private toastr: ToastrService,
     private liveDataService: LiveDataService,
+    private webVersionService: WebVersionService,
     private shareRejectReasonsService: ShareRejectionExplanationService,
     private storageService: LocalStorageService,
     private dashboardEditService: DashboardEditService,
     public layoutService: LayoutService
   ) {
+    this.webVersionService.installedWebVersion$.subscribe(v => this.installedWebVersion = v);
     this.initializeChart();
 
     effect(() => {
@@ -1102,7 +1109,24 @@ export class HomeComponent implements OnInit, OnDestroy {
     updateMessage(!!info.hardware_fault, 'HARDWARE_FAULT', 'error', `${info.hardware_fault}`);
     updateMessage(!info.frequency || info.frequency < 400, 'FREQUENCY_LOW', 'warn', 'Device frequency is set low - See settings');
     updateMessage(!!info.isUsingFallbackStratum, 'FALLBACK_STRATUM', 'warn', 'Using fallback pool - Share stats reset. Check Pool Settings and / or reboot Device.');
-    updateMessage(info.version !== info.axeOSVersion, 'VERSION_MISMATCH', 'warn', `Firmware (${info.version}) and web interface (${info.axeOSVersion}) versions do not match. Please make sure to update both www.bin and esp-miner.bin.`);
+    // Version-pair integrity. The truest web identity is the /version.txt of
+    // the installed www partition (installedWebVersion). The firmware's
+    // axeOSVersion is a boot-time snapshot: after a web-only update it stays
+    // on the pre-update revision until the next restart — an expected state
+    // that deserves an informational note, not a mismatch warning. Without the
+    // live file we fall back to the boot snapshot (upstream behavior);
+    // equality is never faked in either mode.
+    const webInstalled = this.installedWebVersion;
+    const genuineMismatch = webInstalled
+      ? info.version !== webInstalled
+      : info.version !== info.axeOSVersion;
+    const restartPending = !!webInstalled
+      && info.version === webInstalled
+      && info.axeOSVersion !== webInstalled;
+    updateMessage(genuineMismatch, 'VERSION_MISMATCH', 'warn', webInstalled
+      ? `Firmware (${info.version}) and installed web interface (${webInstalled}) versions do not match. Please update both www.bin and esp-miner.bin from the same release.`
+      : `Firmware (${info.version}) and web interface (${info.axeOSVersion}) versions do not match. Please make sure to update both www.bin and esp-miner.bin.`);
+    updateMessage(restartPending, 'WEB_RESTART_PENDING', 'info', `Web interface updated to ${webInstalled}. The firmware still reports the version it saw at boot (${info.axeOSVersion}) — restart the device when convenient to refresh it.`);
     if (info.coinbaseOutputs && info.coinbaseOutputs.length > 0) {
       let percentage = this.getPayoutPercentage(info);
       updateMessage(percentage > 0 && percentage < 95, 'NOT_SOLO_MINING', 'warn', `Your share of the mining reward is only ${percentage.toFixed(1)}%`);

@@ -14,35 +14,106 @@
                 <strong>Warning:</strong> You are using the default factory Bitcoin address. Please change the <strong>User</strong> field to your own Bitcoin address to receive mining rewards.
             </div>
         </div>
-        <ng-container *ngFor="let pool of pools">
-            <h3 *ngIf="pool === 'stratum'" class="nx-section-heading mt-0">Primary Pool</h3>
-            <h3 *ngIf="pool === 'fallbackStratum'" class="nx-section-heading">Fallback Pool</h3>
 
-            <div class="card">
+        <ng-container *ngIf="info$ | async as live">
+            <h3 class="nx-section-heading mt-0">Current Status</h3>
+            <div class="grid">
+                <div class="col-12 md:col-6">
+                    <div class="card h-full mb-0">
+                        <div class="flex align-items-center justify-content-between mb-2">
+                            <h4 class="nx-card-title m-0">Primary Pool</h4>
+                            <span class="nx-pill" [ngClass]="live.isUsingFallbackStratum ? '' : 'nx-pill-ok'">
+                                {{ live.isUsingFallbackStratum ? 'Standby' : 'Active' }}
+                            </span>
+                        </div>
+                        <div class="nx-kv">
+                            <div class="nx-kv-row">
+                                <label>Endpoint</label>
+                                <b sensitive-data class="nx-ellipsis">{{ live.stratumURL }}:{{ live.stratumPort }}</b>
+                            </div>
+                            <div class="nx-kv-row">
+                                <label>Worker</label>
+                                <b sensitive-data pTooltip="Masked for privacy — the full value stays editable in the form below">{{ live.stratumUser | address: { length: 20 } }}</b>
+                            </div>
+                            <div class="nx-kv-row" *ngIf="!live.isUsingFallbackStratum">
+                                <label>Response Time</label>
+                                <b>{{ fmt.latency(live.responseTime) }}</b>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-12 md:col-6">
+                    <div class="card h-full mb-0">
+                        <div class="flex align-items-center justify-content-between mb-2">
+                            <h4 class="nx-card-title m-0">Fallback Pool</h4>
+                            <span class="nx-pill" [ngClass]="live.isUsingFallbackStratum ? 'nx-pill-warn' : ''">
+                                {{ live.isUsingFallbackStratum ? 'Active' : 'Standby' }}
+                            </span>
+                        </div>
+                        <div class="nx-kv">
+                            <div class="nx-kv-row">
+                                <label>Endpoint</label>
+                                <b sensitive-data class="nx-ellipsis">{{ live.fallbackStratumURL }}:{{ live.fallbackStratumPort }}</b>
+                            </div>
+                            <div class="nx-kv-row">
+                                <label>Worker</label>
+                                <b sensitive-data pTooltip="Masked for privacy — the full value stays editable in the form below">{{ live.fallbackStratumUser | address: { length: 20 } }}</b>
+                            </div>
+                            <div class="nx-kv-row" *ngIf="live.isUsingFallbackStratum">
+                                <label>Response Time</label>
+                                <b>{{ fmt.latency(live.responseTime) }}</b>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <small class="block text-500 mt-1 mb-3">
+                Status reflects the configuration currently running on the device.
+                Response time is reported for the active pool only.
+            </small>
+        </ng-container>
+
+        <div class="grid">
+        <div class="col-12 xl:col-6" *ngFor="let pool of pools">
+            <h3 class="nx-section-heading mt-0">{{ pool === 'stratum' ? 'Edit Primary Pool' : 'Edit Fallback Pool' }}</h3>
+
+            <div class="card h-full mb-0">
                 <div class="field grid p-fluid">
-                    <label [htmlFor]="pool + 'URL'" class="col-12 md:col-2 md:mb-0">Stratum Host</label>
-                    <div class="col-12 md:col-10">
-                        <input pInputText type="text" [id]="pool + 'URL'" [formControlName]="pool + 'URL'" (change)="onUrlChange(pool)" />
+                    <label [htmlFor]="pool + 'URL'" class="col-12 md:col-3 md:mb-0">Stratum Host</label>
+                    <div class="col-12 md:col-9">
+                        <input pInputText type="text" [id]="pool + 'URL'" [formControlName]="pool + 'URL'" sensitive-data (change)="onUrlChange(pool)" />
                         <small *ngIf="isPoolV2Enabled(pool)" class="block text-blue-600 mt-1">
                             SV2 Mode
+                        </small>
+                        <small *ngIf="form.get(pool + 'URL')?.errors?.['pattern']" class="block text-red-500 mt-1">
+                            Enter the host name only — protocol prefixes and :port suffixes are split off automatically.
+                        </small>
+                        <small *ngIf="form.get(pool + 'URL')?.errors?.['required']" class="block text-red-500 mt-1">
+                            A pool host is required.
                         </small>
                     </div>
                 </div>
                 <div class="field grid p-fluid">
-                    <label [htmlFor]="pool + 'Port'" class="col-12 md:col-2 md:mb-0">Stratum Port</label>
-                    <div class="col-12 md:col-10">
+                    <label [htmlFor]="pool + 'Port'" class="col-12 md:col-3 md:mb-0">Stratum Port</label>
+                    <div class="col-12 md:col-9">
                         <input pInputText [id]="pool + 'Port'" [formControlName]="pool + 'Port'" type="number" />
+                        <small *ngIf="form.get(pool + 'Port')?.invalid && form.get(pool + 'Port')?.dirty" class="block text-red-500 mt-1">
+                            Port must be a number between 0 and 65535.
+                        </small>
                     </div>
                 </div>
                 <div class="field grid p-fluid">
-                    <label [htmlFor]="pool + 'User'" class="col-12 md:col-2 md:mb-0">User</label>
-                    <div class="col-12 md:col-10">
+                    <label [htmlFor]="pool + 'User'" class="col-12 md:col-3 md:mb-0">User</label>
+                    <div class="col-12 md:col-9">
                         <input pInputText [id]="pool + 'User'" [formControlName]="pool + 'User'" sensitive-data type="text" />
+                        <small *ngIf="form.get(pool + 'User')?.errors?.['required']" class="block text-red-500 mt-1">
+                            A worker / wallet user is required.
+                        </small>
                     </div>
                 </div>
                 <div class="field grid p-fluid">
-                    <label [htmlFor]="pool + 'Password'" class="col-12 md:col-2 md:mb-0">Password</label>
-                    <div class="col-12 md:col-10 p-input-icon-right">
+                    <label [htmlFor]="pool + 'Password'" class="col-12 md:col-3 md:mb-0">Password</label>
+                    <div class="col-12 md:col-9 p-input-icon-right">
                         <i *ngIf="form.get(pool + 'Password')?.dirty" class="pi cursor-pointer"
                         [ngClass]="{'pi-eye': !showPassword[pool], 'pi-eye-slash': showPassword[pool]}"
                         (click)="showPassword[pool] = !showPassword[pool]"></i>
@@ -241,12 +312,21 @@
                     </ng-container>
                 </fieldset>
             </div>
-        </ng-container>
+        </div>
+        </div>
 
-        <div class="flex mt-5 gap-3">
+        <div class="flex mt-4 gap-3 align-items-center flex-wrap">
             <button pButton [disabled]="!form.dirty || form.invalid" (click)="updateSystem()"
                 class="btn btn-primary">Save</button>
             <button pButton [disabled]="!savedChanges" (click)="restart()">Restart</button>
+
+            <span *ngIf="form.dirty && !savedChanges" class="nx-pill nx-pill-warn">Unsaved changes</span>
+            <span *ngIf="savedChanges" class="nx-pill nx-pill-ok">Saved — restart to switch pools</span>
+
+            <small class="text-500 w-full md:w-auto">
+                Save stores the configuration on the device; Restart applies it and
+                reconnects to the pool (share statistics reset on reconnect).
+            </small>
         </div>
     </div>
 </form>

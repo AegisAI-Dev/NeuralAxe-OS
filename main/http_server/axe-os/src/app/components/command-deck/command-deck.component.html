@@ -151,13 +151,13 @@
                 <div class="nx-pool-cell nx-pool-main">
                     <label>Active Pool</label>
                     <div class="nx-pool-url">
-                        <span class="nx-ellipsis" [title]="(info.isUsingFallbackStratum ? info.fallbackStratumURL : info.stratumURL) + ':' + (info.isUsingFallbackStratum ? info.fallbackStratumPort : info.stratumPort)">{{ info.isUsingFallbackStratum ? info.fallbackStratumURL : info.stratumURL }}:<em>{{ info.isUsingFallbackStratum ? info.fallbackStratumPort : info.stratumPort }}</em></span>
+                        <span class="nx-ellipsis" sensitive-data [title]="(info.isUsingFallbackStratum ? info.fallbackStratumURL : info.stratumURL) + ':' + (info.isUsingFallbackStratum ? info.fallbackStratumPort : info.stratumPort)">{{ info.isUsingFallbackStratum ? info.fallbackStratumURL : info.stratumURL }}:<em>{{ info.isUsingFallbackStratum ? info.fallbackStratumPort : info.stratumPort }}</em></span>
                         <span class="nx-pill" [ngClass]="info.isUsingFallbackStratum ? 'nx-pill-warn' : 'nx-pill-ok'">
                             {{ info.isUsingFallbackStratum ? 'Fallback' : 'Healthy' }}
                         </span>
                     </div>
                     <label class="mt-2">Worker</label>
-                    <div class="nx-worker">{{ (info.isUsingFallbackStratum ? info.fallbackStratumUser : info.stratumUser) | address }}</div>
+                    <div class="nx-worker" sensitive-data>{{ (info.isUsingFallbackStratum ? info.fallbackStratumUser : info.stratumUser) | address }}</div>
                 </div>
                 <div class="nx-pool-cell">
                     <label>Block Height</label>

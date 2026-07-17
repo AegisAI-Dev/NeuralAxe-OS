@@ -1,9 +1,9 @@
 <div class="card" *ngIf="combinedData$ | async as data">
-    <h2>System</h2>
+    <h2>Device Status</h2>
 
     <p class="nx-page-desc">
-        Device information for this NeuralAxe OS miner: product identity, firmware,
-        hardware, runtime health and network state.
+        Live device information for this NeuralAxe OS miner: product identity, installed
+        firmware and web revisions, hardware, runtime health and network state.
     </p>
 
     <div class="grid">
@@ -13,7 +13,16 @@
                 <table>
                     <tr *ngFor="let row of section.rows">
                         <td class="text-500 vertical-align-top white-space-nowrap pr-4" [ngClass]="row.class">{{ row.label }}</td>
-                        <td class="vertical-align-top line-break-anywhere" [ngClass]="(row.class || '') + ' ' + (row.valueClass || '')" [attr.sensitive-data]="row.isSensitiveData ? '' : null" [pTooltip]="row.tooltip">{{ row.value }}</td>
+                        <td class="vertical-align-top line-break-anywhere" [ngClass]="(row.class || '') + ' ' + (row.valueClass || '')" [attr.sensitive-data]="row.isSensitiveData ? '' : null" [pTooltip]="row.tooltip">
+                            {{ row.value }}
+                            <button *ngIf="row.copyValue" type="button"
+                                class="p-link text-500 ml-1 nx-copy-btn"
+                                [attr.aria-label]="'Copy ' + row.label"
+                                pTooltip="Copy" tooltipPosition="top"
+                                (click)="copyToClipboard(row.copyValue)">
+                                <i class="pi pi-copy text-xs"></i>
+                            </button>
+                        </td>
                     </tr>
                 </table>
             </div>

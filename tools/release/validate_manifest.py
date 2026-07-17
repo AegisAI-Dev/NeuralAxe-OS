@@ -28,9 +28,13 @@ ALLOWED_TYPES = {
 
 REQUIRED_FIELDS = [
     "schemaVersion", "productName", "productVersion", "buildChannel", "vendor",
-    "sourceRevision", "upstreamProject", "upstreamVersion",
+    "sourceRevision", "firmwareRevision", "webRevision",
+    "upstreamProject", "upstreamVersion",
     "targetDevice", "targetBoard", "targetAsic", "supportedBoards", "artifacts",
 ]
+
+# Machine-local path fragments must never ship in a public manifest.
+LOCAL_PATH_PATTERN = re.compile(r"([a-z]:\\|[a-z]:/|/users/|\\users\\|appdata)", re.IGNORECASE)
 
 REQUIRED_ARTIFACT_FIELDS = [
     "filename", "artifactType", "sizeBytes", "sha256",
@@ -84,6 +88,18 @@ def main() -> None:
     if "-dirty" in str(manifest.get("sourceRevision", "")):
         err("sourceRevision contains -dirty; dirty builds must not be released")
 
+    # Version-pair integrity: one release ships ONE revision for both artifacts.
+    fw_rev = str(manifest.get("firmwareRevision", ""))
+    web_rev = str(manifest.get("webRevision", ""))
+    if "-dirty" in fw_rev:
+        err("firmwareRevision contains -dirty; dirty builds must not be released")
+    if "-dirty" in web_rev:
+        err("webRevision contains -dirty; dirty builds must not be released")
+    if fw_rev and web_rev and fw_rev != web_rev:
+        err(f"firmware/web revision pair mismatch: firmware='{fw_rev}' web='{web_rev}'")
+    if fw_rev and str(manifest.get("sourceRevision", "")) != fw_rev:
+        err(f"sourceRevision '{manifest.get('sourceRevision')}' disagrees with firmwareRevision '{fw_rev}'")
+
     # No unsupported board number may appear in any manifest string value.
     def walk(value, path="manifest"):
         if isinstance(value, dict):
@@ -96,6 +112,8 @@ def main() -> None:
             for m in UNSUPPORTED_BOARD_PATTERN.finditer(value):
                 # 601 is the only supported board; any other board token is a violation
                 err(f"unsupported board '{m.group(1)}' mentioned at {path}: '{value}'")
+            if LOCAL_PATH_PATTERN.search(value):
+                err(f"machine-local path fragment at {path}: '{value}'")
     walk(manifest)
 
     expected_token = f"{device}-{board}"

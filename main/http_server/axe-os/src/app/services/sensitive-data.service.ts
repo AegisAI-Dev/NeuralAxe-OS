@@ -9,9 +9,15 @@ export class SensitiveData {
   private hidden$: BehaviorSubject<boolean>;
 
   constructor(private localStorageService: LocalStorageService) {
-    const storedState = this.localStorageService.getBool(SENSITIVE_DATA_HIDDEN);
+    // Privacy-safe default: with NO stored preference (fresh browser profile,
+    // first visit, screenshot capture session) sensitive data starts HIDDEN.
+    // An explicit user choice ('true'/'false') is always respected.
+    // (getBool cannot express "missing", it folds missing into false — which
+    // silently made fresh profiles start VISIBLE; read the raw value instead.)
+    const raw = this.localStorageService.getItem(SENSITIVE_DATA_HIDDEN);
+    const hidden = raw === null || raw === undefined ? true : raw === 'true';
 
-    this.hidden$ = new BehaviorSubject<boolean>(storedState !== false);
+    this.hidden$ = new BehaviorSubject<boolean>(hidden);
   }
 
   get hidden() {

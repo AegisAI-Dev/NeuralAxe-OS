@@ -5,6 +5,7 @@ import { ToastrService } from 'ngx-toastr';
 import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { LoadingService } from 'src/app/services/loading.service';
+import { WebVersionService } from 'src/app/services/web-version.service';
 import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
 import { DeckFmt, INVALID } from 'src/app/components/command-deck/deck-format';
 import { SystemInfo as ISystemInfo, SystemAsic as ISystemASIC, GenericResponse, } from 'src/app/generated/models';
@@ -17,6 +18,8 @@ type TableRow = {
   valueClass?: string;
   isSensitiveData?: boolean;
   tooltip?: string;
+  /** When set, a copy control is rendered that copies exactly this string. */
+  copyValue?: string;
 }
 
 type SystemSection = {
@@ -26,13 +29,37 @@ type SystemSection = {
 
 type CombinedData = {
   info: ISystemInfo,
-  asic: ISystemASIC
+  asic: ISystemASIC,
+  /** Revision embedded in the currently installed www partition (/version.txt), or null when unavailable. */
+  installedWebVersion: string | null,
 };
 
 /** Non-numeric telemetry: trimmed string or em dash — never "undefined"/"null" text. */
 function text(value: unknown): string {
   return typeof value === 'string' && value.trim() !== '' ? value : INVALID;
 }
+
+/**
+ * Short, readable labels for the firmware's verbose reset-reason sentences.
+ * The raw firmware string is preserved in the tooltip; unknown values pass
+ * through unchanged so nothing is ever hidden or invented.
+ */
+const RESET_REASON_LABELS: ReadonlyArray<{ match: RegExp; label: string }> = [
+  { match: /power-on event/i, label: 'Power-on' },
+  { match: /esp_restart/i, label: 'Software restart' },
+  { match: /exception\/panic/i, label: 'Crash (panic)' },
+  { match: /interrupt watchdog/i, label: 'Interrupt watchdog' },
+  { match: /task watchdog/i, label: 'Task watchdog' },
+  { match: /other watchdogs/i, label: 'Watchdog' },
+  { match: /deep sleep/i, label: 'Deep-sleep wake' },
+  { match: /brownout/i, label: 'Brownout (power dip)' },
+  { match: /external pin/i, label: 'External reset pin' },
+  { match: /USB peripheral/i, label: 'USB reset' },
+  { match: /JTAG/i, label: 'JTAG reset' },
+  { match: /power glitch/i, label: 'Power glitch' },
+  { match: /CPU lock ?up/i, label: 'CPU lockup' },
+  { match: /can not be determined/i, label: 'Undetermined' },
+];
 
 @Component({
   selector: 'app-system',
@@ -50,6 +77,7 @@ export class SystemComponent implements OnInit, OnDestroy {
     private systemService: SystemApiService,
     private liveDataService: LiveDataService,
     private loadingService: LoadingService,
+    private webVersionService: WebVersionService,
     private toastr: ToastrService,
   ) {
     this.info$ = this.liveDataService.info$;
@@ -59,8 +87,8 @@ export class SystemComponent implements OnInit, OnDestroy {
       shareReplay({ refCount: true, bufferSize: 1 })
     );
 
-    this.combinedData$ = combineLatest([this.info$, this.asic$]).pipe(
-      map(([info, asic]) => ({ info, asic }))
+    this.combinedData$ = combineLatest([this.info$, this.asic$, this.webVersionService.installedWebVersion$]).pipe(
+      map(([info, asic, installedWebVersion]) => ({ info, asic, installedWebVersion }))
     );
   }
 
@@ -103,12 +131,62 @@ export class SystemComponent implements OnInit, OnDestroy {
     };
   }
 
+  /** Short reset-reason label; the raw firmware string stays in the tooltip. */
+  resetReasonRow(raw: unknown): TableRow {
+    const rawText = text(raw);
+    if (rawText === INVALID) {
+      return { label: 'Reset Reason', value: INVALID };
+    }
+    const mapped = RESET_REASON_LABELS.find(entry => entry.match.test(rawText));
+    return {
+      label: 'Reset Reason',
+      value: mapped ? mapped.label : rawText,
+      tooltip: mapped ? `Firmware: "${rawText}"` : undefined,
+    };
+  }
+
   /**
-   * Device information grouped into sections: NeuralAxe product identity,
-   * upstream firmware identity, hardware, runtime, memory and network.
-   * Every value is guarded — live devices may momentarily report missing
-   * or invalid fields, which must never render as NaN/undefined text.
+   * Version identity rows. Firmware revision comes from the running app image
+   * (always current — an app OTA restarts the device). The installed web
+   * revision comes from the live /version.txt of the www partition; the
+   * firmware's boot-time snapshot (axeOSVersion) is additionally shown when it
+   * disagrees, because that is exactly the state a www-only OTA leaves until
+   * the next restart. Values are never substituted for one another.
    */
+  private versionRows(info: ISystemInfo, installedWebVersion: string | null): TableRow[] {
+    const rows: TableRow[] = [
+      { label: 'Firmware Revision', value: text(info.version), copyValue: info.version || undefined, tooltip: 'From the running firmware image (esp_app_desc)' },
+    ];
+
+    if (installedWebVersion) {
+      rows.push({
+        label: 'Web Revision (installed)',
+        value: installedWebVersion,
+        copyValue: installedWebVersion,
+        tooltip: 'Read live from /version.txt on the www partition',
+      });
+      if (text(info.axeOSVersion) !== INVALID && info.axeOSVersion !== installedWebVersion) {
+        rows.push({
+          label: 'Web Revision (at boot)',
+          value: info.axeOSVersion,
+          valueClass: 'text-orange-500',
+          tooltip: 'The firmware reports the web version it saw at boot. A web-only update does not restart the device, so this refreshes on the next restart.',
+        });
+      }
+    } else {
+      rows.push({
+        label: 'Web Revision (at boot)',
+        value: text(info.axeOSVersion),
+        copyValue: info.axeOSVersion || undefined,
+        tooltip: 'Reported by the firmware from its boot-time read of /version.txt (live file unavailable)',
+      });
+    }
+
+    rows.push({ label: 'ESP-IDF Version', value: text(info.idfVersion) });
+    rows.push({ label: 'Running Partition', value: text(info.runningPartition), tooltip: 'Currently active OTA partition' });
+    return rows;
+  }
+
   getSystemSections(data: CombinedData): SystemSection[] {
     const info = data.info;
     const asic = data.asic;
@@ -125,12 +203,7 @@ export class SystemComponent implements OnInit, OnDestroy {
       },
       {
         title: 'Firmware & Software',
-        rows: [
-          { label: 'Firmware Version', value: text(info.version) },
-          { label: 'Web Interface Version', value: text(info.axeOSVersion), tooltip: 'Upstream AxeOS web version' },
-          { label: 'ESP-IDF Version', value: text(info.idfVersion) },
-          { label: 'Running Partition', value: text(info.runningPartition), tooltip: 'Currently active OTA partition' },
-        ],
+        rows: this.versionRows(info, data.installedWebVersion),
       },
       {
         title: 'Hardware',
@@ -144,10 +217,11 @@ export class SystemComponent implements OnInit, OnDestroy {
         title: 'Runtime',
         rows: [
           { label: 'Uptime', value: typeof info.uptimeSeconds === 'number' && isFinite(info.uptimeSeconds) && info.uptimeSeconds > 0 ? DateAgoPipe.transform(info.uptimeSeconds) : INVALID },
-          { label: 'Reset Reason', value: text(info.resetReason) },
+          this.resetReasonRow(info.resetReason),
           { label: 'CPU Usage', value: DeckFmt.num(info.cpuUsage, 1, ' %') },
           { label: 'ASIC Temperature', value: DeckFmt.temp(info.temp) },
           { label: 'VR Temperature', value: DeckFmt.temp(info.vrTemp), tooltip: 'Voltage regulator temperature' },
+          { label: 'Measured ASIC Voltage', value: DeckFmt.volts(info.coreVoltageActual), tooltip: 'Live telemetry — distinct from the configured Core Voltage (mV) in Tuning & Thermal' },
         ],
       },
       {
@@ -165,7 +239,7 @@ export class SystemComponent implements OnInit, OnDestroy {
           { label: 'Wi-Fi SSID', value: text(info.ssid), isSensitiveData: true },
           { label: 'Wi-Fi Status', value: text(info.wifiStatus) },
           this.wifiRssiRow(info.wifiRSSI),
-          { label: 'Wi-Fi IPv4', value: text(info.ipv4) },
+          { label: 'Wi-Fi IPv4', value: text(info.ipv4), isSensitiveData: true },
           { label: 'Wi-Fi IPv6', value: text(info.ipv6), isSensitiveData: true },
           { label: 'MAC Address', value: text(info.macAddr), isSensitiveData: true },
         ],
@@ -183,6 +257,13 @@ export class SystemComponent implements OnInit, OnDestroy {
       rows.push({ label: 'Power Fault', value: data.info.power_fault, valueClass: 'text-red-500' });
     }
     return rows;
+  }
+
+  copyToClipboard(value: string): void {
+    navigator.clipboard?.writeText(value).then(
+      () => this.toastr.success('Copied to clipboard'),
+      () => this.toastr.error('Could not copy to clipboard'),
+    );
   }
 
   identifyDevice(): void {
