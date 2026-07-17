@@ -74,7 +74,7 @@ export class SystemApiService {
         freeHeapSpiram: 200504,
         coreVoltage: 1200,
         coreVoltageActual: 1200,
-        hostname: "Bitaxe",
+        hostname: "neuralaxe-dev",
         macAddr: "2C:54:91:88:C9:E3",
         ssid: "default",
         ipv4: "192.168.1.1",
