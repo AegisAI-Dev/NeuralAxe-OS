@@ -1,8 +1,17 @@
 <div class="card">
     <h2>Scoreboard</h2>
 
+    <p class="nx-page-desc">
+        The best shares this device has found, ranked by difficulty. The list refreshes
+        automatically every few seconds; click a column to sort.
+    </p>
+
     <ng-container *ngIf="scoreboard$ | async as scoreboard">
-        <div class="card mt-2 overflow-x-auto">
+        <div *ngIf="!scoreboard.length" class="text-500 text-center py-5">
+            No shares recorded yet. Entries appear here once the miner submits its
+            first shares.
+        </div>
+        <div *ngIf="scoreboard.length" class="card mt-2 overflow-x-auto">
             <table class="w-full">
                 <thead>
                     <tr>

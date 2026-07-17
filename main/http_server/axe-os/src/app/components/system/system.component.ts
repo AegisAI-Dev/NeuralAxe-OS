@@ -6,7 +6,7 @@ import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { LoadingService } from 'src/app/services/loading.service';
 import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
-import { ByteSuffixPipe } from 'src/app/pipes/byte-suffix.pipe';
+import { DeckFmt, INVALID } from 'src/app/components/command-deck/deck-format';
 import { SystemInfo as ISystemInfo, SystemAsic as ISystemASIC, GenericResponse, } from 'src/app/generated/models';
 import { NEURALAXE } from 'src/app/neuralaxe';
 
@@ -19,10 +19,20 @@ type TableRow = {
   tooltip?: string;
 }
 
+type SystemSection = {
+  title: string;
+  rows: TableRow[];
+}
+
 type CombinedData = {
   info: ISystemInfo,
   asic: ISystemASIC
 };
+
+/** Non-numeric telemetry: trimmed string or em dash — never "undefined"/"null" text. */
+function text(value: unknown): string {
+  return typeof value === 'string' && value.trim() !== '' ? value : INVALID;
+}
 
 @Component({
   selector: 'app-system',
@@ -44,7 +54,7 @@ export class SystemComponent implements OnInit, OnDestroy {
   ) {
     this.info$ = this.liveDataService.info$;
     this.isConnected$ = this.liveDataService.connected$;
-    
+
     this.asic$ = this.systemService.getAsicSettings().pipe(
       shareReplay({ refCount: true, bufferSize: 1 })
     );
@@ -81,31 +91,98 @@ export class SystemComponent implements OnInit, OnDestroy {
     return 'Weak';
   }
 
-  getSystemRows(data: CombinedData): TableRow[] {
+  private wifiRssiRow(rssi: unknown): TableRow {
+    if (typeof rssi !== 'number' || !isFinite(rssi)) {
+      return { label: 'Wi-Fi RSSI', value: INVALID };
+    }
+    return {
+      label: 'Wi-Fi RSSI',
+      value: rssi + ' dBm',
+      valueClass: this.getWifiRssiColor(rssi),
+      tooltip: this.getWifiRssiTooltip(rssi),
+    };
+  }
+
+  /**
+   * Device information grouped into sections: NeuralAxe product identity,
+   * upstream firmware identity, hardware, runtime, memory and network.
+   * Every value is guarded — live devices may momentarily report missing
+   * or invalid fields, which must never render as NaN/undefined text.
+   */
+  getSystemSections(data: CombinedData): SystemSection[] {
+    const info = data.info;
+    const asic = data.asic;
+
     return [
-      { label: 'Device Model', value: data.asic.deviceModel || 'Other', valueClass: 'text-' + data.asic.swarmColor + '-500' },
-      { label: 'Board Version', value: data.info.boardVersion },
-      { label: 'ASIC Type', value: (data.asic.asicCount > 1 ? data.asic.asicCount + 'x ' : ' ') + data.asic.ASICModel, class: 'pb-3' },
-      { label: 'Uptime', value: DateAgoPipe.transform(data.info.uptimeSeconds) },
-      { label: 'Reset Reason', value: data.info.resetReason, class: 'pb-3' },
-      { label: 'Wi-Fi SSID', value: data.info.ssid, isSensitiveData: true },
-      { label: 'Wi-Fi Status', value: data.info.wifiStatus },
-      { label: 'Wi-Fi RSSI', value: data.info.wifiRSSI + ' dBm', valueClass: this.getWifiRssiColor(data.info.wifiRSSI), tooltip: this.getWifiRssiTooltip(data.info.wifiRSSI) },
-      { label: 'Wi-Fi IPv4', value: data.info.ipv4},
-      { label: 'Wi-Fi IPv6', value: data.info.ipv6, class: 'pb-3', isSensitiveData: true},
-      { label: 'MAC Address', value: data.info.macAddr, class: 'pb-3', isSensitiveData: true },
-      { label: 'CPU Usage', value: data.info.cpuUsage.toFixed(1) + '%'},
-      { label: 'Free Heap Memory', value: ByteSuffixPipe.transform(data.info.freeHeap)},
-      { label: '• Internal', value: ByteSuffixPipe.transform(data.info.freeHeapInternal)},
-      { label: '• Spiram', value: ByteSuffixPipe.transform(data.info.freeHeapSpiram), class: 'pb-3' },
-      { label: 'Firmware Version', value: data.info.version },
-      { label: 'AxeOS Version', value: data.info.axeOSVersion },
-      { label: 'ESP-IDF Version', value: data.info.idfVersion, class: 'pb-3' },
-      { label: 'Product', value: `${NEURALAXE.productName} ${NEURALAXE.productVersion}` },
-      { label: 'Build Channel', value: NEURALAXE.buildChannel },
-      { label: 'Based On', value: `${NEURALAXE.upstreamProject} ${NEURALAXE.upstreamVersion}` },
-      { label: 'NeuralAxe Target', value: `${NEURALAXE.targetDevice} ${NEURALAXE.targetBoard} / ${NEURALAXE.targetAsic}` },
+      {
+        title: 'NeuralAxe Product',
+        rows: [
+          { label: 'Product', value: `${NEURALAXE.productName} ${info.productVersion || NEURALAXE.productVersion}` },
+          { label: 'Build Channel', value: info.buildChannel || NEURALAXE.buildChannel },
+          { label: 'Based On', value: `${NEURALAXE.upstreamProject} ${NEURALAXE.upstreamVersion}` },
+          { label: 'Build Target', value: `${NEURALAXE.targetDevice} ${NEURALAXE.targetBoard} / ${NEURALAXE.targetAsic}`, tooltip: 'Declared build target, not runtime-detected' },
+        ],
+      },
+      {
+        title: 'Firmware & Software',
+        rows: [
+          { label: 'Firmware Version', value: text(info.version) },
+          { label: 'Web Interface Version', value: text(info.axeOSVersion), tooltip: 'Upstream AxeOS web version' },
+          { label: 'ESP-IDF Version', value: text(info.idfVersion) },
+          { label: 'Running Partition', value: text(info.runningPartition), tooltip: 'Currently active OTA partition' },
+        ],
+      },
+      {
+        title: 'Hardware',
+        rows: [
+          { label: 'Device Model', value: asic.deviceModel || 'Other', valueClass: asic.swarmColor ? 'text-' + asic.swarmColor + '-500' : undefined },
+          { label: 'Board Version', value: text(info.boardVersion) },
+          { label: 'ASIC', value: (asic.asicCount > 1 ? asic.asicCount + 'x ' : '') + (asic.ASICModel || INVALID) },
+        ],
+      },
+      {
+        title: 'Runtime',
+        rows: [
+          { label: 'Uptime', value: typeof info.uptimeSeconds === 'number' && isFinite(info.uptimeSeconds) && info.uptimeSeconds > 0 ? DateAgoPipe.transform(info.uptimeSeconds) : INVALID },
+          { label: 'Reset Reason', value: text(info.resetReason) },
+          { label: 'CPU Usage', value: DeckFmt.num(info.cpuUsage, 1, ' %') },
+          { label: 'ASIC Temperature', value: DeckFmt.temp(info.temp) },
+          { label: 'VR Temperature', value: DeckFmt.temp(info.vrTemp), tooltip: 'Voltage regulator temperature' },
+        ],
+      },
+      {
+        title: 'Memory',
+        rows: [
+          { label: 'Free Heap', value: DeckFmt.bytes(info.freeHeap) },
+          { label: '• Internal', value: DeckFmt.bytes(info.freeHeapInternal) },
+          { label: '• SPIRAM', value: DeckFmt.bytes(info.freeHeapSpiram) },
+        ],
+      },
+      {
+        title: 'Network',
+        rows: [
+          { label: 'Hostname', value: text(info.hostname), isSensitiveData: true },
+          { label: 'Wi-Fi SSID', value: text(info.ssid), isSensitiveData: true },
+          { label: 'Wi-Fi Status', value: text(info.wifiStatus) },
+          this.wifiRssiRow(info.wifiRSSI),
+          { label: 'Wi-Fi IPv4', value: text(info.ipv4) },
+          { label: 'Wi-Fi IPv6', value: text(info.ipv6), isSensitiveData: true },
+          { label: 'MAC Address', value: text(info.macAddr), isSensitiveData: true },
+        ],
+      },
     ];
+  }
+
+  /** Fault rows are shown only when the firmware actually reports a fault. */
+  getFaultRows(data: CombinedData): TableRow[] {
+    const rows: TableRow[] = [];
+    if (data.info.hardware_fault) {
+      rows.push({ label: 'Hardware Fault', value: data.info.hardware_fault, valueClass: 'text-red-500' });
+    }
+    if (data.info.power_fault) {
+      rows.push({ label: 'Power Fault', value: data.info.power_fault, valueClass: 'text-red-500' });
+    }
+    return rows;
   }
 
   identifyDevice(): void {

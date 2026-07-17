@@ -1,24 +1,84 @@
 <div class="card">
     <h2>Update</h2>
 
-    <p class="text-sm text-500 mt-0">
-        This device runs a NeuralAxe OS development build (0.1.0-dev), based on ESP-Miner / AxeOS v2.14.2.
-        Firmware and AxeOS updates below install standard upstream-format images; applying an official
-        upstream release will replace NeuralAxe OS branding.
+    <p class="nx-page-desc">
+        Check for NeuralAxe OS releases and install firmware or web-interface images on this device.
+        Release checks are manual, query only the NeuralAxe OS repository
+        ({{ neuralaxe.updateRepository }}) and never run in the background.
     </p>
 
     <div class="grid">
         <div class="col-12 xl:col-4">
             <div class="card h-full">
-                <h5>Current Version: {{(info$ | async)?.version}}</h5>
+                <h3 class="nx-card-title">This Device</h3>
+
+                <div class="nx-kv">
+                    <ng-container *ngIf="info$ | async as info; else deviceIdentityPending">
+                        <div class="nx-kv-row">
+                            <label>Product</label>
+                            <b>{{ neuralaxe.productName }} {{ info.productVersion || neuralaxe.productVersion }}</b>
+                        </div>
+                        <div class="nx-kv-row">
+                            <label>Build Channel</label>
+                            <b>{{ info.buildChannel || neuralaxe.buildChannel }}</b>
+                        </div>
+                        <div class="nx-kv-row">
+                            <label>Firmware</label>
+                            <b [pTooltip]="info.version">{{ info.version || '—' }}</b>
+                        </div>
+                        <div class="nx-kv-row">
+                            <label>Web Interface</label>
+                            <b [pTooltip]="info.axeOSVersion">{{ info.axeOSVersion || '—' }}</b>
+                        </div>
+                        <div class="nx-kv-row" *ngIf="info.runningPartition">
+                            <label>OTA Partition</label>
+                            <b>{{ info.runningPartition }}</b>
+                        </div>
+                    </ng-container>
+                    <ng-template #deviceIdentityPending>
+                        <div class="nx-kv-row">
+                            <label>Product</label>
+                            <b>{{ neuralaxe.productName }} {{ neuralaxe.productVersion }}</b>
+                        </div>
+                        <div class="nx-kv-row">
+                            <label>Build Channel</label>
+                            <b>{{ neuralaxe.buildChannel }}</b>
+                        </div>
+                        <div class="nx-kv-row">
+                            <label>Firmware</label>
+                            <b>—</b>
+                        </div>
+                        <div class="nx-kv-row">
+                            <label>Web Interface</label>
+                            <b>—</b>
+                        </div>
+                    </ng-template>
+                    <div class="nx-kv-row">
+                        <label>Target Board</label>
+                        <b>{{ neuralaxe.targetDevice }} {{ neuralaxe.targetBoard }} / {{ neuralaxe.targetAsic }}</b>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 xl:col-8">
+            <div class="card h-full">
+                <h3 class="nx-card-title nx-cyan">NeuralAxe Releases</h3>
+
+                <p class="text-sm text-500 mt-0">
+                    Releases are checked in the NeuralAxe OS repository only — official upstream
+                    ESP-Miner releases are never offered here. NeuralAxe OS currently supports
+                    board {{ neuralaxe.targetBoard }} ({{ neuralaxe.targetDevice }} /
+                    {{ neuralaxe.targetAsic }}) only.
+                </p>
 
                 <ng-container *ngIf="checkLatestRelease == false; else afterCheck">
-                    <h3>Latest Release: <p-button (onClick)="handleReleaseCheck()">Check</p-button></h3>
+                    <p-button (onClick)="handleReleaseCheck()">Check for Release</p-button>
 
                     <app-modal #privacyModal [headline]="'Privacy Warning'">
                         <p>
                             Please note, this will connect to <strong>github.com</strong> to check the
-                            <strong>NeuralAxe OS</strong> repository (AegisAI-Dev/NeuralAxe-OS) for the latest release.
+                            <strong>NeuralAxe OS</strong> repository ({{ neuralaxe.updateRepository }}) for the latest release.
                             Official upstream ESP-Miner releases are not offered here.
                         </p>
                         <p class="flex gap-2">
@@ -39,52 +99,98 @@
                     <ng-container *ngIf="latestRelease$ | async as checkResult">
                         <ng-container *ngIf="checkResult.state === 'release'; else noRelease">
                         <ng-container *ngIf="checkResult.release as latestRelease">
-                        <h3>Latest Release:
+                        <h3 class="mt-0">Latest Release:
                             <a style="text-decoration: underline;" target="_blank"
-                            [href]="latestRelease.html_url">{{latestRelease.name}}</a>
+                            [href]="latestRelease.html_url">{{latestRelease.name || latestRelease.tag_name}}</a>
                         </h3>
 
-                        <div class="text-orange-500 mb-3">Download both files for update!</div>
+                        <ng-container [ngSwitch]="releaseCompatibility(latestRelease)">
+                            <span *ngSwitchCase="'confirmed'" class="nx-pill nx-pill-ok mb-3">
+                                Board {{ neuralaxe.targetBoard }} compatible
+                            </span>
+                            <span *ngSwitchCase="'unknown'" class="nx-pill nx-pill-warn mb-3">
+                                Compatibility not declared
+                            </span>
+                            <span *ngSwitchCase="'mismatch'" class="nx-pill nx-pill-err mb-3">
+                                Not for this board
+                            </span>
+                        </ng-container>
 
-                        <div *ngFor="let asset of latestRelease.assets">
-                            <div *ngIf="asset.name == 'esp-miner.bin'">
-                                <a style="text-decoration: underline;" target="_blank"
-                                    [href]="asset.browser_download_url">esp-miner.bin</a>
+                        <ng-container *ngIf="releaseCompatibility(latestRelease) !== 'mismatch'; else incompatibleRelease">
+                            <p *ngIf="releaseCompatibility(latestRelease) === 'unknown'" class="text-sm text-orange-500">
+                                This release does not declare a target board. Verify it was built for
+                                board {{ neuralaxe.targetBoard }} before installing.
+                            </p>
+
+                            <div class="text-orange-500 mb-3 mt-2">Download both files for update!</div>
+
+                            <div *ngFor="let asset of latestRelease.assets">
+                                <div *ngIf="asset.name == 'esp-miner.bin'">
+                                    <a style="text-decoration: underline;" target="_blank"
+                                        [href]="asset.browser_download_url">esp-miner.bin</a>
+                                </div>
+                                <div *ngIf="asset.name == 'www.bin'">
+                                    <a style="text-decoration: underline;" target="_blank"
+                                        [href]="asset.browser_download_url">www.bin</a>
+                                </div>
                             </div>
-                            <div *ngIf="asset.name == 'www.bin'">
-                                <a style="text-decoration: underline;" target="_blank"
-                                    [href]="asset.browser_download_url">www.bin</a>
-                            </div>
-                        </div>
+                        </ng-container>
+
+                        <ng-template #incompatibleRelease>
+                            <p class="text-sm text-red-500">
+                                This release declares other boards and does not declare board
+                                {{ neuralaxe.targetBoard }}. It is not offered for this device
+                                ({{ neuralaxe.targetDevice }} {{ neuralaxe.targetBoard }} /
+                                {{ neuralaxe.targetAsic }}).
+                            </p>
+                        </ng-template>
 
                         <a class="text-500 underline block mt-3 cursor-pointer" (click)="releaseNotesModal.isVisible = true">
                             Release Notes
                         </a>
 
-                        <app-modal #releaseNotesModal [headline]="latestRelease.name">
+                        <app-modal #releaseNotesModal [headline]="latestRelease.name || latestRelease.tag_name">
                             <div [innerHTML]="simpleMarkdownParser(latestRelease.body)"></div>
                         </app-modal>
                         </ng-container>
                         </ng-container>
 
                         <ng-template #noRelease>
-                            <h3>Latest Release:</h3>
                             <p *ngIf="checkResult.state === 'none'" class="text-500">
                                 No NeuralAxe OS release is available yet for this development build.
                                 Use the manual www.bin / esp-miner.bin upload below when a build is provided.
                             </p>
-                            <p *ngIf="checkResult.state === 'error'" class="text-500">
-                                Could not reach the NeuralAxe OS release service (offline or rate-limited).
-                                Nothing was changed on this device. Please try again later.
-                            </p>
+                            <ng-container *ngIf="checkResult.state === 'error'">
+                                <p *ngIf="checkResult.kind === 'offline'" class="text-500">
+                                    Could not reach the NeuralAxe OS release service — the device appears to be
+                                    offline or github.com is unreachable. Nothing was changed on this device.
+                                    Please try again later.
+                                </p>
+                                <p *ngIf="checkResult.kind === 'rate-limit'" class="text-500">
+                                    Could not reach the NeuralAxe OS release service — the release service is
+                                    rate-limited right now. Nothing was changed on this device. Please try
+                                    again in a few minutes.
+                                </p>
+                                <p *ngIf="checkResult.kind === 'unknown'" class="text-500">
+                                    Could not reach the NeuralAxe OS release service (offline or rate-limited).
+                                    Nothing was changed on this device. Please try again later.
+                                </p>
+                            </ng-container>
                         </ng-template>
                     </ng-container>
                 </ng-template>
             </div>
         </div>
-        <div class="col-12 lg:col-6 xl:col-4">
+    </div>
+
+    <div class="grid">
+        <div class="col-12 lg:col-6">
             <div class="card h-full">
-                <h3>Update AxeOS</h3>
+                <h3 class="nx-card-title">Install Web Interface</h3>
+                <p class="text-sm text-500 mt-0">
+                    Uploads <code>www.bin</code> — the NeuralAxe web interface only.
+                    Mining is not interrupted; the page reloads when done.
+                </p>
 
                 <p-fileUpload #websiteUpload [customUpload]="true" mode="basic" accept=".bin" (uploadHandler)="otaWWWUpdate($event)"
                     [auto]="true" chooseLabel="Browse"></p-fileUpload>
@@ -92,31 +198,50 @@
                 <small>(www.bin)</small>
             </div>
         </div>
-        <div class="col-12 lg:col-6 xl:col-4">
+        <div class="col-12 lg:col-6">
             <div class="card h-full">
-                <h3>Update Firmware</h3>
+                <h3 class="nx-card-title">Install Firmware</h3>
+                <p class="text-sm text-500 mt-0">
+                    Uploads <code>esp-miner.bin</code> — the miner firmware, applied to the
+                    standby OTA partition. The device restarts to finish the update.
+                </p>
+
                 <p-fileUpload #firmwareUpload [customUpload]="true" mode="basic" accept=".bin" (uploadHandler)="otaUpdate($event)"
                     [auto]="true" chooseLabel="Browse"></p-fileUpload>
 
                 <small>(esp-miner.bin)</small>
             </div>
-
         </div>
+    </div>
+
+    <div class="nx-note mt-2">
+        <b class="text-500">Image types:</b>
+        <code>www.bin</code> updates the web interface only;
+        <code>esp-miner.bin</code> updates the miner firmware over OTA;
+        a <b class="text-500">factory image</b> (e.g. <code>esp-miner-factory-*.bin</code>) is a full-flash
+        image for USB recovery with esptool and cannot be installed from this page.
+    </div>
+
+    <div class="nx-note nx-note-warn mt-2">
+        Installing an official upstream ESP-Miner / AxeOS release replaces NeuralAxe OS,
+        including its branding, dashboard and update channel. Only install images built
+        for {{ neuralaxe.targetDevice }} board {{ neuralaxe.targetBoard }}
+        ({{ neuralaxe.targetAsic }}).
     </div>
 </div>
 <app-modal #progressModal [headline]="'Updating ' + updateTarget" [closable]="updateStatus !== 'progress'">
     <div class="flex flex-column align-items-center justify-content-center p-4">
         <ng-container *ngIf="updateStatus === 'progress'">
-            <div class="text-xl mb-3" *ngIf="updateTarget === 'AxeOS' && websiteUpdateProgress !== null">
+            <div class="text-xl mb-3" *ngIf="updateTarget === 'Web Interface' && websiteUpdateProgress !== null">
                 Uploading... {{ websiteUpdateProgress }}%
             </div>
             <div class="text-xl mb-3" *ngIf="updateTarget === 'Firmware' && firmwareUpdateProgress !== null">
                 Uploading... {{ firmwareUpdateProgress }}%
             </div>
-            <div class="text-xl mb-3" *ngIf="(updateTarget === 'AxeOS' && websiteUpdateProgress === null) || (updateTarget === 'Firmware' && firmwareUpdateProgress === null)">
+            <div class="text-xl mb-3" *ngIf="(updateTarget === 'Web Interface' && websiteUpdateProgress === null) || (updateTarget === 'Firmware' && firmwareUpdateProgress === null)">
                 Applying update...
             </div>
-            <p-progressBar class="w-full" [styleClass]="'instant-progress'" [showValue]="false" [value]="updateTarget === 'AxeOS' ? websiteUpdateProgress : firmwareUpdateProgress" [style]="{'height': '1.5rem', 'width': '100%'}"></p-progressBar>
+            <p-progressBar class="w-full" [styleClass]="'instant-progress'" [showValue]="false" [value]="updateTarget === 'Web Interface' ? websiteUpdateProgress : firmwareUpdateProgress" [style]="{'height': '1.5rem', 'width': '100%'}"></p-progressBar>
             <div class="text-center mt-3 text-500">
                 Please do not disconnect the power.
             </div>
@@ -125,7 +250,7 @@
         <ng-container *ngIf="updateStatus === 'success'">
             <i class="pi pi-check-circle text-green-500" style="font-size: 3.5rem; margin-bottom: 1rem;"></i>
             <div class="text-lg text-center">{{ updateMessage }}</div>
-            <div class="mt-4" *ngIf="updateTarget !== 'AxeOS'">
+            <div class="mt-4" *ngIf="updateTarget !== 'Web Interface'">
                 <p-button (onClick)="progressModal.isVisible = false">Close</p-button>
             </div>
         </ng-container>

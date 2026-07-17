@@ -15,13 +15,17 @@ describe('AppMenuComponent (shell route consistency)', () => {
 
   it('should expose every NeuralAxe shell route exactly once', () => {
     const links = items().filter(i => i.routerLink).map(i => String(i.routerLink[0]));
-    expect(links).toEqual(['/', 'classic', 'scoreboard', 'swarm', 'logs', 'system', 'pool', 'network', 'design', 'settings', 'update']);
+    expect(links).toEqual(['/', 'classic', 'scoreboard', 'swarm', 'logs', 'system', 'pool', 'network', 'design', 'settings', 'update', 'about']);
     expect(new Set(links).size).toBe(links.length);
   });
 
   it('should lead with Overview and keep the whitepaper accessible', () => {
     expect(items()[0].label).toBe('Overview');
     expect(items().some(i => i.label === 'Whitepaper' && typeof i.command === 'function')).toBeTrue();
+  });
+
+  it('should link the About page', () => {
+    expect(items().some(i => i.label === 'About' && String(i.routerLink?.[0]) === 'about')).toBeTrue();
   });
 
   it('should not carry upstream primary branding in labels', () => {

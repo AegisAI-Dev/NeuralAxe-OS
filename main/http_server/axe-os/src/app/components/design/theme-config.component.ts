@@ -36,7 +36,7 @@ interface ThemeOption {
         <div class="col-12 mt-4">
           <h5>Theme Colors</h5>
           <div class="grid gap-2">
-            <div *ngFor="let theme of themes" class="col-2 theme-color">
+            <div *ngFor="let theme of themes" class="col-4 sm:col-2 theme-color">
               <button pButton [class]="'p-button-rounded p-button-text color-dot'"
                       [style.backgroundColor]="theme.primaryColor"
                       style="width: 2rem; height: 2rem; border: none;"
@@ -153,7 +153,7 @@ export class ThemeConfigComponent implements OnInit {
       }
     },
     {
-      name: 'Green',
+      name: 'Green (Default)',
       primaryColor: '#4caf50',
       accentColors: {
         '--primary-color': '#4caf50',

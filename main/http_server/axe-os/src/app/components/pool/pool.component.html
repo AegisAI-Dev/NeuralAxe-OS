@@ -1,5 +1,13 @@
 <form [formGroup]="form" *ngIf="form">
     <div class="card">
+        <h2>Pools</h2>
+
+        <p class="nx-page-desc">
+            Stratum pool configuration for this miner. The primary pool is used whenever it
+            is reachable; the fallback pool takes over automatically if the primary fails.
+            Credentials are stored on the device only. Changes apply after Save and Restart.
+        </p>
+
         <div *ngIf="isAnyPoolUsingDefaultAddress()" class="p-message p-message-warn mb-4 p-3 border-round flex align-items-center gap-2" style="background-color: var(--yellow-100); border: 1px solid var(--yellow-500); color: var(--yellow-900);">
             <i class="pi pi-exclamation-triangle text-xl" style="color: var(--yellow-700);"></i>
             <div>
@@ -7,8 +15,8 @@
             </div>
         </div>
         <ng-container *ngFor="let pool of pools">
-            <h2 *ngIf="pool === 'stratum'">Pool Configuration</h2>
-            <h2 *ngIf="pool === 'fallbackStratum'" class="mt-5">Fallback Pool Configuration</h2>
+            <h3 *ngIf="pool === 'stratum'" class="nx-section-heading mt-0">Primary Pool</h3>
+            <h3 *ngIf="pool === 'fallbackStratum'" class="nx-section-heading">Fallback Pool</h3>
 
             <div class="card">
                 <div class="field grid p-fluid">

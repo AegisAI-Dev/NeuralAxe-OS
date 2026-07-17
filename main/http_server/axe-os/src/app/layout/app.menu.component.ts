@@ -40,6 +40,7 @@ export class AppMenuComponent implements OnInit {
           { label: 'Update', icon: 'pi pi-fw pi-sync', routerLink: ['update'] },
           { separator: true },
 
+          { label: 'About', icon: 'pi pi-fw pi-info-circle', routerLink: ['about'] },
           { label: 'Whitepaper', icon: 'pi pi-fw pi-bitcoin', command: () => window.open('/bitcoin.pdf', '_blank') },
         ]
       }

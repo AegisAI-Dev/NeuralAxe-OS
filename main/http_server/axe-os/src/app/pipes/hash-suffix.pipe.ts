@@ -13,7 +13,8 @@ export class HashSuffixPipe implements PipeTransform {
 
   public transform(value: number, args?: any): string {
 
-    if (value == null || value <= 0 || isNaN(value)) {
+    // !isFinite also rejects NaN and ±Infinity from live-device glitches
+    if (value == null || value <= 0 || !isFinite(value)) {
       return '0 H/s';
     }
 

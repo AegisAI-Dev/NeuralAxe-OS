@@ -1,16 +1,48 @@
 <div class="card" *ngIf="combinedData$ | async as data">
     <h2>System</h2>
 
-    <div class="card">
-        <table>
-            <tr *ngFor="let row of getSystemRows(data)">
-                <td class="text-500 vertical-align-top white-space-nowrap pr-4" [ngClass]="row.class">{{ row.label }}</td>
-                <td class="vertical-align-top line-break-anywhere" [ngClass]="(row.class || '') + ' ' + (row.valueClass || '')" [attr.sensitive-data]="row.isSensitiveData ? '' : null" [pTooltip]="row.tooltip">{{ row.value }}</td>
-            </tr>
-        </table>
+    <p class="nx-page-desc">
+        Device information for this NeuralAxe OS miner: product identity, firmware,
+        hardware, runtime health and network state.
+    </p>
 
-        <button pButton class="btn btn-primary mt-5" (click)="identifyDevice()">
-            Identify device
-        </button>
+    <div class="grid">
+        <div class="col-12 lg:col-6" *ngFor="let section of getSystemSections(data)">
+            <div class="card h-full mb-0">
+                <h3 class="nx-card-title">{{ section.title }}</h3>
+                <table>
+                    <tr *ngFor="let row of section.rows">
+                        <td class="text-500 vertical-align-top white-space-nowrap pr-4" [ngClass]="row.class">{{ row.label }}</td>
+                        <td class="vertical-align-top line-break-anywhere" [ngClass]="(row.class || '') + ' ' + (row.valueClass || '')" [attr.sensitive-data]="row.isSensitiveData ? '' : null" [pTooltip]="row.tooltip">{{ row.value }}</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+
+        <div class="col-12 lg:col-6">
+            <div class="card h-full mb-0">
+                <h3 class="nx-card-title nx-cyan">Diagnostics</h3>
+
+                <ng-container *ngIf="getFaultRows(data) as faultRows">
+                    <table *ngIf="faultRows.length">
+                        <tr *ngFor="let row of faultRows">
+                            <td class="text-500 vertical-align-top white-space-nowrap pr-4">{{ row.label }}</td>
+                            <td class="vertical-align-top line-break-anywhere" [ngClass]="row.valueClass">{{ row.value }}</td>
+                        </tr>
+                    </table>
+                    <p *ngIf="!faultRows.length" class="text-500 mt-0">
+                        No fault conditions reported.
+                    </p>
+                </ng-container>
+
+                <button pButton class="btn btn-primary mt-3" (click)="identifyDevice()">
+                    Identify device
+                </button>
+                <small class="block mt-2 text-500">
+                    Shows an identify screen on the device display for 30 seconds
+                    so you can find this miner physically.
+                </small>
+            </div>
+        </div>
     </div>
 </div>

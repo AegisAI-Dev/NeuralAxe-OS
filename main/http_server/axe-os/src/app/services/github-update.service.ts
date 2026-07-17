@@ -5,11 +5,21 @@ import { map } from 'rxjs/operators';
 import { NEURALAXE } from '../neuralaxe';
 
 
-interface GithubRelease {
+export interface GithubReleaseAsset {
+  name: string;
+  browser_download_url: string;
+  size?: number;
+}
+
+export interface GithubRelease {
   id: number;
   tag_name: string;
   name: string;
   prerelease: boolean;
+  html_url?: string;
+  body?: string;
+  published_at?: string;
+  assets?: GithubReleaseAsset[];
 }
 
 @Injectable({

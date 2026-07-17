@@ -1,0 +1,77 @@
+<div class="card">
+    <h2>About</h2>
+
+    <p class="nx-page-desc">
+        What NeuralAxe OS is, what it is built on, and the licenses and projects
+        it stands on.
+    </p>
+
+    <div class="grid">
+        <div class="col-12 lg:col-6">
+            <div class="card h-full mb-0">
+                <h3 class="nx-card-title">NeuralAxe OS</h3>
+
+                <div class="nx-kv">
+                    <div class="nx-kv-row">
+                        <label>Product</label>
+                        <b>{{ neuralaxe.productName }} {{ neuralaxe.productVersion }}</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Status</label>
+                        <b>Development build — not a final public release</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Project</label>
+                        <b>{{ neuralaxe.vendor }}</b>
+                    </div>
+                    <div class="nx-kv-row">
+                        <label>Supported Target</label>
+                        <b>{{ neuralaxe.targetDevice }} board {{ neuralaxe.targetBoard }} / {{ neuralaxe.targetAsic }}</b>
+                    </div>
+                </div>
+
+                <p class="text-sm text-500 mt-3">
+                    NeuralAxe OS is a {{ neuralaxe.vendor }} firmware distribution for open-source
+                    Bitcoin miners. The current pilot targets the {{ neuralaxe.targetDevice }}
+                    board {{ neuralaxe.targetBoard }} with the {{ neuralaxe.targetAsic }} ASIC;
+                    other boards are not supported by NeuralAxe releases at this time.
+                </p>
+            </div>
+        </div>
+
+        <div class="col-12 lg:col-6">
+            <div class="card h-full mb-0">
+                <h3 class="nx-card-title nx-cyan">Built On Open Source</h3>
+
+                <p class="text-sm text-500 mt-0">
+                    {{ neuralaxe.attribution }} NeuralAxe OS {{ neuralaxe.productVersion }} is based
+                    on <b class="text-color">{{ neuralaxe.upstreamProject }}
+                    {{ neuralaxe.upstreamVersion }}</b>, released under the
+                    <b class="text-color">GNU General Public License v3.0</b>. The corresponding
+                    source is available in the NeuralAxe OS repository
+                    ({{ neuralaxe.updateRepository }}), which retains the upstream license.
+                </p>
+
+                <p class="text-sm text-500">
+                    NeuralAxe OS is an independent project. It is <b class="text-color">not an
+                    official Bitaxe product</b> and is not affiliated with or endorsed by the
+                    Bitaxe project or the upstream ESP-Miner maintainers. Mining behavior,
+                    Stratum handling and hardware control are unchanged from upstream.
+                </p>
+            </div>
+        </div>
+
+        <div class="col-12">
+            <div class="card mb-0">
+                <h3 class="nx-card-title">Bitcoin Whitepaper</h3>
+                <p class="text-sm text-500 mt-0 mb-3">
+                    "Bitcoin: A Peer-to-Peer Electronic Cash System" — the paper that started
+                    it all, served locally from this device.
+                </p>
+                <a href="/bitcoin.pdf" target="_blank" class="underline" style="color: var(--primary-color);">
+                    Open the whitepaper (PDF)
+                </a>
+            </div>
+        </div>
+    </div>
+</div>

@@ -3,13 +3,14 @@ import { Observable, map, catchError, of } from 'rxjs';
 import { HttpErrorResponse, HttpEventType } from '@angular/common/http';
 import { ToastrService } from 'ngx-toastr';
 import { FileUploadHandlerEvent, FileUpload } from 'primeng/fileupload';
-import { GithubUpdateService } from 'src/app/services/github-update.service';
+import { GithubUpdateService, GithubRelease } from 'src/app/services/github-update.service';
 import { LoadingService } from 'src/app/services/loading.service';
 import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { LocalStorageService } from 'src/app/local-storage.service';
 import { ModalComponent } from '../modal/modal.component';
 import { SystemInfo } from 'src/app/generated/models';
+import { NEURALAXE } from 'src/app/neuralaxe';
 
 const IGNORE_RELEASE_CHECK_WARNING = 'IGNORE_RELEASE_CHECK_WARNING';
 
@@ -17,12 +18,24 @@ const IGNORE_RELEASE_CHECK_WARNING = 'IGNORE_RELEASE_CHECK_WARNING';
  * Result of a manual NeuralAxe release check.
  * - 'release': a NeuralAxe release is available (never an upstream ESP-Miner release);
  * - 'none':    the NeuralAxe repository has no suitable release yet;
- * - 'error':   the check failed (offline, rate limit, ...) — non-destructive, retry later.
+ * - 'error':   the check failed — non-destructive, retry later. `kind`
+ *              distinguishes offline (no network), rate-limit (GitHub API
+ *              limit) and unknown failures for clear user messaging.
  */
 export type ReleaseCheckResult =
-  | { state: 'release'; release: any }
+  | { state: 'release'; release: GithubRelease }
   | { state: 'none' }
-  | { state: 'error' };
+  | { state: 'error'; kind: 'offline' | 'rate-limit' | 'unknown' };
+
+/**
+ * Declared board compatibility of a release, derived from explicit
+ * `board-NNN` markers in the release tag, title, notes or asset names.
+ * - 'confirmed': the release explicitly declares board 601;
+ * - 'mismatch':  the release declares only other boards (e.g. board-702) —
+ *                it must not be offered for this device;
+ * - 'unknown':   the release declares no board — shown with a caution.
+ */
+export type ReleaseCompatibility = 'confirmed' | 'mismatch' | 'unknown';
 
 @Component({
   selector: 'app-update',
@@ -38,6 +51,8 @@ export class UpdateComponent {
   public latestRelease$: Observable<ReleaseCheckResult>;
 
   public info$: Observable<SystemInfo>;
+
+  public readonly neuralaxe = NEURALAXE;
 
   @ViewChild('firmwareUpload') firmwareUpload!: FileUpload;
   @ViewChild('websiteUpload') websiteUpload!: FileUpload;
@@ -61,13 +76,56 @@ export class UpdateComponent {
     // release check (checkLatestRelease gates the subscribing template branch).
     this.latestRelease$ = this.githubUpdateService.getReleases().pipe(
       map((releases): ReleaseCheckResult => {
-        const release = (releases as any)[0];
+        const release = releases[0];
         return release ? { state: 'release', release } : { state: 'none' };
       }),
-      catchError(() => of<ReleaseCheckResult>({ state: 'error' }))
+      catchError((err) => of<ReleaseCheckResult>({ state: 'error', kind: this.classifyCheckError(err) }))
     );
 
     this.info$ = this.liveDataService.info$;
+  }
+
+  /**
+   * Map a failed release check to a user-facing error kind. GitHub reports
+   * API rate limiting as HTTP 403/429; a network-level failure surfaces as
+   * status 0. Everything else is reported as an unknown failure.
+   */
+  private classifyCheckError(err: unknown): 'offline' | 'rate-limit' | 'unknown' {
+    if (err instanceof HttpErrorResponse) {
+      if (err.status === 403 || err.status === 429) {
+        return 'rate-limit';
+      }
+      if (err.status === 0) {
+        return 'offline';
+      }
+    }
+    return 'unknown';
+  }
+
+  /**
+   * Board compatibility of a release, from explicit `board-NNN` markers in
+   * its tag, title, notes and asset names. NeuralAxe OS currently supports
+   * board 601 (Gamma / BM1370) only; a release that declares other boards
+   * without 601 (e.g. a misleading board-702 claim) is rejected and its
+   * downloads are not offered.
+   */
+  public releaseCompatibility(release: GithubRelease): ReleaseCompatibility {
+    const haystack = [
+      release.tag_name,
+      release.name,
+      release.body,
+      ...(release.assets ?? []).map(asset => asset.name),
+    ].filter((part): part is string => typeof part === 'string').join(' ').toLowerCase();
+
+    const declaredBoards = new Set<string>();
+    for (const match of haystack.matchAll(/board[-_ ]?(\d{3})/g)) {
+      declaredBoards.add(match[1]);
+    }
+
+    if (declaredBoards.size === 0) {
+      return 'unknown';
+    }
+    return declaredBoards.has(NEURALAXE.targetBoard) ? 'confirmed' : 'mismatch';
   }
 
   otaUpdate(event: FileUploadHandlerEvent) {
@@ -126,7 +184,7 @@ export class UpdateComponent {
       return;
     }
 
-    this.updateTarget = 'AxeOS';
+    this.updateTarget = 'Web Interface';
     this.updateStatus = 'progress';
     this.updateMessage = '';
     if (this.progressModal) {
@@ -141,7 +199,7 @@ export class UpdateComponent {
           } else if (event.type === HttpEventType.Response) {
             if (event.ok) {
               this.updateStatus = 'success';
-              this.updateMessage = 'AxeOS updated. The page will reload in a few seconds.';
+              this.updateMessage = 'Web interface updated. The page will reload in a few seconds.';
               setTimeout(() => {
                 window.location.reload();
               }, 2000);
@@ -167,7 +225,10 @@ export class UpdateComponent {
   }
 
   // https://gist.github.com/elfefe/ef08e583e276e7617cd316ba2382fc40
-  public simpleMarkdownParser(markdown: string): string {
+  public simpleMarkdownParser(markdown: string | undefined): string {
+    if (!markdown) {
+      return '';
+    }
     const toHTML = markdown
       .replace(/^#{1,6}\s+(.+)$/gim, '<h4 class="mt-2">$1</h4>') // Headlines
       .replace(/\*\*(.+?)\*\*|__(.+?)__/gim, '<b>$1</b>') // Bold text

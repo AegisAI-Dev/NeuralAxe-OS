@@ -1,5 +1,11 @@
 <div [ngClass]="{'card': (form$ | async), 'hidden': !(form$ | async)}">
-    <h2>Network Configuration</h2>
+    <h2>Network</h2>
+
+    <p class="nx-page-desc">
+        Hostname and Wi-Fi configuration for this device. The Wi-Fi password is stored on
+        the device only and is never displayed once saved. Changes apply after Save and
+        Restart; the device reconnects with the new settings.
+    </p>
 
     <app-network-edit></app-network-edit>
 </div>

@@ -608,6 +608,83 @@
 
 .layout-main .card h5 { color: var(--nx-text); }
 
+/* ---------- secondary-page building blocks ----------
+   Small, reusable pieces for the polished secondary pages: page
+   descriptions, card/section headings, key-value rows and notes.
+   Display-only; no page logic depends on these classes. */
+
+.nx-page-desc {
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--nx-text-dim);
+  margin: -0.4rem 0 1.2rem;
+  max-width: 78ch;
+}
+
+.layout-main .nx-card-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--nx-green);
+  margin: 0 0 0.9rem 0;
+}
+
+.layout-main .nx-card-title.nx-cyan { color: var(--nx-cyan); }
+
+.layout-main .nx-section-heading {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--nx-green);
+  margin: 1.6rem 0 0.8rem;
+}
+
+.nx-kv { display: flex; flex-direction: column; gap: 0.55rem; }
+
+.nx-kv-row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 0.6rem;
+  align-items: baseline;
+}
+
+.nx-kv-row label {
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--nx-text-dim);
+}
+
+.nx-kv-row b {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--nx-text);
+  overflow-wrap: anywhere;
+}
+
+.nx-note {
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid var(--nx-line);
+  border-radius: 8px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--nx-text-dim);
+}
+
+.nx-note-warn {
+  border-color: rgba(230, 178, 60, 0.35);
+  color: var(--nx-amber);
+}
+
+.nx-pill-err { color: var(--nx-red); border-color: rgba(239, 83, 80, 0.45); background: rgba(239, 83, 80, 0.12); }
+
+@media (max-width: 470px) {
+  .nx-kv-row { grid-template-columns: 1fr; gap: 0.15rem; }
+}
+
 /* ---------- animations ---------- */
 
 @keyframes nx-pulse {

@@ -12,6 +12,7 @@ import { AppRoutingModule } from './app-routing.module';
 import { AppComponent } from './app.component';
 import { Api } from './generated/api';
 import { ApiConfiguration } from './generated/api-configuration';
+import { AboutComponent } from './components/about/about.component';
 import { EditComponent } from './components/edit/edit.component';
 import { PoolComponent } from './components/pool/pool.component';
 import { NetworkEditComponent } from './components/network-edit/network.edit.component';
@@ -47,6 +48,7 @@ import { DialogService, DialogListComponent } from './services/dialog.service';
 
 const components = [
   AppComponent,
+  AboutComponent,
   EditComponent,
   NetworkEditComponent,
   HomeComponent,

@@ -1,4 +1,6 @@
 <form *ngIf="form" [formGroup]="form">
+    <h3 class="nx-section-heading mt-0">Mining — Frequency &amp; Voltage</h3>
+
     <div class="card">
         <p-message *ngIf="settingsUnlocked" severity="warn" styleClass="w-full mb-3 py-4 border-round-xl"
             text="Custom settings can cause damage & system instability. Only modify these settings if you understand the risks of running outside designed parameters.">
@@ -6,13 +8,13 @@
 
         <div class="field grid p-fluid">
             <ng-container *ngIf="settingsUnlocked">
-                <label for="frequency" class="col-12 md:col-2 md:m-0">Frequency</label>
+                <label for="frequency" class="col-12 md:col-2 md:m-0">Frequency (MHz)</label>
                 <div class="col-12 md:col-10">
                     <input pInputText id="frequency" formControlName="frequency" type="number" />
                 </div>
             </ng-container>
             <ng-container *ngIf="!settingsUnlocked">
-                <label (click)="frequencyDropdown.show()" class="col-12 md:col-2 md:m-0 hover-next-input">Frequency</label>
+                <label (click)="frequencyDropdown.show()" class="col-12 md:col-2 md:m-0 hover-next-input">Frequency (MHz)</label>
                 <div class="col-12 md:col-10">
                     <p-dropdown
                         [options]="dropdownFrequency"
@@ -27,13 +29,13 @@
 
         <div class="field grid p-fluid">
             <ng-container *ngIf="settingsUnlocked">
-                <label for="coreVoltage" class="col-12 md:col-2 md:m-0">Core Voltage</label>
+                <label for="coreVoltage" class="col-12 md:col-2 md:m-0">Core Voltage (mV)</label>
                 <div class="col-12 md:col-10">
                     <input pInputText id="coreVoltage" formControlName="coreVoltage" type="number" />
                 </div>
             </ng-container>
             <ng-container *ngIf="!settingsUnlocked">
-                <label (click)="voltageDropdown.show()" class="col-12 md:col-2 md:m-0 hover-next-input">Core Voltage</label>
+                <label (click)="voltageDropdown.show()" class="col-12 md:col-2 md:m-0 hover-next-input">Core Voltage (mV)</label>
                 <div class="col-12 md:col-10">
                     <p-dropdown
                         [options]="dropdownVoltage"
@@ -55,7 +57,11 @@
                 Make sure to reset Frequency and Voltage before clicking this button.
             </small>
         </div>
+    </div>
 
+    <h3 class="nx-section-heading">Thermal &amp; Fan</h3>
+
+    <div class="card">
         <div class="field-checkbox grid my-2">
             <div class="col-1 md:col-10 md:flex-order-2">
                 <p-checkbox name="autofanspeed" formControlName="autofanspeed" inputId="autofanspeed" [binary]="true"></p-checkbox>
@@ -100,7 +106,7 @@
         </div>
     </div>
 
-    <h3 class="mt-5">Display</h3>
+    <h3 class="nx-section-heading">Display &amp; Device</h3>
 
     <div class="card">
         <div class="field grid p-fluid">
@@ -111,7 +117,7 @@
         </div>
 
         <div class="field grid p-fluid">
-            <label (click)="rotationDropdown.show()" class="col-12 md:col-2 md:m-0 hover-next-input">Rotation</label>
+            <label (click)="rotationDropdown.show()" class="col-12 md:col-2 md:m-0 hover-next-input">Rotation (°)</label>
             <div class="col-12 md:col-10">
                 <p-dropdown [options]="rotations" formControlName="rotation" #rotationDropdown></p-dropdown>
             </div>
@@ -146,7 +152,7 @@
         </div>
     </div>
 
-    <h3 class="mt-5">Statistics</h3>
+    <h3 class="nx-section-heading">Statistics</h3>
 
     <div class="card">
         <div class="grid p-fluid">

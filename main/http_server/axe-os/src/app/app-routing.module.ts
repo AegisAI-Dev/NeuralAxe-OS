@@ -1,6 +1,7 @@
 import { NgModule } from '@angular/core';
 import { RouterModule, Routes } from '@angular/router';
 
+import { AboutComponent } from './components/about/about.component';
 import { HomeComponent } from './components/home/home.component';
 import { LogsComponent } from './components/logs/logs.component';
 import { SystemComponent } from './components/system/system.component';
@@ -88,6 +89,11 @@ const routes: Routes = [
         path: 'pool',
         component: PoolComponent,
         title: `${TITLE_PREFIX} Pool`,
+      },
+      {
+        path: 'about',
+        component: AboutComponent,
+        title: `${TITLE_PREFIX} About`,
       }
     ]
   },

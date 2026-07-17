@@ -1,18 +1,27 @@
 #logs {
-    height: calc(100svh - 4rem - 10rem - 4rem - 4px); // padding + height + border
-    border: 1px solid #304562;
+    height: calc(100svh - 4rem - 13rem - 4rem - 4px); // padding + header/description + border
+    border: 1px solid var(--nx-line-bright, #304562);
+    border-radius: 8px;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 0.5rem 0.75rem;
     overflow-y: scroll;
     overflow-x: hidden;
 
     @media (min-width: 768px) {
-        height: calc(100vh - 4rem - 9rem - 4rem - 4px); // padding + height + border
+        height: calc(100vh - 4rem - 12rem - 4rem - 4px); // padding + header/description + border
+    }
+
+    div {
+        line-height: 1.45;
     }
 }
 
-.ansi-red { color: #ff0000; }
-.ansi-green { color: #00ff00; }
-.ansi-yellow { color: #ffff00; }
-.ansi-blue { color: #0000ff; }
-.ansi-magenta { color: #ff00ff; }
-.ansi-cyan { color: #00ffff; }
-.ansi-white { color: #ffffff; }
+/* Softened ANSI palette: keeps severity hues recognizable while staying
+   readable on the dark NeuralAxe panel (pure #00f blue was illegible). */
+.ansi-red { color: #ff6b64; }
+.ansi-green { color: #3ddc84; }
+.ansi-yellow { color: #ffd166; }
+.ansi-blue { color: #58a6ff; }
+.ansi-magenta { color: #d97fe8; }
+.ansi-cyan { color: #35c3e6; }
+.ansi-white { color: #e8f1f8; }
