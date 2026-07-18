@@ -1,3 +1,13 @@
+// ============================================================
+//  Neural Command Rail (Phase 2J — Tactical Neural Console)
+//  The desktop sidebar is a branded command rail: a faint circuit
+//  spine with section nodes, compact tactical control-module items,
+//  and a STRUCTURAL active state (illuminated edge + elevated module +
+//  route-lock glyph) that is deliberately distinct from health
+//  semantics. All decorative GFX are CSS pseudo-elements (not in the
+//  a11y tree); navigation never uses the semantic health tokens.
+// ============================================================
+
 .layout-sidebar {
     position: fixed;
     height: calc(100vh - 9.5rem);
@@ -7,10 +17,26 @@
     top: calc(var(--topbar-height) + 2rem);
     left: 2rem;
     transition: transform $transitionDuration, left $transitionDuration;
-    background-color: var(--surface-overlay);
+    background:
+        // faint circuit texture: a barely-there grid, product identity not noise
+        linear-gradient(180deg, var(--nx-panel-2, var(--surface-overlay)) 0%, var(--nx-panel, var(--surface-overlay)) 100%);
+    border: 1px solid var(--nx-line, var(--surface-border));
     border-radius: $borderRadius;
-    padding: 1.5rem;
-    box-shadow: 0px 3px 5px rgba(0, 0, 0, .02), 0px 0px 2px rgba(0, 0, 0, .05), 0px 1px 4px rgba(0, 0, 0, .08);
+    padding: 1.25rem 1rem 1rem;
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 16px 40px rgba(0, 0, 0, 0.45);
+
+    // bracketed command-rail cap: a thin accent line + corner ticks along the top
+    &::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0.75rem;
+        right: 0.75rem;
+        height: 2px;
+        background: linear-gradient(90deg, transparent, var(--nx-nav-gfx, rgba(53,195,230,0.5)) 20%, var(--nx-nav-gfx, rgba(53,195,230,0.5)) 80%, transparent);
+        opacity: 0.7;
+        pointer-events: none;
+    }
 
     @media screen and (min-width: 992px) {
         width: var(--sidebar-width);
@@ -22,17 +48,50 @@
     padding: 0;
     list-style-type: none;
 
+    // ---- section group: circuit spine segment + node -----------------
     .layout-root-menuitem {
-        >.layout-menuitem-root-text {
-            font-size: .857rem;
-            text-transform: uppercase;
-            font-weight: 700;
-            color: var(--surface-900);
-            margin: .5rem 0;
-            line-height: 1.3rem;
+        position: relative;
+        padding-left: 0.95rem;
+        margin-bottom: 0.35rem;
+
+        // continuous faint spine down the left gutter of each group
+        &::before {
+            content: '';
+            position: absolute;
+            left: 0.28rem;
+            top: 0.55rem;
+            bottom: 0.1rem;
+            width: 1px;
+            background: linear-gradient(180deg, var(--nx-nav-gfx-dim, rgba(53,195,230,0.18)), transparent);
+            pointer-events: none;
         }
 
-        >a {
+        // section node: a small cyan diamond sitting on the spine
+        > .layout-menuitem-root-text {
+            position: relative;
+            font-size: 0.62rem;
+            text-transform: uppercase;
+            font-weight: 700;
+            letter-spacing: 0.22em;
+            color: var(--nx-text-dim, var(--text-color-secondary));
+            margin: 0.35rem 0 0.45rem;
+            line-height: 1.2rem;
+
+            &::before {
+                content: '';
+                position: absolute;
+                left: -0.72rem;
+                top: 0.28rem;
+                width: 6px;
+                height: 6px;
+                transform: rotate(45deg);
+                background: var(--nx-nav-gfx, rgba(53,195,230,0.5));
+                box-shadow: 0 0 6px var(--nx-nav-gfx-dim, rgba(53,195,230,0.18));
+                pointer-events: none;
+            }
+        }
+
+        > a {
             display: none;
         }
     }
@@ -41,14 +100,14 @@
         user-select: none;
 
         &.active-menuitem {
-            >.layout-submenu-toggler {
+            > .layout-submenu-toggler {
                 transform: rotate(-180deg);
             }
         }
     }
 
     li.active-menuitem {
-        >a {
+        > a {
             .layout-submenu-toggler {
                 transform: rotate(-180deg);
             }
@@ -60,6 +119,7 @@
         padding: 0;
         list-style-type: none;
 
+        // ---- tactical control-module nav items ------------------------
         a {
             display: flex;
             align-items: center;
@@ -67,12 +127,26 @@
             outline: 0 none;
             color: var(--text-color);
             cursor: pointer;
-            padding: .75rem 1rem;
+            padding: 0.5rem 0.7rem;
+            margin: 0.15rem 0;
+            border: 1px solid transparent;
             border-radius: $borderRadius;
-            transition: background-color $transitionDuration, box-shadow $transitionDuration;
+            font-size: 0.86rem;
+            transition: background-color 0.16s ease, border-color 0.16s ease, color 0.16s ease;
 
             .layout-menuitem-icon {
-                margin-right: .5rem;
+                margin-right: 0.6rem;
+                font-size: 0.95rem;
+                color: var(--nx-text-dim, var(--text-color-secondary));
+                transition: color 0.16s ease;
+                width: 1.1rem;
+                text-align: center;
+                flex-shrink: 0;
+            }
+
+            .layout-menuitem-text {
+                min-width: 0;
+                line-height: 1.2;
             }
 
             .layout-submenu-toggler {
@@ -81,17 +155,62 @@
                 transition: transform $transitionDuration;
             }
 
+            // ---- structural ACTIVE state (not colour-only) ------------
             &.active-route {
                 font-weight: 700;
-                color: var(--primary-color);
+                color: var(--nx-nav-active, var(--primary-color));
+                background: var(--nx-nav-active-bg, rgba(53,195,230,0.10));
+                border-color: var(--nx-nav-module-border, var(--nx-line-bright));
+                // tactical module: a bracketed top-right corner drawn with a
+                // border wedge (NOT clip-path, which would clip the focus ring).
+                background-image:
+                    linear-gradient(225deg, var(--nx-nav-module-border, var(--nx-line-bright)) 0 8px, transparent 8px);
+                background-repeat: no-repeat;
+                background-position: top right;
+                background-size: 9px 9px;
+
+                .layout-menuitem-icon {
+                    color: var(--nx-nav-active, var(--primary-color));
+                    filter: drop-shadow(0 0 5px var(--nx-nav-active-bg, rgba(53,195,230,0.10)));
+                }
+
+                // illuminated left edge marker (structural, always present when active)
+                &::before {
+                    content: '';
+                    position: absolute;
+                    left: 0;
+                    top: 4px;
+                    bottom: 4px;
+                    width: 3px;
+                    border-radius: 2px;
+                    background: var(--nx-nav-marker, var(--primary-color));
+                    box-shadow: 0 0 8px var(--nx-nav-marker, var(--primary-color));
+                }
+
+                // route-lock chevron on the far right (structural "you are here";
+                // fixed cyan marker, accent-independent)
+                &::after {
+                    content: '';
+                    width: 5px;
+                    height: 5px;
+                    margin-left: auto;
+                    border-top: 2px solid var(--nx-nav-marker, var(--nx-cyan));
+                    border-right: 2px solid var(--nx-nav-marker, var(--nx-cyan));
+                    transform: rotate(45deg);
+                    flex-shrink: 0;
+                }
             }
 
             &:hover {
-                background-color: var(--surface-hover);
+                background-color: var(--nx-nav-hover-bg, var(--surface-hover));
+                border-color: var(--nx-line, var(--surface-border));
             }
 
-            &:focus {
-                @include focused-inset();
+            // focus is a dedicated non-semantic ring, distinct from hover+active,
+            // and an outline (not box-shadow) so the clipped active module can't clip it
+            &:focus-visible {
+                outline: 2px solid var(--nx-nav-focus, var(--nx-cyan));
+                outline-offset: 1px;
             }
         }
 
@@ -100,40 +219,60 @@
             border-radius: $borderRadius;
 
             li {
-                a {
-                    margin-left: 1rem;
-                }
-
+                a { margin-left: 1rem; }
                 li {
-                    a {
-                        margin-left: 2rem;
-                    }
-
+                    a { margin-left: 2rem; }
                     li {
-                        a {
-                            margin-left: 2.5rem;
-                        }
-
+                        a { margin-left: 2.5rem; }
                         li {
-                            a {
-                                margin-left: 3rem;
-                            }
-
+                            a { margin-left: 3rem; }
                             li {
-                                a {
-                                    margin-left: 3.5rem;
-                                }
-
-                                li {
-                                    a {
-                                        margin-left: 4rem;
-                                    }
-                                }
+                                a { margin-left: 3.5rem; }
+                                li { a { margin-left: 4rem; } }
                             }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+// active-state entry transition is motion; honour reduced-motion
+@media (prefers-reduced-motion: reduce) {
+    .layout-menu ul a { transition: none; }
+    .layout-menu ul a .layout-submenu-toggler { transition: none; }
+}
+
+// ---- tablet: the floating rail narrows but keeps full labels ----------
+@media (min-width: 992px) and (max-width: 1200px) {
+    :root { --sidebar-width: 12rem; }
+    .layout-menu ul a { padding: 0.45rem 0.55rem; }
+}
+
+// ---- mobile: full-height drawer with touch-friendly modules ----------
+//  The drawer mechanics (translateX + backdrop) live in _responsive.scss;
+//  here the modules grow for touch and the decorative spine is simplified.
+@media (max-width: 991px) {
+    .layout-sidebar {
+        padding: 1.25rem 1.1rem;
+
+        // the top cap becomes a full-width drawer header rule
+        &::before { left: 1.1rem; right: 1.1rem; }
+    }
+
+    .layout-menu {
+        .layout-root-menuitem > .layout-menuitem-root-text {
+            font-size: 0.64rem;
+            margin: 0.6rem 0 0.5rem;
+        }
+
+        ul a {
+            padding: 0.75rem 0.8rem;   // ≥44px touch target
+            font-size: 0.95rem;
+            margin: 0.2rem 0;
+
+            .layout-menuitem-icon { font-size: 1.05rem; margin-right: 0.7rem; }
         }
     }
 }

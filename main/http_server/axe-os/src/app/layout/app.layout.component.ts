@@ -1,4 +1,4 @@
-import { Component, OnDestroy, Renderer2, ViewChild } from '@angular/core';
+import { Component, HostListener, OnDestroy, Renderer2, ViewChild } from '@angular/core';
 import { NavigationEnd, Router } from '@angular/router';
 import { filter, Subscription, Subject, takeUntil } from 'rxjs';
 import { SensitiveData } from 'src/app/services/sensitive-data.service';
@@ -53,6 +53,19 @@ export class AppLayoutComponent implements OnDestroy {
                 this.hideMenu();
                 this.hideProfileMenu();
             });
+    }
+
+    /**
+     * Escape closes the mobile/overlay navigation drawer and returns focus to
+     * the menu toggle — additive keyboard affordance; desktop static rail and
+     * all other Escape usages (modals) are unaffected.
+     */
+    @HostListener('document:keydown.escape')
+    onEscapeKey() {
+        if (this.layoutService.state.staticMenuMobileActive || this.layoutService.state.overlayMenuActive) {
+            this.hideMenu();
+            this.appTopbar?.menuButton?.nativeElement?.focus?.();
+        }
     }
 
     hideMenu() {

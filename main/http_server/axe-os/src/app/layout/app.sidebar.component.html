@@ -1,8 +1,26 @@
 <app-menu></app-menu>
 
-<div class="nx-device-card select-none" *ngIf="info$ | async as info">
-    <img src="assets/neuralaxe-mark.svg" alt="" aria-hidden="true" />
-    <b>{{ neuralaxe.targetDevice }} {{ neuralaxe.targetBoard }}</b>
-    <small>{{ info.hostname }}</small>
-    <small class="white-space-nowrap">{{ neuralaxe.targetAsic }} &middot; {{ neuralaxe.buildChannel === 'development' ? 'dev' : neuralaxe.buildChannel }}</small>
+<!-- Active Unit Dock: a hardware-module presentation of THIS device. Existing
+     values only (target identity + reported hostname); hostname respects
+     privacy mode via [sensitive-data]. No live telemetry (that lives in the
+     top bar / Command Deck) — this is an identity plate, not a stat panel. -->
+<div class="nx-unit-dock select-none" *ngIf="info$ | async as info" role="group" aria-label="Active unit">
+    <div class="nx-unit-dock-head">
+        <span class="nx-unit-dock-tag">Active&nbsp;Unit</span>
+        <span class="nx-unit-dock-node" aria-hidden="true"></span>
+    </div>
+    <div class="nx-unit-dock-body">
+        <img class="nx-unit-dock-mark" src="assets/neuralaxe-mark.svg" alt="" aria-hidden="true" />
+        <div class="nx-unit-dock-id">
+            <b>{{ neuralaxe.targetDevice }} {{ neuralaxe.targetBoard }}</b>
+            <small class="nx-unit-dock-asic">{{ neuralaxe.targetAsic }} &middot; {{ neuralaxe.buildChannel === 'development' ? 'dev' : neuralaxe.buildChannel }}</small>
+        </div>
+    </div>
+    <div class="nx-unit-dock-host">
+        <i class="pi pi-desktop" aria-hidden="true"></i>
+        <span class="nx-ellipsis" sensitive-data>{{ info.hostname || '—' }}</span>
+    </div>
+    <div class="nx-unit-dock-foot">
+        <span class="nx-unit-dock-class">NeuralAxe&nbsp;Managed</span>
+    </div>
 </div>
