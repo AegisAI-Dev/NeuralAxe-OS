@@ -100,6 +100,18 @@ describe('AppSidebarComponent (Neural Command Rail, Phase 2J)', () => {
         .filter((a: any) => a.getAttribute('href') !== null);
       expect(leafLinks.length).toBe(12);
     });
+
+    it('renders every navigation label in full (2J.1 readability)', () => {
+      const labels = Array.from(fixture.nativeElement.querySelectorAll('.layout-menuitem-text'))
+        .map((el: any) => el.textContent.trim());
+      for (const expected of [
+        'Command Deck', 'Scoreboard', 'Fleet', 'Pools', 'Network',
+        'Tuning & Thermal', 'Display & Appearance', 'Device Status', 'Logs',
+        'Updates', 'About NeuralAxe', 'Legacy Dashboard',
+      ]) {
+        expect(labels).withContext(expected).toContain(expected);
+      }
+    });
   });
 
   describe('active-route semantics (Stages 4/12)', () => {

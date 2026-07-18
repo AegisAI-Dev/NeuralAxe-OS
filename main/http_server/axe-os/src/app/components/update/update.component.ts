@@ -9,7 +9,7 @@ import { SystemApiService } from 'src/app/services/system.service';
 import { LiveDataService } from 'src/app/services/live-data.service';
 import { LocalStorageService } from 'src/app/local-storage.service';
 import { WebVersionService } from 'src/app/services/web-version.service';
-import { VersionState, deriveVersionState } from 'src/app/services/version-state';
+import { VersionState, deriveVersionState, PairStatus, derivePairStatus } from 'src/app/services/version-state';
 import { ModalComponent } from '../modal/modal.component';
 import { SystemInfo } from 'src/app/generated/models';
 import { NEURALAXE } from 'src/app/neuralaxe';
@@ -75,6 +75,13 @@ export class UpdateComponent {
    */
   public versionState$: Observable<VersionState>;
 
+  /**
+   * Honest firmware/web pairing for the "This Device" card. Distinguishes a
+   * live-verified match/mismatch from a boot-time-only result, so a missing
+   * live /version.txt is never presented as a mismatch (2J.1).
+   */
+  public pairStatus$: Observable<PairStatus>;
+
   public readonly neuralaxe = NEURALAXE;
 
   @ViewChild('firmwareUpload') firmwareUpload!: FileUpload;
@@ -110,6 +117,10 @@ export class UpdateComponent {
 
     this.versionState$ = combineLatest([this.info$, this.webVersionService.installedWebVersion$]).pipe(
       map(([info, liveWeb]) => deriveVersionState(info.version, info.axeOSVersion, liveWeb))
+    );
+
+    this.pairStatus$ = combineLatest([this.info$, this.webVersionService.installedWebVersion$]).pipe(
+      map(([info, liveWeb]) => derivePairStatus(info.version, info.axeOSVersion, liveWeb))
     );
   }
 

@@ -951,7 +951,11 @@ $imagePreviewActionIconBorderRadius: 50% !default;
     --highlight-bg: #{$highlightBg};
     --highlight-text-color: #{$highlightTextColor};
     --focus-ring: #{$focusShadow};
-    --sidebar-width: 12rem;
+    // Command Rail width (Phase 2J.1): 13.5rem fits the key labels on one line
+    // (Command Deck, About NeuralAxe, Tuning & Thermal, Device Status); the
+    // main-content left offset derives from this same token
+    // (calc(--sidebar-width + 2rem)) so the two always move together.
+    --sidebar-width: 13.5rem;
     --topbar-height: 5.5rem;
     color-scheme: light dark;
 }

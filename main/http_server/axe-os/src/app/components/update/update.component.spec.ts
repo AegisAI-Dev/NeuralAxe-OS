@@ -59,6 +59,32 @@ describe('UpdateComponent', () => {
     expect(text).toContain('replaces NeuralAxe OS');
   });
 
+  describe('honest pair status (2J.1)', () => {
+    it('presents a boot-pair match calmly when live web is unavailable — not the old alarm', (done) => {
+      // Subscribing fires the live /version.txt read; the boot snapshot then
+      // decides the pair. Mock info reports firmware === boot web (v2.12.0), so
+      // with live unavailable this is a proven BOOT pair match, never an alarm.
+      const sub = component.pairStatus$.subscribe((ps) => {
+        expect(ps.state).toBe('boot-match');
+        expect(ps.severity).toBe('ok');
+        expect(ps.liveVerified).toBeFalse();
+        expect(ps.bootVerified).toBeTrue();
+        expect(ps.primary).toBe('Boot pair match');
+        expect(ps.secondary).toContain('Live verification unavailable');
+        sub.unsubscribe();
+        done();
+      });
+      // fail the live read so the live revision resolves to null
+      httpMock.match((r) => r.url.includes('/version.txt'))
+        .forEach((r) => r.flush('', { status: 404, statusText: 'Not Found' }));
+    });
+
+    it('removes the old alarming standalone "Live web version unavailable" label', () => {
+      // The string is deleted from the template entirely; it can never render.
+      expect((fixture.nativeElement as HTMLElement).innerHTML).not.toContain('Live web version unavailable');
+    });
+  });
+
   it('should report clearly when the NeuralAxe repository has no release', async () => {
     spyOn(githubUpdateService, 'getReleases').and.returnValue(of([]));
     // Recreate so the constructor picks up the spied service.

@@ -87,3 +87,77 @@ export function deriveVersionState(
     status,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Honest pair-status presentation (Phase 2J.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The five distinguishable firmware/web pairing outcomes for the Update page.
+ * The distinction that matters: a LIVE-verified result (live /version.txt was
+ * read) vs a BOOT-only result (only the firmware's boot snapshot is known). A
+ * missing live revision is NOT a mismatch.
+ */
+export type PairStatusState =
+  | 'live-match'      // live web revision available and equals firmware
+  | 'live-mismatch'   // live web revision available and differs from firmware
+  | 'boot-match'      // live unavailable; boot web revision equals firmware
+  | 'boot-mismatch'   // live unavailable; boot web revision differs from firmware
+  | 'unknown';        // not enough revision data to judge either
+
+export type PairSeverity = 'ok' | 'info' | 'warn' | 'danger';
+
+export interface PairStatus {
+  state: PairStatusState;
+  /** Concise headline (e.g. "Live pair match" / "Boot pair match"). */
+  primary: string;
+  /** One-line qualifier (e.g. "Live verification unavailable"). */
+  secondary: string;
+  severity: PairSeverity;
+  /** True only when the live web revision was available and compared. */
+  liveVerified: boolean;
+  /** True when the boot-time web revision was available and compared. */
+  bootVerified: boolean;
+}
+
+/**
+ * Honest, deterministic pair-status derivation. Never claims a live match from
+ * boot-time data and never reports a missing live revision as a mismatch — it
+ * reports exactly what could be verified. Revision strings are compared exactly
+ * after whitespace trimming ('-dirty' and every other suffix are significant).
+ */
+export function derivePairStatus(
+  firmware: string | null | undefined,
+  bootWeb: string | null | undefined,
+  liveWeb: string | null | undefined,
+): PairStatus {
+  const fw = normalize(firmware);
+  const boot = normalize(bootWeb);
+  const live = normalize(liveWeb);
+
+  // Live verification available: the strongest, most current signal.
+  if (fw && live) {
+    return live === fw
+      ? { state: 'live-match', primary: 'Live pair match',
+          secondary: 'Firmware and installed web revision match',
+          severity: 'ok', liveVerified: true, bootVerified: !!boot }
+      : { state: 'live-mismatch', primary: 'Live pair mismatch',
+          secondary: 'Installed web differs from the running firmware — update both from the same release',
+          severity: 'danger', liveVerified: true, bootVerified: !!boot };
+  }
+
+  // Live unavailable: fall back to the firmware's boot-time snapshot, and say so.
+  if (fw && boot) {
+    return boot === fw
+      ? { state: 'boot-match', primary: 'Boot pair match',
+          secondary: 'Live verification unavailable',
+          severity: 'ok', liveVerified: false, bootVerified: true }
+      : { state: 'boot-mismatch', primary: 'Boot pair mismatch',
+          secondary: 'Live verification unavailable — restart to refresh, or reflash the matching pair',
+          severity: 'warn', liveVerified: false, bootVerified: true };
+  }
+
+  return { state: 'unknown', primary: 'Pair status unknown',
+    secondary: 'Insufficient revision data', severity: 'info',
+    liveVerified: false, bootVerified: false };
+}

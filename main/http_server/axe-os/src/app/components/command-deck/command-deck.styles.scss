@@ -694,8 +694,11 @@
 }
 
 .layout-topbar {
-  position: relative;
-
+  // NOTE: the top bar stays `position: fixed` (from _topbar.scss). Do NOT set
+  // `position: relative` here — that pulls the bar back into flow, so its height
+  // is counted twice (once in flow + once in the main-content
+  // `calc(--topbar-height + …)` padding), pushing all page content ~77px too
+  // low. The absolute `::after` hairline anchors to the fixed bar just fine.
   &::after {
     content: '';
     position: absolute;
