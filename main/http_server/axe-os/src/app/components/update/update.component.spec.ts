@@ -10,6 +10,7 @@ import { HttpErrorResponse, provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting, HttpTestingController } from '@angular/common/http/testing';
 import { provideToastr } from 'ngx-toastr';
 import { GithubUpdateService, GithubRelease } from 'src/app/services/github-update.service';
+import { SystemApiService } from 'src/app/services/system.service';
 
 describe('UpdateComponent', () => {
   let component: UpdateComponent;
@@ -213,6 +214,97 @@ describe('UpdateComponent', () => {
       const downloadLinks = Array.from(el.querySelectorAll('a'))
         .filter(a => (a.getAttribute('href') ?? '').includes('example.invalid'));
       expect(downloadLinks.length).toBe(2);
+    });
+  });
+
+  describe('staged upload flow (2H.1 filename compatibility)', () => {
+    function selectWeb(name: string) {
+      component.otaWWWUpdate({ files: [new File([''], name)] } as any);
+      fixture.detectChanges();
+    }
+    function selectFirmware(name: string) {
+      component.otaUpdate({ files: [new File([''], name)] } as any);
+      fixture.detectChanges();
+    }
+
+    it('stages the NeuralAxe www name without uploading, then installs only on the explicit click', () => {
+      const systemService = TestBed.inject(SystemApiService);
+      const uploadSpy = spyOn(systemService, 'performWWWOTAUpdate').and.returnValue(of());
+
+      selectWeb('NeuralAxe-OS-v0.1.0-dev-Gamma-601-www.bin');
+
+      expect(component.stagedWeb?.file.name).toBe('NeuralAxe-OS-v0.1.0-dev-Gamma-601-www.bin');
+      expect(uploadSpy).not.toHaveBeenCalled(); // selection alone never uploads
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Web interface update');
+
+      component.installStagedWeb();
+      expect(uploadSpy).toHaveBeenCalledTimes(1);
+      expect(component.stagedWeb).toBeNull();
+    });
+
+    it('stages the NeuralAxe ota name for the firmware uploader and installs explicitly', () => {
+      const systemService = TestBed.inject(SystemApiService);
+      const uploadSpy = spyOn(systemService, 'performOTAUpdate').and.returnValue(of());
+
+      selectFirmware('NeuralAxe-OS-v0.1.0-dev-Gamma-601-ota.bin');
+      expect(component.stagedFirmware).not.toBeNull();
+      expect(uploadSpy).not.toHaveBeenCalled();
+
+      component.installStagedFirmware();
+      expect(uploadSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('still accepts the legacy names on both uploaders', () => {
+      selectWeb('www.bin');
+      expect(component.stagedWeb?.check.accepted).toBeTrue();
+      selectFirmware('esp-miner.bin');
+      expect(component.stagedFirmware?.check.accepted).toBeTrue();
+    });
+
+    it('rejects a factory image from both uploaders with the USB-recovery reason and no upload', () => {
+      const systemService = TestBed.inject(SystemApiService);
+      const webSpy = spyOn(systemService, 'performWWWOTAUpdate');
+      const fwSpy = spyOn(systemService, 'performOTAUpdate');
+
+      selectWeb('NeuralAxe-OS-v0.1.0-dev-Gamma-601-factory.bin');
+      expect(component.stagedWeb).toBeNull();
+      expect(component.rejectedWeb?.check.detectedType).toBe('factory');
+
+      selectFirmware('NeuralAxe-OS-v0.1.0-dev-Gamma-601-factory.bin');
+      expect(component.stagedFirmware).toBeNull();
+      expect(component.rejectedFirmware?.check.detectedType).toBe('factory');
+
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('not installable here');
+      expect(text.toLowerCase()).toContain('usb-recovery');
+      expect(webSpy).not.toHaveBeenCalled();
+      expect(fwSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects wrong-type and arbitrary files with visible reasons', () => {
+      selectWeb('esp-miner.bin'); // firmware image on the web uploader
+      expect(component.rejectedWeb?.check.reason).toContain('Install Firmware');
+
+      selectFirmware('arbitrary.bin');
+      expect(component.rejectedFirmware?.check.detectedType).toBe('unknown');
+
+      for (const name of ['esp-miner-merged.bin', 'bootloader.bin', 'partition-table.bin', 'ota_data_initial.bin']) {
+        selectFirmware(name);
+        expect(component.stagedFirmware).withContext(name).toBeNull();
+        expect(component.rejectedFirmware?.check.accepted).withContext(name).toBeFalse();
+      }
+    });
+
+    it('cancel clears a staged file without uploading', () => {
+      const systemService = TestBed.inject(SystemApiService);
+      const uploadSpy = spyOn(systemService, 'performWWWOTAUpdate');
+      selectWeb('www.bin');
+      expect(component.stagedWeb).not.toBeNull();
+
+      component.cancelStagedWeb();
+      expect(component.stagedWeb).toBeNull();
+      expect(uploadSpy).not.toHaveBeenCalled();
     });
   });
 });

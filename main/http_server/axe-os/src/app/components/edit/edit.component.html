@@ -27,14 +27,29 @@
                     <label>VRM Temp</label>
                     <span [class]="vrTempSeverityClass(live)">{{ fmt.temp(live.vrTemp) }}</span>
                 </div>
-                <div class="nx-stat">
-                    <label>Thermal Delta</label>
-                    <span [class]="tempSeverityClass(live)">{{ thermalDeltaText(live) }}</span>
-                </div>
-                <div class="nx-stat">
-                    <label>Target Temp</label>
-                    <span>{{ fmt.temp(live.temptarget) }}</span>
-                </div>
+                <!-- The delta vs target is only meaningful while TARGET mode is
+                     the active controller; curve/manual show the live control
+                     temperature and mode instead (2H.1). -->
+                <ng-container *ngIf="live.thermalControlMode === 'target'; else nonTargetTiles">
+                    <div class="nx-stat">
+                        <label>Thermal Delta</label>
+                        <span [class]="tempSeverityClass(live)">{{ thermalDeltaText(live) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Target Temp</label>
+                        <span>{{ fmt.temp(live.temptarget) }}</span>
+                    </div>
+                </ng-container>
+                <ng-template #nonTargetTiles>
+                    <div class="nx-stat">
+                        <label>Control Temp</label>
+                        <span>{{ (live.controlSensorValid === 1 && (live.effectiveControlTemperature ?? -1) > 0) ? fmt.temp(live.effectiveControlTemperature) : '—' }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Thermal Mode</label>
+                        <span>{{ thermalModeLabelFor(live.thermalControlMode) }}</span>
+                    </div>
+                </ng-template>
                 <div class="nx-stat">
                     <label>Fan</label>
                     <span [class]="fanSeverityClass(live)">{{ fmt.int(live.fanspeed, ' %') }}</span>

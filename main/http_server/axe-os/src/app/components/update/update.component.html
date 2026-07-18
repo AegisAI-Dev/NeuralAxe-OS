@@ -183,7 +183,9 @@
                         <ng-template #noRelease>
                             <p *ngIf="checkResult.state === 'none'" class="text-500">
                                 No NeuralAxe OS release is available yet for this development build.
-                                Use the manual www.bin / esp-miner.bin upload below when a build is provided.
+                                Use the manual upload below when a build is provided — both the legacy
+                                names (www.bin / esp-miner.bin) and the NeuralAxe release-export names
+                                (*-www.bin / *-ota.bin) install directly.
                             </p>
                             <ng-container *ngIf="checkResult.state === 'error'">
                                 <p *ngIf="checkResult.kind === 'offline'" class="text-500">
@@ -213,38 +215,74 @@
             <div class="card h-full">
                 <h3 class="nx-card-title">Install Web Interface</h3>
                 <p class="text-sm text-500 mt-0">
-                    Uploads <code>www.bin</code> — the NeuralAxe web interface only.
-                    Mining is not interrupted; the page reloads when done.
+                    Updates the NeuralAxe web interface only. Mining is not interrupted;
+                    the page reloads when done. Accepted names:
+                    <code>www.bin</code> or a NeuralAxe release file ending in <code>-www.bin</code>
+                    (e.g. <code>NeuralAxe-OS-v0.1.0-dev-Gamma-601-www.bin</code>).
                 </p>
 
                 <p-fileUpload #websiteUpload [customUpload]="true" mode="basic" accept=".bin" (uploadHandler)="otaWWWUpdate($event)"
                     [auto]="true" chooseLabel="Browse"></p-fileUpload>
 
-                <small>(www.bin)</small>
+                <div *ngIf="stagedWeb as staged" class="nx-note mt-2">
+                    <div><b class="text-color nx-ellipsis inline-block" style="max-width: 100%;">{{ staged.file.name }}</b></div>
+                    <div class="text-sm"><span class="nx-pill nx-pill-ok">{{ staged.check.typeLabel }}</span></div>
+                    <div class="text-sm text-500 mt-1">{{ staged.check.reason }}</div>
+                    <div class="flex gap-2 mt-2">
+                        <button pButton type="button" class="p-button-sm" (click)="installStagedWeb()">Install Web Interface</button>
+                        <button pButton type="button" class="p-button-sm p-button-secondary" (click)="cancelStagedWeb()">Cancel</button>
+                    </div>
+                </div>
+                <div *ngIf="rejectedWeb as rejected" class="nx-note nx-note-warn mt-2">
+                    <div><b class="nx-ellipsis inline-block" style="max-width: 100%;">{{ rejected.filename }}</b></div>
+                    <div class="text-sm">Detected: {{ rejected.check.typeLabel }} — <b>not installable here</b></div>
+                    <div class="text-sm text-500 mt-1">{{ rejected.check.reason }}</div>
+                </div>
+
+                <small *ngIf="!stagedWeb && !rejectedWeb">(www.bin · *-www.bin)</small>
             </div>
         </div>
         <div class="col-12 lg:col-6">
             <div class="card h-full">
                 <h3 class="nx-card-title">Install Firmware</h3>
                 <p class="text-sm text-500 mt-0">
-                    Uploads <code>esp-miner.bin</code> — the miner firmware, applied to the
-                    standby OTA partition. The device restarts to finish the update.
+                    Updates the miner firmware on the standby OTA partition; the device
+                    restarts to finish. Accepted names: <code>esp-miner.bin</code> or a
+                    NeuralAxe release file ending in <code>-ota.bin</code>
+                    (e.g. <code>NeuralAxe-OS-v0.1.0-dev-Gamma-601-ota.bin</code>).
                 </p>
 
                 <p-fileUpload #firmwareUpload [customUpload]="true" mode="basic" accept=".bin" (uploadHandler)="otaUpdate($event)"
                     [auto]="true" chooseLabel="Browse"></p-fileUpload>
 
-                <small>(esp-miner.bin)</small>
+                <div *ngIf="stagedFirmware as staged" class="nx-note mt-2">
+                    <div><b class="text-color nx-ellipsis inline-block" style="max-width: 100%;">{{ staged.file.name }}</b></div>
+                    <div class="text-sm"><span class="nx-pill nx-pill-ok">{{ staged.check.typeLabel }}</span></div>
+                    <div class="text-sm text-500 mt-1">{{ staged.check.reason }}</div>
+                    <div class="flex gap-2 mt-2">
+                        <button pButton type="button" class="p-button-sm" (click)="installStagedFirmware()">Install Firmware</button>
+                        <button pButton type="button" class="p-button-sm p-button-secondary" (click)="cancelStagedFirmware()">Cancel</button>
+                    </div>
+                </div>
+                <div *ngIf="rejectedFirmware as rejected" class="nx-note nx-note-warn mt-2">
+                    <div><b class="nx-ellipsis inline-block" style="max-width: 100%;">{{ rejected.filename }}</b></div>
+                    <div class="text-sm">Detected: {{ rejected.check.typeLabel }} — <b>not installable here</b></div>
+                    <div class="text-sm text-500 mt-1">{{ rejected.check.reason }}</div>
+                </div>
+
+                <small *ngIf="!stagedFirmware && !rejectedFirmware">(esp-miner.bin · *-ota.bin)</small>
             </div>
         </div>
     </div>
 
     <div class="nx-note mt-2">
         <b class="text-500">Image types:</b>
-        <code>www.bin</code> updates the web interface only;
-        <code>esp-miner.bin</code> updates the miner firmware over OTA;
-        a <b class="text-500">factory image</b> (e.g. <code>esp-miner-factory-*.bin</code>) is a full-flash
-        image for USB recovery with esptool and cannot be installed from this page.
+        <code>www.bin</code> / <code>*-www.bin</code> update the web interface only;
+        <code>esp-miner.bin</code> / <code>*-ota.bin</code> update the miner firmware over OTA;
+        <b class="text-500">factory, merged, bootloader, partition-table and ota_data images</b>
+        are full-flash / USB-recovery files (esptool or bitaxetool) and are rejected here,
+        as are <code>.cvs</code> provisioning configs. Nothing uploads or installs without
+        the explicit Install button.
     </div>
 
     <div class="nx-note nx-note-warn mt-2">

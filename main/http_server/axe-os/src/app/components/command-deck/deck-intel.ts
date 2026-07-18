@@ -289,6 +289,122 @@ export function thermalControlInsight(info: {
   }
 }
 
+// ---------- mode-aware thermal status (Phase 2H.1) ----------
+
+export interface ThermalStatusView {
+  severity: 'ok' | 'info' | 'warn' | 'error';
+  label: string;
+  /** Short supporting line; null when nothing useful can be said. */
+  detail: string | null;
+}
+
+/** Fixed thresholds (documented, tested — no user tuning of semantics). */
+const OVERHEAT_LINE_C = 70;       // existing UI overheat line, 5 °C under the 75 °C throttle
+const FAN_SATURATION_PCT = 95;    // existing "fan near saturation" line
+const MANUAL_HIGH_TEMP_C = 65;    // manual mode has no automatic response; warn 5 °C before the overheat line
+
+/**
+ * The single source of the Command Deck thermal pill (Phase 2H.1).
+ *
+ * The 2H pilot showed the old target-based pill claiming "Above target" while
+ * CURVE mode was in control — the configured target temperature is only
+ * authoritative in TARGET mode. This helper derives the status from the mode
+ * the firmware actually reports.
+ *
+ * Severity rules: ok/info = normal operation; warn = saturation, degraded
+ * sensor state or configuration fallback; error = genuine emergency or the
+ * fixed overheat line only. The user accent never changes these meanings.
+ */
+export function modeAwareThermalStatus(info: {
+  thermalControlMode?: unknown;
+  temp?: unknown;
+  temptarget?: unknown;
+  fanspeed?: unknown;
+  manualFanSpeed?: unknown;
+  requestedFanPercent?: unknown;
+  appliedFanPercent?: unknown;
+  effectiveControlTemperature?: unknown;
+  activeCurveSegment?: unknown;
+  hysteresisHolding?: unknown;
+  controlSensorValid?: unknown;
+  emergencyOverrideActive?: unknown;
+  fanCurveError?: unknown;
+}): ThermalStatusView {
+  const temp = positive(info.temp);
+  const applied = num(info.appliedFanPercent) ?? num(info.fanspeed);
+  const controlTemp = positive(info.effectiveControlTemperature);
+  const fanText = (v: number | null) => (v === null ? '—' : `${Math.round(v)} %`);
+  const tempText = (v: number | null) => (v === null ? '—' : `${Math.round(v)} °C`);
+
+  // Genuine safety states first — identical in every mode.
+  if (info.emergencyOverrideActive === 1) {
+    return { severity: 'error', label: 'Emergency thermal override', detail: 'Hard protection is forcing 100 % fan' };
+  }
+  if (temp !== null && temp >= OVERHEAT_LINE_C) {
+    return { severity: 'error', label: 'Above safe temperature', detail: `ASIC ${tempText(temp)} — overheat protection engages at 75 °C` };
+  }
+  if (typeof info.fanCurveError === 'string' && info.fanCurveError) {
+    return { severity: 'warn', label: 'Curve invalid — safe fallback active', detail: 'Target control is running until a valid curve is saved' };
+  }
+  if (info.controlSensorValid === 0) {
+    return { severity: 'warn', label: 'Waiting for valid sensor data', detail: 'Fan held at the safe fallback duty' };
+  }
+
+  const fanSaturated = applied !== null && applied >= FAN_SATURATION_PCT;
+
+  switch (info.thermalControlMode) {
+    case 'curve': {
+      if (fanSaturated) {
+        return { severity: 'warn', label: 'Fan near saturation', detail: `Curve at ${fanText(applied)} — little cooling headroom left` };
+      }
+      const segment = num(info.activeCurveSegment);
+      const segmentText = segment !== null && segment >= 1 && segment <= 3 ? ` · segment P${segment} → P${segment + 1}` : '';
+      if (info.hysteresisHolding === 1) {
+        const requested = num(info.requestedFanPercent);
+        return {
+          severity: 'ok', label: 'Curve control active — hysteresis hold',
+          detail: `Holding ${fanText(applied)} while the curve requests ${fanText(requested)}${segmentText}`,
+        };
+      }
+      return {
+        severity: 'ok', label: 'Curve control stable',
+        detail: `Control temperature ${tempText(controlTemp)} · fan ${fanText(applied)}${segmentText}`,
+      };
+    }
+    case 'manual': {
+      const configured = num(info.manualFanSpeed);
+      if (temp !== null && temp >= MANUAL_HIGH_TEMP_C) {
+        return {
+          severity: 'warn', label: 'High temperature — manual fan',
+          detail: `ASIC ${tempText(temp)} at a fixed ${fanText(configured)} — thermal protection remains active`,
+        };
+      }
+      return {
+        severity: 'info', label: 'Manual fan active',
+        detail: `Set ${fanText(configured)}, applied ${fanText(applied)} — thermal protection remains active`,
+      };
+    }
+    default: {
+      // TARGET mode (and unknown/legacy): the configured target is authoritative.
+      const hr = thermalHeadroom(info.temp, info.temptarget, true, applied);
+      const delta = hr.deltaC !== null ? `${hr.deltaC > 0 ? '+' : ''}${hr.deltaC.toFixed(1)} °C vs target` : null;
+      if (hr.state === 'unknown') {
+        return { severity: 'warn', label: hr.label, detail: null };
+      }
+      if (hr.state === 'above-target') {
+        return { severity: 'warn', label: hr.fanSaturated ? 'Above target — fan near saturation' : 'Above target', detail: delta };
+      }
+      if (hr.fanSaturated) {
+        return { severity: 'warn', label: 'Fan near saturation', detail: delta };
+      }
+      if (hr.state === 'at-target') {
+        return { severity: 'ok', label: 'At target — PID tracking', detail: delta };
+      }
+      return { severity: 'ok', label: 'Below target', detail: delta };
+    }
+  }
+}
+
 // ---------- thermal headroom ----------
 
 export interface ThermalHeadroom {

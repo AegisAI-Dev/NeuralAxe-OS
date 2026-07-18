@@ -13,6 +13,19 @@ import { VersionState, deriveVersionState } from 'src/app/services/version-state
 import { ModalComponent } from '../modal/modal.component';
 import { SystemInfo } from 'src/app/generated/models';
 import { NEURALAXE } from 'src/app/neuralaxe';
+import { UpdateFileCheck, checkUpdateFile } from './update-file-check';
+
+/** A selected-and-validated file waiting for the explicit Install click. */
+export interface StagedUpdateFile {
+  file: File;
+  check: UpdateFileCheck;
+}
+
+/** A rejected selection, kept only to show the filename and the reason. */
+export interface RejectedUpdateFile {
+  filename: string;
+  check: UpdateFileCheck;
+}
 
 const IGNORE_RELEASE_CHECK_WARNING = 'IGNORE_RELEASE_CHECK_WARNING';
 
@@ -143,14 +156,62 @@ export class UpdateComponent {
     return declaredBoards.has(NEURALAXE.targetBoard) ? 'confirmed' : 'mismatch';
   }
 
-  otaUpdate(event: FileUploadHandlerEvent) {
-    const file = event.files[0];
-    this.firmwareUpload.clear(); // clear the file upload component
+  // ---- staged install flow (2H.1): select -> show detection -> explicit Install ----
 
-    if (file.name != 'esp-miner.bin') {
-      this.toastrService.error('Incorrect file, looking for esp-miner.bin.');
+  public stagedWeb: StagedUpdateFile | null = null;
+  public stagedFirmware: StagedUpdateFile | null = null;
+  public rejectedWeb: RejectedUpdateFile | null = null;
+  public rejectedFirmware: RejectedUpdateFile | null = null;
+
+  /**
+   * File handed to the web-interface uploader. Nothing is uploaded here:
+   * the name is classified (update-file-check.ts), rejected files show their
+   * reason, accepted files wait for the explicit Install button.
+   */
+  otaWWWUpdate(event: FileUploadHandlerEvent) {
+    const file = event.files[0];
+    this.websiteUpload.clear();
+    const check = checkUpdateFile(file.name, 'www');
+    if (!check.accepted) {
+      this.stagedWeb = null;
+      this.rejectedWeb = { filename: file.name, check };
+      this.toastrService.error(check.reason, `Not a web-interface image (${check.typeLabel})`);
       return;
     }
+    this.rejectedWeb = null;
+    this.stagedWeb = { file, check };
+  }
+
+  /** File handed to the firmware uploader — same staged flow as the web side. */
+  otaUpdate(event: FileUploadHandlerEvent) {
+    const file = event.files[0];
+    this.firmwareUpload.clear();
+    const check = checkUpdateFile(file.name, 'firmware');
+    if (!check.accepted) {
+      this.stagedFirmware = null;
+      this.rejectedFirmware = { filename: file.name, check };
+      this.toastrService.error(check.reason, `Not a firmware image (${check.typeLabel})`);
+      return;
+    }
+    this.rejectedFirmware = null;
+    this.stagedFirmware = { file, check };
+  }
+
+  public cancelStagedWeb(): void {
+    this.stagedWeb = null;
+  }
+
+  public cancelStagedFirmware(): void {
+    this.stagedFirmware = null;
+  }
+
+  /** Explicit install of the staged firmware file — the only upload trigger. */
+  public installStagedFirmware(): void {
+    if (!this.stagedFirmware) {
+      return;
+    }
+    const file = this.stagedFirmware.file;
+    this.stagedFirmware = null;
 
     this.updateTarget = 'Firmware';
     this.updateStatus = 'progress';
@@ -190,14 +251,13 @@ export class UpdateComponent {
       });
   }
 
-  otaWWWUpdate(event: FileUploadHandlerEvent) {
-    const file = event.files[0];
-    this.websiteUpload.clear(); // clear the file upload component
-
-    if (file.name != 'www.bin') {
-      this.toastrService.error('Incorrect file, looking for www.bin.');
+  /** Explicit install of the staged web-interface file. */
+  public installStagedWeb(): void {
+    if (!this.stagedWeb) {
       return;
     }
+    const file = this.stagedWeb.file;
+    this.stagedWeb = null;
 
     this.updateTarget = 'Web Interface';
     this.updateStatus = 'progress';

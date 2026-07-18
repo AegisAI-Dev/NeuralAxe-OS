@@ -8,6 +8,7 @@ import {
   recentVariabilityPct,
   rejectRatePct,
   sharesPerHour,
+  modeAwareThermalStatus,
   soloOdds,
   thermalControlInsight,
   thermalHeadroom,
@@ -228,6 +229,134 @@ describe('deck-intel', () => {
       const insight = thermalControlInsight({ controlSensorValid: 1 });
       expect(insight.severity).toBe('info');
       expect(insight.label).toBe('Thermal control state unknown');
+    });
+  });
+
+  describe('modeAwareThermalStatus (2H.1 pilot closure)', () => {
+    const base = {
+      controlSensorValid: 1, emergencyOverrideActive: 0, hysteresisHolding: 0,
+    };
+
+    it('target mode: above target is a warning derived from the configured target', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'target', temp: 63, temptarget: 60, fanspeed: 80, appliedFanPercent: 80,
+      });
+      expect(status.severity).toBe('warn');
+      expect(status.label).toBe('Above target');
+      expect(status.detail).toContain('+3.0 °C vs target');
+    });
+
+    it('target mode: at target reads as PID tracking', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'target', temp: 60, temptarget: 60, fanspeed: 55, appliedFanPercent: 55,
+      });
+      expect(status.severity).toBe('ok');
+      expect(status.label).toBe('At target — PID tracking');
+    });
+
+    it('target mode: below target stays ok', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'target', temp: 50, temptarget: 60, fanspeed: 30, appliedFanPercent: 30,
+      });
+      expect(status.severity).toBe('ok');
+      expect(status.label).toBe('Below target');
+    });
+
+    it('curve mode: normal operation never mentions the target temperature', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'curve', temp: 57, temptarget: 60,
+        effectiveControlTemperature: 57, requestedFanPercent: 65, appliedFanPercent: 65,
+        activeCurveSegment: 2,
+      });
+      expect(status.severity).toBe('ok');
+      expect(status.label).toBe('Curve control stable');
+      expect(status.detail).toContain('57 °C');
+      expect(status.detail).toContain('P2 → P3');
+      expect((status.label + ' ' + status.detail).toLowerCase()).not.toContain('target');
+    });
+
+    it('curve mode: the pilot-observed hysteresis hold reads as normal operation', () => {
+      // Real Gamma observation: 57-58 °C, requested 68 %, applied 70 %, P2→P3.
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'curve', temp: 57, temptarget: 60,
+        effectiveControlTemperature: 57.5, requestedFanPercent: 68, appliedFanPercent: 70,
+        activeCurveSegment: 2, hysteresisHolding: 1,
+      });
+      expect(status.severity).toBe('ok');
+      expect(status.label).toBe('Curve control active — hysteresis hold');
+      expect(status.detail).toContain('70 %');
+      expect(status.detail).toContain('68 %');
+      expect(status.detail).toContain('P2 → P3');
+    });
+
+    it('curve mode: fan near saturation is amber only when genuinely near saturation', () => {
+      const saturated = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'curve', temp: 63,
+        effectiveControlTemperature: 63, requestedFanPercent: 96, appliedFanPercent: 96, activeCurveSegment: 3,
+      });
+      expect(saturated.severity).toBe('warn');
+      expect(saturated.label).toBe('Fan near saturation');
+
+      const notSaturated = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'curve', temp: 60,
+        effectiveControlTemperature: 60, requestedFanPercent: 80, appliedFanPercent: 80, activeCurveSegment: 3,
+      });
+      expect(notSaturated.severity).toBe('ok');
+    });
+
+    it('curve mode: invalid stored curve reports the safe fallback as a warning', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'curve', temp: 55,
+        fanCurveError: 'temperatures not ascending',
+        effectiveControlTemperature: 55, appliedFanPercent: 50,
+      });
+      expect(status.severity).toBe('warn');
+      expect(status.label).toBe('Curve invalid — safe fallback active');
+    });
+
+    it('manual mode: normal operation is informational and mentions active protection', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'manual', temp: 55, manualFanSpeed: 70, appliedFanPercent: 70,
+      });
+      expect(status.severity).toBe('info');
+      expect(status.label).toBe('Manual fan active');
+      expect(status.detail).toContain('70 %');
+      expect(status.detail?.toLowerCase()).toContain('thermal protection remains active');
+    });
+
+    it('manual mode: high temperature warns before the overheat line', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'manual', temp: 66, manualFanSpeed: 40, appliedFanPercent: 40,
+      });
+      expect(status.severity).toBe('warn');
+      expect(status.label).toBe('High temperature — manual fan');
+    });
+
+    it('emergency override is red in every mode', () => {
+      for (const mode of ['target', 'curve', 'manual']) {
+        const status = modeAwareThermalStatus({
+          ...base, thermalControlMode: mode, emergencyOverrideActive: 1, temp: 76, appliedFanPercent: 100,
+        });
+        expect(status.severity).withContext(mode).toBe('error');
+        expect(status.label).toBe('Emergency thermal override');
+      }
+    });
+
+    it('the fixed overheat line stays red regardless of mode', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'curve', temp: 71,
+        effectiveControlTemperature: 71, appliedFanPercent: 100, activeCurveSegment: 4,
+      });
+      expect(status.severity).toBe('error');
+      expect(status.label).toBe('Above safe temperature');
+    });
+
+    it('degraded sensor state is amber, not red', () => {
+      const status = modeAwareThermalStatus({
+        ...base, thermalControlMode: 'curve', controlSensorValid: 0,
+      });
+      expect(status.severity).toBe('warn');
+      expect(status.label).toBe('Waiting for valid sensor data');
     });
   });
 });

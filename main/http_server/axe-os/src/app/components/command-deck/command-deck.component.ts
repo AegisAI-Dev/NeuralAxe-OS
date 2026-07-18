@@ -14,6 +14,8 @@ import {
   SoloOdds,
   ThermalControlInsight,
   ThermalHeadroom,
+  ThermalStatusView,
+  modeAwareThermalStatus,
   bestDiffPctOfNetwork,
   compactNumber,
   currentVsAveragePct,
@@ -417,6 +419,32 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
 
   public headroom(info: ISystemInfo): ThermalHeadroom {
     return thermalHeadroom(info.temp, info.temptarget, (info.autofanspeed ?? 0) == 1, info.fanspeed);
+  }
+
+  /** Mode-aware thermal pill (2H.1): tested pure derivation in deck-intel. */
+  public thermalStatus(info: ISystemInfo): ThermalStatusView {
+    return modeAwareThermalStatus(info);
+  }
+
+  public thermalPillClass(severity: ThermalStatusView['severity']): string {
+    switch (severity) {
+      case 'ok': return 'nx-pill-ok';
+      case 'warn': return 'nx-pill-warn';
+      case 'error': return 'nx-pill-err';
+      default: return '';
+    }
+  }
+
+  /**
+   * ASIC gauge amber threshold, mode-aware: the configured target only means
+   * something in TARGET mode; curve/manual use the fixed 70 °C overheat line.
+   */
+  public asicGaugeWarn(info: ISystemInfo): boolean {
+    const temp = info.temp ?? 0;
+    if (info.thermalControlMode === 'target') {
+      return temp >= (info.temptarget ?? 60) + 5;
+    }
+    return temp >= 70;
   }
 
   // ---- Phase 2H thermal-control visibility (thin wrappers, tested logic) ----

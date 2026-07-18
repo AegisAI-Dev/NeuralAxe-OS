@@ -82,7 +82,7 @@
                     <div class="nx-gauge">
                         <svg viewBox="0 0 100 100">
                             <path class="nx-gauge-track" d="M 20.3 79.7 A 42 42 0 1 1 79.7 79.7" />
-                            <path class="nx-gauge-fill" [class.nx-gauge-warn]="(info.temp ?? 0) >= (info.temptarget ?? 60) + 5"
+                            <path class="nx-gauge-fill" [class.nx-gauge-warn]="asicGaugeWarn(info)"
                                 d="M 20.3 79.7 A 42 42 0 1 1 79.7 79.7"
                                 [style.stroke-dashoffset]="gaugeOffset(info.temp ?? 0, 75)" />
                         </svg>
@@ -133,22 +133,27 @@
                         <div class="nx-bar"><span class="nx-bar-cyan" [style.width.%]="(info.frequency ?? 0) / 800 * 100"></span></div>
                         <b>{{ fmt.int(info.frequency, ' MHz') }}</b>
                     </div>
-                    <div class="nx-bar-row">
+                    <!-- Target temperature is the control objective only in TARGET
+                         mode; in curve/manual it is configuration history and the
+                         live control temperature is what matters (2H.1). -->
+                    <div class="nx-bar-row" *ngIf="info.thermalControlMode === 'target'; else controlTempBar">
                         <label>Target Temp</label>
                         <div class="nx-bar"><span class="nx-bar-cyan" [style.width.%]="(info.temptarget ?? 0) / 75 * 100"></span></div>
                         <b>{{ fmt.temp(info.temptarget) }}</b>
                     </div>
+                    <ng-template #controlTempBar>
+                        <div class="nx-bar-row">
+                            <label>Control Temp</label>
+                            <div class="nx-bar"><span class="nx-bar-cyan"
+                                [style.width.%]="((info.controlSensorValid === 1 ? (info.effectiveControlTemperature ?? 0) : 0)) / 75 * 100"></span></div>
+                            <b>{{ controlTempText(info) }}</b>
+                        </div>
+                    </ng-template>
                 </div>
 
-                <div class="nx-headroom mt-3" *ngIf="headroom(info) as hr">
-                    <span class="nx-pill" [ngClass]="{
-                        'nx-pill-ok': hr.state === 'at-target' || hr.state === 'below-target',
-                        'nx-pill-warn': hr.state === 'above-target' || (hr.fanSaturated && hr.state !== 'overheat'),
-                        'nx-pill-err': hr.state === 'overheat'
-                    }">{{ hr.label }}</span>
-                    <small class="nx-dim ml-2" *ngIf="hr.deltaC !== null">
-                        {{ hr.deltaC > 0 ? '+' : '' }}{{ hr.deltaC.toFixed(1) }} °C vs target
-                    </small>
+                <div class="nx-headroom mt-3" *ngIf="thermalStatus(info) as status">
+                    <span class="nx-pill" [ngClass]="thermalPillClass(status.severity)">{{ status.label }}</span>
+                    <small class="nx-dim ml-2" *ngIf="status.detail">{{ status.detail }}</small>
                     <small class="nx-dim ml-2" *ngIf="voltageDeltaMv(info) as dv"
                         pTooltip="Measured ASIC voltage minus the configured core voltage. A small negative offset under load is normal.">
                         · Vcore {{ fmt.volts(info.coreVoltageActual) }} vs {{ fmt.int(info.coreVoltage, ' mV') }} set ({{ dv > 0 ? '+' : '' }}{{ fmt.int(dv, ' mV') }})
