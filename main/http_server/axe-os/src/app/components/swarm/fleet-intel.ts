@@ -76,6 +76,11 @@ function positive(value: unknown): number | null {
   return v !== null && v > 0 ? v : null;
 }
 
+/** A non-negative finite share counter, or null when unavailable/invalid. */
+function counter(value: unknown): number | null {
+  return typeof value === 'number' && isFinite(value) && value >= 0 ? value : null;
+}
+
 // ---------------------------------------------------------------------------
 // Reachability
 // ---------------------------------------------------------------------------
@@ -386,6 +391,138 @@ export function fleetSummary(devices: FleetDevice[]): FleetSummary {
     .sort((a, b) => b.devices - a.devices || a.host.localeCompare(b.host));
 
   return summary;
+}
+
+// ---------------------------------------------------------------------------
+// Fleet share aggregation (Phase 2I.2 Stage 2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Aggregated share counters across the reporting fleet.
+ *
+ * `accepted`/`rejected` are the sum of each device's CURRENT counters — not
+ * lifetime totals. A miner's counters reset on reboot, firmware update or
+ * device reset, so this is a live snapshot, not cumulative history.
+ *
+ * Only online devices that report BOTH counters as valid, non-negative numbers
+ * contribute. A missing or invalid counter is never coerced to zero, and an
+ * offline device (whose telemetry the refresh path zeroes) is never presented
+ * as a live contributor.
+ */
+export interface FleetShares {
+  /** Sum of current accepted counters across reporting devices. */
+  accepted: number;
+  /** Sum of current rejected counters across reporting devices. */
+  rejected: number;
+  /** accepted + rejected. */
+  total: number;
+  /** Reject rate over reported shares; null when no shares are reported yet. */
+  rejectRatePct: number | null;
+  /** Devices whose current counters were counted (the N in "N of M"). */
+  reportingDevices: number;
+  /** Whole-fleet device count for coverage labeling (the M in "N of M"). */
+  totalDevices: number;
+  /** True once at least one device has contributed valid counters. */
+  hasData: boolean;
+}
+
+export function fleetShares(devices: FleetDevice[]): FleetShares {
+  let accepted = 0;
+  let rejected = 0;
+  let reportingDevices = 0;
+
+  for (const device of devices) {
+    // Only online devices are live contributors; offline/stale counters
+    // (which the refresh error path zeroes) are never summed as live shares.
+    if (deviceOnline(device) !== true) {
+      continue;
+    }
+    const acc = counter(device.sharesAccepted);
+    const rej = counter(device.sharesRejected);
+    // A device must report BOTH counters as valid non-negative numbers; a
+    // missing/invalid counter excludes the device rather than being zeroed.
+    if (acc === null || rej === null) {
+      continue;
+    }
+    accepted += acc;
+    rejected += rej;
+    reportingDevices++;
+  }
+
+  const total = accepted + rejected;
+  return {
+    accepted,
+    rejected,
+    total,
+    rejectRatePct: total > 0 ? (rejected / total) * 100 : null,
+    reportingDevices,
+    totalDevices: devices.length,
+    hasData: reportingDevices > 0,
+  };
+}
+
+export type FleetShareSeverity = 'ok' | 'attention';
+
+/** Whether the aggregate share sample is large enough to act on its reject
+ *  rate — the same contract as per-device health (>=100 total or >=3 rejects). */
+function fleetShareSampleConfident(shares: FleetShares): boolean {
+  return shares.total >= REJECT_MIN_TOTAL_SHARES || shares.rejected >= REJECT_MIN_REJECTED;
+}
+
+/**
+ * Fleet-share tile severity. Follows the health/sample-confidence contract:
+ * an elevated reject rate on a small startup sample is NOT actionable, and a
+ * share reject rate is at most an Attention signal — never Critical. A
+ * low-confidence startup sample therefore never makes the tile look critical.
+ */
+export function fleetShareSeverity(shares: FleetShares): FleetShareSeverity {
+  if (shares.rejectRatePct === null || shares.rejectRatePct <= REJECT_RATE_ATTENTION_PCT) {
+    return 'ok';
+  }
+  return fleetShareSampleConfident(shares) ? 'attention' : 'ok';
+}
+
+/** Neutral warming-up note when the aggregate reject rate is elevated but the
+ *  fleet sample is still too small to judge. Display only — never a severity. */
+export function fleetShareSampleNote(shares: FleetShares): string | null {
+  if (shares.rejectRatePct === null || shares.rejectRatePct <= REJECT_RATE_ATTENTION_PCT || fleetShareSampleConfident(shares)) {
+    return null;
+  }
+  return `Reject rate is over ${REJECT_RATE_ATTENTION_PCT}% but the fleet sample is still small `
+    + `(${shares.rejected} of ${shares.total}) — too few shares to act on`;
+}
+
+/**
+ * Compact count for tile display (12345 -> "12.3K", 2_400_000 -> "2.4M").
+ * The exact integer stays available via formatExactCount for the tooltip/label.
+ */
+export function formatCompactCount(value: number): string {
+  if (typeof value !== 'number' || !isFinite(value)) {
+    return '—';
+  }
+  const abs = Math.abs(value);
+  if (abs < 1000) {
+    return String(Math.round(value));
+  }
+  const units: Array<{ limit: number; suffix: string }> = [
+    { limit: 1e12, suffix: 'T' },
+    { limit: 1e9, suffix: 'B' },
+    { limit: 1e6, suffix: 'M' },
+    { limit: 1e3, suffix: 'K' },
+  ];
+  for (const { limit, suffix } of units) {
+    if (abs >= limit) {
+      const scaled = value / limit;
+      const text = Math.abs(scaled) >= 100 ? Math.round(scaled).toString() : scaled.toFixed(1).replace(/\.0$/, '');
+      return `${text}${suffix}`;
+    }
+  }
+  return String(Math.round(value));
+}
+
+/** Exact grouped integer for the tooltip / accessible label. */
+export function formatExactCount(value: number): string {
+  return typeof value === 'number' && isFinite(value) ? Math.round(value).toLocaleString('en-US') : '—';
 }
 
 // ---------------------------------------------------------------------------

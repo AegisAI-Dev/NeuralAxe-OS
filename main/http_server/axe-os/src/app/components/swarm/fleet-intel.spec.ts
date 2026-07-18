@@ -8,7 +8,12 @@ import {
   deviceHealth,
   deviceOnline,
   filterDevices,
+  fleetShareSampleNote,
+  fleetShareSeverity,
+  fleetShares,
   fleetSummary,
+  formatCompactCount,
+  formatExactCount,
   lastSeenText,
   pairMismatch,
   rejectRatePct,
@@ -256,6 +261,160 @@ describe('fleet-intel (Phase 2I)', () => {
       ]);
       expect(summary.attention).toBe(1);
       expect(summary.critical).toBe(1);
+    });
+  });
+
+  describe('fleet share aggregation (2I.2 Stage 2)', () => {
+    it('sums current counters across all three reporting devices with coverage', () => {
+      const shares = fleetShares([
+        neuralaxeDevice({ sharesAccepted: 1000, sharesRejected: 10 }),
+        neuralaxeDevice({ IP: '10.0.0.11', sharesAccepted: 2000, sharesRejected: 30 }),
+        axeosDevice({ sharesAccepted: 500, sharesRejected: 10 }),
+      ]);
+      expect(shares.accepted).toBe(3500);
+      expect(shares.rejected).toBe(50);
+      expect(shares.total).toBe(3550);
+      expect(shares.rejectRatePct).toBeCloseTo((50 / 3550) * 100, 5);
+      expect(shares.reportingDevices).toBe(3);
+      expect(shares.totalDevices).toBe(3);
+      expect(shares.hasData).toBeTrue();
+    });
+
+    it('partial reporting: a device missing counters is excluded, not zeroed', () => {
+      const noCounters = axeosDevice({ IP: '10.0.0.22', hostname: 'no-shares' });
+      delete (noCounters as any).sharesAccepted;
+      delete (noCounters as any).sharesRejected;
+      const shares = fleetShares([
+        neuralaxeDevice({ sharesAccepted: 1000, sharesRejected: 10 }),
+        noCounters,
+      ]);
+      expect(shares.accepted).toBe(1000);
+      expect(shares.rejected).toBe(10);
+      expect(shares.reportingDevices).toBe(1);
+      expect(shares.totalDevices).toBe(2); // coverage shows "1 of 2"
+    });
+
+    it('a device reporting only one of the two counters is excluded (no half totals)', () => {
+      const partial = neuralaxeDevice({ IP: '10.0.0.23', sharesAccepted: 900 });
+      delete (partial as any).sharesRejected;
+      const shares = fleetShares([partial]);
+      expect(shares.reportingDevices).toBe(0);
+      expect(shares.accepted).toBe(0);
+      expect(shares.hasData).toBeFalse();
+    });
+
+    it('no devices reporting -> zeroes, null rate, no divide-by-zero', () => {
+      expect(fleetShares([])).toEqual({
+        accepted: 0, rejected: 0, total: 0, rejectRatePct: null,
+        reportingDevices: 0, totalDevices: 0, hasData: false,
+      });
+      const offlineOnly = fleetShares([
+        neuralaxeDevice({ nxReachable: false, sharesAccepted: 0, sharesRejected: 0 }),
+      ]);
+      expect(offlineOnly.reportingDevices).toBe(0);
+      expect(offlineOnly.totalDevices).toBe(1);
+      expect(offlineOnly.rejectRatePct).toBeNull();
+      expect(offlineOnly.hasData).toBeFalse();
+    });
+
+    it('zero shares from a live device counts as reporting with a null rate', () => {
+      const shares = fleetShares([neuralaxeDevice({ sharesAccepted: 0, sharesRejected: 0, uptimeSeconds: 15 })]);
+      expect(shares.reportingDevices).toBe(1);
+      expect(shares.total).toBe(0);
+      expect(shares.rejectRatePct).toBeNull();
+      expect(shares.hasData).toBeTrue();
+    });
+
+    it('mixed accepted/rejected counters aggregate correctly', () => {
+      const shares = fleetShares([
+        neuralaxeDevice({ sharesAccepted: 40, sharesRejected: 0 }),
+        neuralaxeDevice({ IP: '10.0.0.11', sharesAccepted: 0, sharesRejected: 5 }),
+      ]);
+      expect(shares.accepted).toBe(40);
+      expect(shares.rejected).toBe(5);
+      expect(shares.rejectRatePct).toBeCloseTo((5 / 45) * 100, 5);
+    });
+
+    it('invalid, NaN, Infinity and negative counters are excluded (never NaN/Infinity output)', () => {
+      const shares = fleetShares([
+        neuralaxeDevice({ IP: '10.0.0.11', sharesAccepted: Number.NaN, sharesRejected: 10 }),
+        neuralaxeDevice({ IP: '10.0.0.12', sharesAccepted: Infinity, sharesRejected: 10 }),
+        neuralaxeDevice({ IP: '10.0.0.13', sharesAccepted: -5, sharesRejected: 10 }),
+        neuralaxeDevice({ IP: '10.0.0.14', sharesAccepted: 100, sharesRejected: 4 }),
+      ]);
+      expect(shares.reportingDevices).toBe(1); // only the valid device
+      expect(shares.accepted).toBe(100);
+      expect(shares.rejected).toBe(4);
+      expect(Number.isFinite(shares.total)).toBeTrue();
+      expect(Number.isFinite(shares.rejectRatePct as number)).toBeTrue();
+    });
+
+    it('offline/stale devices are not live contributors even with frozen counters', () => {
+      // The refresh error path leaves a nxReachable:false device with zeroed
+      // counters; an old snapshot could still hold non-zero values. Neither is
+      // summed as a live share.
+      const shares = fleetShares([
+        neuralaxeDevice({ sharesAccepted: 1000, sharesRejected: 10 }),
+        neuralaxeDevice({ IP: '10.0.0.11', nxReachable: false, sharesAccepted: 9999, sharesRejected: 9999 }),
+        { IP: '10.0.0.30' }, // never contacted (online === null)
+      ]);
+      expect(shares.accepted).toBe(1000);
+      expect(shares.rejected).toBe(10);
+      expect(shares.reportingDevices).toBe(1);
+      expect(shares.totalDevices).toBe(3);
+    });
+
+    it('handles large counters and compact/exact formatting', () => {
+      const shares = fleetShares([
+        neuralaxeDevice({ sharesAccepted: 2_400_000, sharesRejected: 12_345 }),
+      ]);
+      expect(shares.accepted).toBe(2_400_000);
+      expect(Number.isFinite(shares.rejectRatePct as number)).toBeTrue();
+      expect(formatCompactCount(2_400_000)).toBe('2.4M');
+      expect(formatCompactCount(12_345)).toBe('12.3K');
+      expect(formatCompactCount(950)).toBe('950');
+      expect(formatCompactCount(0)).toBe('0');
+      expect(formatCompactCount(Number.NaN)).toBe('—');
+      expect(formatExactCount(2_400_000)).toBe('2,400,000');
+      expect(formatExactCount(Infinity)).toBe('—');
+    });
+
+    it('does not mutate the source device data', () => {
+      const devices = [
+        neuralaxeDevice({ sharesAccepted: 100, sharesRejected: 3 }),
+        axeosDevice({ sharesAccepted: 200, sharesRejected: 1 }),
+      ];
+      const snapshot = JSON.stringify(devices);
+      fleetShares(devices);
+      expect(JSON.stringify(devices)).toBe(snapshot);
+    });
+
+    describe('severity and sample confidence', () => {
+      it('a small elevated startup sample is neither critical nor amber', () => {
+        // 1 reject / 26 total = ~3.8% but only 26 shares -> not confident.
+        const shares = fleetShares([neuralaxeDevice({ sharesAccepted: 25, sharesRejected: 1 })]);
+        expect(shares.rejectRatePct).toBeGreaterThan(2);
+        expect(fleetShareSeverity(shares)).toBe('ok');
+        expect(fleetShareSampleNote(shares)).toContain('too few shares');
+      });
+
+      it('a confident elevated sample is Attention (never Critical)', () => {
+        const shares = fleetShares([neuralaxeDevice({ sharesAccepted: 97, sharesRejected: 3 })]);
+        expect(fleetShareSeverity(shares)).toBe('attention');
+        expect(fleetShareSampleNote(shares)).toBeNull();
+      });
+
+      it('a healthy low reject rate is ok with no note', () => {
+        const shares = fleetShares([neuralaxeDevice({ sharesAccepted: 4000, sharesRejected: 10 })]);
+        expect(fleetShareSeverity(shares)).toBe('ok');
+        expect(fleetShareSampleNote(shares)).toBeNull();
+      });
+
+      it('no reported shares yield ok severity and no note', () => {
+        const shares = fleetShares([]);
+        expect(fleetShareSeverity(shares)).toBe('ok');
+        expect(fleetShareSampleNote(shares)).toBeNull();
+      });
     });
   });
 

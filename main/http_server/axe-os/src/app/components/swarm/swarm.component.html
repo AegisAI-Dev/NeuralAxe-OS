@@ -7,7 +7,11 @@
     <div class="nx-fleet-ws-head">
         <span [class]="healthDotClass(axe)" aria-hidden="true"></span>
         <div class="nx-fleet-ws-title">
-            <b class="nx-ellipsis" sensitive-data>{{ axe.hostname || '—' }}</b>
+            <div class="nx-fleet-ws-titlerow">
+                <b class="nx-ellipsis" sensitive-data>{{ axe.hostname || '—' }}</b>
+                <span class="nx-pill nx-pill-tight nx-fleet-ws-healthpill" [ngClass]="healthPillClass(axe)"
+                    [pTooltip]="healthTooltip(axe)" tooltipPosition="top">{{ healthLabel(axe) }}</span>
+            </div>
             <small class="nx-dim nx-ellipsis">
                 {{ stringifyDeviceLabel(axe) }}
                 <span *ngIf="deviceClass(axe) as cls"> · {{ cls.label }}</span>
@@ -145,6 +149,10 @@
                     <div class="nx-kv-row"><label>Thermal Mode</label><b class="nx-dim">not reported by this device</b></div>
                 </ng-template>
             </div>
+            <small class="nx-dim block mt-3" *ngIf="!axe.thermalControlMode">
+                Thermal-curve control, hysteresis and sensor validation appear here on NeuralAxe-managed
+                devices. This device reports a reduced thermal set.
+            </small>
         </ng-container>
 
         <!-- MINING -->
@@ -156,12 +164,25 @@
                     <b>{{ axe.isUsingFallbackStratum === 1 ? 'Active' : 'Standby' }}</b></div>
                 <div class="nx-kv-row"><label>Pool Latency</label>
                     <b><ng-container *ngIf="axe.responseTime > 0; else noValue">{{ fmt.latency(axe.responseTime) }}</ng-container></b></div>
-                <div class="nx-kv-row"><label>Shares</label>
-                    <b>{{ axe.sharesAccepted | number: '1.0-0' }} acc<span *ngIf="axe.sharesRejected > 0" class="nx-warn-text"> / {{ axe.sharesRejected | number: '1.0-0' }} rej</span></b></div>
+                <ng-container *ngIf="reportsShares(axe); else noShareCounters">
+                    <div class="nx-kv-row"><label>Shares Accepted</label><b>{{ axe.sharesAccepted | number: '1.0-0' }}</b></div>
+                    <div class="nx-kv-row"><label>Shares Rejected</label>
+                        <b><span [class.nx-warn-text]="axe.sharesRejected > 0">{{ axe.sharesRejected | number: '1.0-0' }}</span></b></div>
+                    <div class="nx-kv-row"><label>Total Shares</label><b>{{ (axe.sharesAccepted + axe.sharesRejected) | number: '1.0-0' }}</b></div>
+                    <div class="nx-kv-row"><label>Reject Rate</label>
+                        <b><ng-container *ngIf="rejectRate(axe) !== null; else noValue">{{ rejectRate(axe) | number: '1.0-2' }} %</ng-container></b></div>
+                </ng-container>
+                <ng-template #noShareCounters>
+                    <div class="nx-kv-row"><label>Shares</label><b class="nx-dim">Not reported by this device</b></div>
+                </ng-template>
                 <div class="nx-kv-row" *ngIf="axe.bestDiff > 0"><label>Best Diff</label><b>{{ axe.bestDiff | diffSuffix }}</b></div>
                 <div class="nx-kv-row" *ngIf="axe.wifiRSSI"><label>Wi-Fi RSSI</label><b>{{ axe.wifiRSSI }} dBm</b></div>
                 <div class="nx-kv-row"><label>IP</label><b><span sensitive-data>{{ axe.IP }}</span></b></div>
             </div>
+            <small class="nx-dim block mt-2" *ngIf="reportsShares(axe) && sampleNote(axe) as note">{{ note }}</small>
+            <small class="nx-dim block mt-2" *ngIf="reportsShares(axe)">
+                Live counters — reset after a restart, firmware update or device reset.
+            </small>
             <ng-container *ngIf="axe.hashrateMonitor?.asics?.[0]?.domains as domains">
                 <div class="nx-subtitle">Domain Performance (GH/s)</div>
                 <div class="nx-fleet-ws-grid">
@@ -204,6 +225,9 @@
                 <div class="nx-kv-row" *ngIf="axe.temptarget && axe.thermalControlMode === 'target'"><label>Target Temp</label><b>{{ axe.temptarget }} °C</b></div>
                 <div class="nx-kv-row" *ngIf="axe.minFanSpeed !== undefined && axe.minFanSpeed !== null"><label>Min Fan</label><b>{{ axe.minFanSpeed }} %</b></div>
             </div>
+            <small class="nx-dim block mt-3" *ngIf="deviceClass(axe).kind === 'compatible' || deviceClass(axe).kind === 'unsupported'">
+                Only the tuning fields this device's firmware reports are shown.
+            </small>
         </ng-container>
     </div>
 </ng-template>
@@ -258,8 +282,27 @@
                     </b>
                     <small class="nx-dim">attention / critical</small>
                 </div>
+                <ng-container *ngIf="shares as sh">
+                    <div class="nx-fleet-stat" [class.nx-fleet-stat-alert]="shareSeverity(sh) === 'attention'"
+                        pTooltip="Current device share counters, summed across reporting devices — a live snapshot, not lifetime totals. A miner's counters reset after a restart, firmware update or device reset."
+                        tooltipPosition="top">
+                        <label>Fleet Shares</label>
+                        <b [attr.aria-label]="sh.hasData ? exactCount(sh.accepted) + ' shares accepted' : 'No shares reported'">
+                            <ng-container *ngIf="sh.hasData; else noShareData">{{ compactCount(sh.accepted) }}<span class="nx-dim"> acc</span></ng-container>
+                            <ng-template #noShareData>—</ng-template>
+                        </b>
+                        <small *ngIf="sh.hasData">
+                            <span [class.nx-warn-text]="shareSeverity(sh) === 'attention'" [class.nx-dim]="shareSeverity(sh) !== 'attention'"
+                                [attr.aria-label]="exactCount(sh.rejected) + ' rejected'">{{ compactCount(sh.rejected) }} rej</span>
+                            <span class="nx-dim" *ngIf="sh.rejectRatePct !== null"> · {{ sh.rejectRatePct | number: '1.0-2' }}%</span>
+                        </small>
+                        <small class="nx-dim" *ngIf="sh.hasData">from {{ sh.reportingDevices }} of {{ sh.totalDevices }} reporting</small>
+                        <small class="nx-dim" *ngIf="!sh.hasData">no live counters reported</small>
+                    </div>
+                </ng-container>
             </div>
             <div class="nx-fleet-chips">
+                <span class="nx-dim text-sm nx-ellipsis" *ngIf="fleetShareNote(shares) as note">{{ note }}</span>
                 <span class="nx-pill nx-pill-ok nx-pill-tight" *ngIf="s.neuralaxe">{{ s.neuralaxe }} NeuralAxe managed</span>
                 <span class="nx-pill nx-pill-tight" *ngIf="s.compatible">{{ s.compatible }} AxeOS compatible</span>
                 <span class="nx-pill nx-pill-warn nx-pill-tight" *ngIf="s.unsupported">{{ s.unsupported }} unsupported target</span>
@@ -364,6 +407,8 @@
                         <span [class]="healthDotClass(axe)" aria-hidden="true"></span>
                         <div class="nx-fleet-nav-main">
                             <div class="nx-fleet-nav-name">
+                                <i *ngIf="selectedIp === axe.IP" class="pi pi-check-circle nx-fleet-nav-check"
+                                    aria-hidden="true"></i>
                                 <b class="nx-ellipsis" sensitive-data>{{ axe.hostname || '—' }}</b>
                                 <span class="nx-pill nx-pill-tight" *ngIf="deviceClass(axe) as cls"
                                     [ngClass]="{'nx-pill-ok': cls.kind === 'neuralaxe', 'nx-pill-warn': cls.kind === 'unsupported'}">{{ cls.label }}</span>

@@ -16,6 +16,8 @@ import {
   FleetHealth,
   FleetSortField,
   FleetSummary,
+  FleetShares,
+  FleetShareSeverity,
   activePoolHost,
   classifyDevice,
   compareDevices,
@@ -23,9 +25,15 @@ import {
   deviceHealth,
   deviceOnline,
   filterDevices,
+  fleetShareSampleNote,
+  fleetShareSeverity,
+  fleetShares,
   fleetSummary,
+  formatCompactCount,
+  formatExactCount,
   lastSeenText,
   pairMismatch,
+  rejectRatePct,
   shareSampleNote,
 } from './fleet-intel';
 
@@ -540,6 +548,17 @@ export class SwarmComponent implements OnInit, OnDestroy {
     }
   }
 
+  /** Health-badge pill classes for the workspace header (fixed semantics, not
+   *  the accent): green=healthy, amber=attention, red=critical, plain=other. */
+  public healthPillClass(axe: FleetDevice): { [key: string]: boolean } {
+    const state = deviceHealth(axe).state;
+    return {
+      'nx-pill-ok': state === 'healthy',
+      'nx-pill-warn': state === 'attention',
+      'nx-pill-err': state === 'critical',
+    };
+  }
+
   public healthTooltip(axe: FleetDevice): string {
     return deviceHealth(axe).reasons.join(' · ');
   }
@@ -566,6 +585,39 @@ export class SwarmComponent implements OnInit, OnDestroy {
 
   get summary(): FleetSummary {
     return fleetSummary(this.swarm);
+  }
+
+  // ---- fleet share aggregation (2I.2 Stage 2) ----
+
+  get shares(): FleetShares {
+    return fleetShares(this.swarm);
+  }
+
+  public shareSeverity(shares: FleetShares): FleetShareSeverity {
+    return fleetShareSeverity(shares);
+  }
+
+  public fleetShareNote(shares: FleetShares): string | null {
+    return fleetShareSampleNote(shares);
+  }
+
+  public compactCount(value: number): string {
+    return formatCompactCount(value);
+  }
+
+  public exactCount(value: number): string {
+    return formatExactCount(value);
+  }
+
+  /** Per-device reject rate for the selected-device Mining tab; null if none. */
+  public rejectRate(axe: FleetDevice): number | null {
+    return rejectRatePct(axe);
+  }
+
+  /** Whether a device reports valid share counters at all (Mining tab copy). */
+  public reportsShares(axe: FleetDevice): boolean {
+    return typeof axe?.sharesAccepted === 'number' && isFinite(axe.sharesAccepted)
+      && typeof axe?.sharesRejected === 'number' && isFinite(axe.sharesRejected);
   }
 
   /** `any[]` at the template boundary (house style for fleet rows). */

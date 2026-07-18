@@ -13,7 +13,7 @@ import { VersionState, deriveVersionState } from 'src/app/services/version-state
 import { ModalComponent } from '../modal/modal.component';
 import { SystemInfo } from 'src/app/generated/models';
 import { NEURALAXE } from 'src/app/neuralaxe';
-import { UpdateFileCheck, checkUpdateFile } from './update-file-check';
+import { UpdateFileCheck, checkUpdateFile, detectUpdateFileType } from './update-file-check';
 
 /** A selected-and-validated file waiting for the explicit Install click. */
 export interface StagedUpdateFile {
@@ -154,6 +154,22 @@ export class UpdateComponent {
       return 'unknown';
     }
     return declaredBoards.has(NEURALAXE.targetBoard) ? 'confirmed' : 'mismatch';
+  }
+
+  /**
+   * The installable release asset of a given kind, matched by the SAME
+   * classifier the uploader uses — so a NeuralAxe release whose assets carry
+   * the export names (…-www.bin / …-ota.bin) offers download links just like a
+   * legacy release named www.bin / esp-miner.bin. Dangerous assets (factory,
+   * config, …) are never returned as installable downloads.
+   */
+  public releaseAssetOfType(release: GithubRelease, kind: 'www' | 'firmware'): { name: string; browser_download_url: string } | null {
+    for (const asset of release.assets ?? []) {
+      if (asset && typeof asset.name === 'string' && detectUpdateFileType(asset.name) === kind) {
+        return { name: asset.name, browser_download_url: asset.browser_download_url };
+      }
+    }
+    return null;
   }
 
   // ---- staged install flow (2H.1): select -> show detection -> explicit Install ----

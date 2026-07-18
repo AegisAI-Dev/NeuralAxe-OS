@@ -307,4 +307,91 @@ describe('UpdateComponent', () => {
       expect(uploadSpy).not.toHaveBeenCalled();
     });
   });
+
+  describe('end-to-end install request (2I.2 Stage 6 — real HTTP, not a spy)', () => {
+    // The service reads the file via FileReader before POSTing, so the request
+    // arrives asynchronously; poll the testing backend for it.
+    async function waitForRequest(url: string, timeoutMs = 3000) {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const matches = httpMock.match(url);
+        if (matches.length === 1) {
+          return matches[0];
+        }
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      throw new Error(`No request to ${url}`);
+    }
+
+    it('stages the long NeuralAxe www name, exposes Install, and POSTs the bytes only on click', async () => {
+      component.otaWWWUpdate({ files: [new File([new Uint8Array([10, 20, 30])], 'NeuralAxe-OS-v0.1.0-dev-Gamma-601-www.bin')] } as any);
+      fixture.detectChanges();
+
+      // staged, not uploaded
+      expect(component.stagedWeb?.file.name).toBe('NeuralAxe-OS-v0.1.0-dev-Gamma-601-www.bin');
+      httpMock.expectNone('/api/system/OTAWWW');
+
+      // the explicit Install control is available
+      const installBtn = Array.from(fixture.nativeElement.querySelectorAll('button'))
+        .find((b: any) => (b.textContent ?? '').includes('Install Web Interface')) as HTMLButtonElement | undefined;
+      expect(installBtn).toBeTruthy();
+
+      installBtn!.click();
+      fixture.detectChanges();
+
+      const req = await waitForRequest('/api/system/OTAWWW');
+      expect(req.request.method).toBe('POST');
+      expect(Array.from(new Uint8Array(req.request.body as ArrayBuffer))).toEqual([10, 20, 30]);
+      httpMock.expectNone('/api/system/OTA'); // endpoint separation preserved
+      // Deliberately NOT flushed: a successful web-install response schedules
+      // window.location.reload() (installStagedWeb), which would reload the
+      // Karma runner and disconnect the browser. The request assertions above
+      // already prove the transmitted endpoint and bytes.
+    });
+
+    it('stages the long NeuralAxe ota name and installs to the firmware endpoint', async () => {
+      component.otaUpdate({ files: [new File([new Uint8Array([1, 2, 4, 8])], 'NeuralAxe-OS-v0.1.0-dev-Gamma-601-ota.bin')] } as any);
+      fixture.detectChanges();
+      expect(component.stagedFirmware).not.toBeNull();
+      httpMock.expectNone('/api/system/OTA');
+
+      component.installStagedFirmware();
+      const req = await waitForRequest('/api/system/OTA');
+      expect(req.request.method).toBe('POST');
+      expect(Array.from(new Uint8Array(req.request.body as ArrayBuffer))).toEqual([1, 2, 4, 8]);
+      req.flush('Firmware update complete, rebooting now!');
+    });
+  });
+
+  describe('release download links (2I.2 Stage 6 — export-named assets)', () => {
+    it('offers download links for a NeuralAxe release whose assets use the export names', () => {
+      spyOn(githubUpdateService, 'getReleases').and.returnValue(of([
+        {
+          id: 1, tag_name: 'v0.1.0', name: 'NeuralAxe OS 0.1.0', prerelease: false,
+          body: 'Built for board-601.',
+          assets: [
+            { name: 'NeuralAxe-OS-v0.1.0-dev-Gamma-601-ota.bin', browser_download_url: 'https://example.invalid/ota' },
+            { name: 'NeuralAxe-OS-v0.1.0-dev-Gamma-601-www.bin', browser_download_url: 'https://example.invalid/www' },
+            { name: 'NeuralAxe-OS-v0.1.0-dev-Gamma-601-factory.bin', browser_download_url: 'https://example.invalid/factory' },
+          ],
+        } as any
+      ]));
+      fixture = TestBed.createComponent(UpdateComponent);
+      component = fixture.componentInstance;
+      component.checkLatestRelease = true;
+      fixture.detectChanges();
+      fixture.detectChanges();
+
+      const el: HTMLElement = fixture.nativeElement;
+      const links = Array.from(el.querySelectorAll('a'))
+        .filter(a => (a.getAttribute('href') ?? '').includes('example.invalid'));
+      // exactly the www + ota assets — never the dangerous factory image
+      expect(links.length).toBe(2);
+      const hrefs = links.map(a => a.getAttribute('href'));
+      expect(hrefs).toContain('https://example.invalid/www');
+      expect(hrefs).toContain('https://example.invalid/ota');
+      expect(hrefs).not.toContain('https://example.invalid/factory');
+      expect(el.textContent).toContain('NeuralAxe-OS-v0.1.0-dev-Gamma-601-ota.bin');
+    });
+  });
 });

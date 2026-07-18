@@ -424,6 +424,132 @@ describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
     });
   });
 
+  describe('selection styling semantics (2I.2 Stage 4)', () => {
+    function navItems(): HTMLElement[] {
+      return Array.from(fixture.nativeElement.querySelectorAll('.nx-fleet-nav-item'));
+    }
+    function selectedItem(): HTMLElement | undefined {
+      return navItems().find(el => el.classList.contains('nx-fleet-nav-on'));
+    }
+
+    it('a selected Healthy device is marked selected but NOT assigned Critical styling', () => {
+      loadFleet([gammaDevice(), supraHexDevice()]);
+      component.selectDevice(component.swarm[0]); // healthy gamma
+      fixture.detectChanges();
+
+      const selected = selectedItem();
+      expect(selected).toBeTruthy();
+      expect(selected!.classList.contains('nx-fleet-nav-critical')).toBeFalse();
+      expect(selected!.classList.contains('nx-fleet-nav-offline')).toBeFalse();
+      // health dot keeps the fixed green semantic, never the accent
+      expect(selected!.querySelector('.nx-health-ok')).toBeTruthy();
+      // selection carries a structural (non-colour) indicator too
+      expect(selected!.querySelector('.nx-fleet-nav-check')).toBeTruthy();
+    });
+
+    it('a selected unsupported-but-Healthy device (board 702) stays Healthy, not Critical', () => {
+      loadFleet([supraHexDevice()]);
+      component.ensureSelection();
+      fixture.detectChanges();
+      const selected = selectedItem();
+      expect(selected!.classList.contains('nx-fleet-nav-critical')).toBeFalse();
+      expect(selected!.querySelector('.nx-health-ok')).toBeTruthy();
+      expect(component.health(component.swarm[0]).state).toBe('healthy');
+      expect(component.deviceClass(component.swarm[0]).kind).toBe('unsupported');
+    });
+
+    it('a selected Critical device still presents its Critical health state', () => {
+      loadFleet([gammaDevice({ overheat_mode: 1, temp: 74 })]);
+      component.ensureSelection();
+      fixture.detectChanges();
+      const selected = selectedItem();
+      expect(selected).toBeTruthy();
+      // selection never masks Critical — both classes coexist
+      expect(selected!.classList.contains('nx-fleet-nav-critical')).toBeTrue();
+      expect(selected!.querySelector('.nx-health-err')).toBeTruthy();
+      const pill = fixture.nativeElement.querySelector('.nx-fleet-ws-healthpill');
+      expect(pill.textContent).toContain('Critical');
+      expect(pill.classList.contains('nx-pill-err')).toBeTrue();
+    });
+
+    it('selection is class-driven and every item stays focusable independently', () => {
+      loadFleet([gammaDevice(), supraHexDevice()]);
+      component.selectDevice(component.swarm[1]);
+      fixture.detectChanges();
+      const items = navItems();
+      // exactly one persistent selection...
+      expect(items.filter(el => el.classList.contains('nx-fleet-nav-on')).length).toBe(1);
+      // ...while focus (tabindex) is available on every item, separate from selection
+      expect(items.every(el => el.getAttribute('tabindex') === '0')).toBeTrue();
+      expect(component.selectedIp).toBe(component.swarm[1].IP);
+    });
+  });
+
+  describe('fleet shares + workspace polish (2I.2 Stages 2/3/5)', () => {
+    function noCounters(base: FleetDevice): FleetDevice {
+      const d = { ...base };
+      delete (d as any).sharesAccepted;
+      delete (d as any).sharesRejected;
+      return d;
+    }
+
+    it('renders the Fleet Shares summary tile with honest coverage', () => {
+      loadFleet([
+        gammaDevice({ sharesAccepted: 1000, sharesRejected: 10 }),
+        gammaDevice({ IP: '10.0.0.11', hostname: 'gamma-02', sharesAccepted: 2000, sharesRejected: 20 }),
+      ]);
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Fleet Shares');
+      expect(text).toContain('from 2 of 2 reporting');
+      expect(component.shares.accepted).toBe(3000);
+      expect(component.shares.rejected).toBe(30);
+    });
+
+    it('the Fleet Shares tile shows an honest empty state when no device reports counters', () => {
+      loadFleet([noCounters(axeosCompatibleDevice())]);
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('no live counters reported');
+      expect(component.shares.hasData).toBeFalse();
+    });
+
+    it('a low-confidence startup sample never flags the shares tile as attention', () => {
+      loadFleet([gammaDevice({ sharesAccepted: 25, sharesRejected: 1, uptimeSeconds: 120 })]);
+      expect(component.shareSeverity(component.shares)).toBe('ok');
+    });
+
+    it('the Mining tab breaks shares into accepted/rejected/total/reject-rate with reset semantics', () => {
+      loadFleet([gammaDevice({ sharesAccepted: 15234, sharesRejected: 42 })]);
+      component.ensureSelection();
+      component.setWorkspaceTab('mining');
+      fixture.detectChanges();
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Shares Accepted');
+      expect(text).toContain('Shares Rejected');
+      expect(text).toContain('Total Shares');
+      expect(text).toContain('Reject Rate');
+      expect(text).toContain('reset after a restart');
+    });
+
+    it('the Mining tab states clearly when a device does not report share counters', () => {
+      loadFleet([noCounters(axeosCompatibleDevice())]);
+      component.ensureSelection();
+      component.setWorkspaceTab('mining');
+      fixture.detectChanges();
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Not reported by this device');
+    });
+
+    it('the workspace header shows a fixed-semantics Healthy badge', () => {
+      loadFleet([gammaDevice()]);
+      component.ensureSelection();
+      fixture.detectChanges();
+      const pill = fixture.nativeElement.querySelector('.nx-fleet-ws-healthpill');
+      expect(pill).toBeTruthy();
+      expect(pill.textContent).toContain('Healthy');
+      expect(pill.classList.contains('nx-pill-ok')).toBeTrue();
+    });
+  });
+
   describe('states (Stage 9)', () => {
     it('shows the empty state after a completed scan finds nothing', () => {
       component.swarm = [];
