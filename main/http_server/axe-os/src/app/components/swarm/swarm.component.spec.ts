@@ -50,6 +50,20 @@ function supraHexDevice(overrides: Partial<FleetDevice> = {}): FleetDevice {
   };
 }
 
+/** A stock Gamma 601 running AxeOS (no NeuralAxe identity) = compatible. */
+function axeosCompatibleDevice(overrides: Partial<FleetDevice> = {}): FleetDevice {
+  return {
+    IP: '10.0.0.40', nxReachable: true, nxLastSeenMs: Date.now(),
+    hostname: 'stock-gamma', deviceModel: 'Gamma', ASICModel: 'BM1370', boardVersion: '601',
+    swarmColor: 'green', asicCount: 1,
+    version: 'v2.9.0', axeOSVersion: 'v2.9.0',
+    hashRate: 1150, power: 21.2, temp: 59, sharesAccepted: 2200, sharesRejected: 8,
+    uptimeSeconds: 41000, stratumURL: 'solo.pool.example', isUsingFallbackStratum: 0,
+    frequency: 600,
+    ...overrides,
+  };
+}
+
 describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
   let component: SwarmComponent;
   let fixture: ComponentFixture<SwarmComponent>;
@@ -85,7 +99,7 @@ describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
   });
 
   describe('summary bar (Stage 2)', () => {
-    it('shows honest fleet totals with online/offline/pending split', () => {
+    it('shows honest fleet totals with online/offline/pending split and class chips', () => {
       loadFleet([
         gammaDevice(),
         supraHexDevice(),
@@ -93,10 +107,13 @@ describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
       ]);
       const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
       expect(text).toContain('Fleet Command Center');
-      expect(text).toContain('2 online');
+      expect(text).toContain('2 / 3');
       expect(text).toContain('1 offline');
       expect(text).toContain('Fleet Efficiency');
       expect(text).toContain('attention / critical');
+      // secondary classification strip (2I.1 hierarchy)
+      expect(text).toContain('2 NeuralAxe managed');
+      expect(text).toContain('1 unsupported target');
     });
 
     it('never invents efficiency without both power and hashrate', () => {
@@ -115,19 +132,22 @@ describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
       expect(text).toContain('Board 702');
     });
 
-    it('renders health states with explanations available', () => {
+    it('renders health states with explanations available (table view labels)', () => {
       loadFleet([
         gammaDevice(),
         gammaDevice({ IP: 'a', hostname: 'hot-gamma', temp: 66 }),
         gammaDevice({ IP: 'b', hostname: 'crit-gamma', overheat_mode: 1 }),
         gammaDevice({ IP: 'c', hostname: 'off-gamma', nxReachable: false }),
       ]);
+      component.setViewMode('table');
+      fixture.detectChanges();
       const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
       expect(text).toContain('Healthy');
       expect(text).toContain('Attention');
       expect(text).toContain('Critical');
       expect(text).toContain('Offline');
       expect(component.healthTooltip(component.swarm[1])).toContain('66');
+      component.setViewMode('command'); // restore the persisted default
     });
 
     it('offline devices show last-seen age, not stale values as live', () => {
@@ -171,22 +191,34 @@ describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
     });
   });
 
-  describe('detail drawer (Stage 5)', () => {
-    it('opens with device sections and closes non-destructively', () => {
+  describe('device workspace (Stages 2/7)', () => {
+    it('shows the selected device persistently with tabs and health explanation', () => {
+      loadFleet([gammaDevice()]);
+      component.ensureSelection();
+      fixture.detectChanges();
+
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      // tab bar + overview content (default tab)
+      expect(text).toContain('Overview');
+      expect(text).toContain('Thermal');
+      expect(text).toContain('Tuning');
+      expect(text).toContain('Active Pool');
+      expect(text).toContain('Firmware pair');
+      expect(text).toContain('Healthy.');
+
+      component.setWorkspaceTab('thermal');
+      fixture.detectChanges();
+      const thermalText = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(thermalText).toContain('Req / Applied Fan');
+      expect(thermalText).toContain('68 % / 70 %');
+    });
+
+    it('the overlay drawer reuses the same workspace and closes non-destructively', () => {
       loadFleet([gammaDevice()]);
       component.openDetail(component.swarm[0]);
       fixture.detectChanges();
 
-      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
-      expect(text).toContain('Overview');
-      expect(text).toContain('Performance');
-      expect(text).toContain('Thermal');
-      expect(text).toContain('Pool & Network');
-      expect(text).toContain('Software');
-      expect(text).toContain('Tuning');
-      expect(text).toContain('Req / Applied Fan');
-      expect(text).toContain('68 % / 70 %');
-
+      expect(fixture.nativeElement.querySelector('.nx-fleet-drawer')).toBeTruthy();
       component.closeDetail();
       fixture.detectChanges();
       expect(component.detailDevice).toBeNull();
@@ -194,13 +226,120 @@ describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
     });
 
     it('shows the explicit compatibility notice for board 702 and omits unreported thermal data', () => {
-      loadFleet([supraHexDevice()]);
-      component.openDetail(component.swarm[0]);
+      loadFleet([supraHexDevice()]); // board 702 = unsupported target
+      component.ensureSelection();
+      component.setWorkspaceTab('thermal');
       fixture.detectChanges();
       const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
       expect(text).toContain('not a NeuralAxe release target');
       expect(text).toContain('must not be installed');
       expect(text).toContain('not reported by this device'); // thermal mode absent, stated
+    });
+
+    it('flags reduced telemetry for an AxeOS-compatible device (board 601, no NeuralAxe identity)', () => {
+      loadFleet([axeosCompatibleDevice()]);
+      component.ensureSelection();
+      fixture.detectChanges();
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('AxeOS'); // classification
+      expect(text).toContain('reduced telemetry');
+    });
+  });
+
+  describe('master-detail selection (2I.1)', () => {
+    it('selects the first visible device by default and selection is click-only', () => {
+      loadFleet([gammaDevice(), supraHexDevice()]);
+      component.ensureSelection();
+      fixture.detectChanges();
+      expect(component.selectedDevice?.hostname).toBe('gamma-01');
+
+      const items = fixture.nativeElement.querySelectorAll('.nx-fleet-nav-item');
+      expect(items.length).toBe(2);
+      (items[1] as HTMLElement).click();
+      fixture.detectChanges();
+      expect(component.selectedDevice?.hostname).toBe('suprahex-lab');
+      httpMock.expectNone(() => true); // selection never talks to a device
+    });
+
+    it('keyboard arrows move the selection across visible devices', () => {
+      loadFleet([gammaDevice(), supraHexDevice()]);
+      component.ensureSelection();
+      component.selectAdjacent(1);
+      expect(component.selectedDevice?.hostname).toBe('suprahex-lab');
+      component.selectAdjacent(1); // clamped at the end
+      expect(component.selectedDevice?.hostname).toBe('suprahex-lab');
+      component.selectAdjacent(-1);
+      expect(component.selectedDevice?.hostname).toBe('gamma-01');
+    });
+
+    it('reselects the first visible device when the selection is filtered out', () => {
+      loadFleet([gammaDevice(), supraHexDevice()]);
+      component.ensureSelection();
+      component.selectDevice(component.swarm[1]); // suprahex
+      component.setFilter('classification', 'neuralaxe');
+      fixture.detectChanges();
+      expect(component.selectedDevice?.hostname).toBe('gamma-01');
+    });
+
+    it('shows an explicit empty selection when everything is filtered out', () => {
+      loadFleet([gammaDevice()]);
+      component.ensureSelection();
+      component.setFilter('text', 'nomatch');
+      fixture.detectChanges();
+      expect(component.selectedDevice).toBeNull();
+    });
+
+    it('view mode toggles to the optional table and persists', () => {
+      loadFleet([gammaDevice()]);
+      expect(component.viewMode).toBe('command');
+      expect(fixture.nativeElement.querySelector('.nx-fleet-split')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.nx-fleet-table')).toBeFalsy();
+
+      component.setViewMode('table');
+      fixture.detectChanges();
+      expect(fixture.nativeElement.querySelector('.nx-fleet-table')).toBeTruthy();
+      expect(fixture.nativeElement.querySelector('.nx-fleet-split')).toBeFalsy();
+      expect(window.localStorage.getItem('FLEET_VIEW_MODE')).toBe('table');
+    });
+
+    it('renders the visible result count', () => {
+      loadFleet([gammaDevice(), supraHexDevice()]);
+      component.setFilter('text', 'gamma');
+      fixture.detectChanges();
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('1 of 2');
+    });
+
+    it('renders the warming-up share note for the real pilot startup sample', () => {
+      loadFleet([gammaDevice({ sharesAccepted: 25, sharesRejected: 1, uptimeSeconds: 120 })]);
+      component.ensureSelection();
+      fixture.detectChanges();
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Healthy.');
+      expect(text).toContain('warming up');
+    });
+  });
+
+  describe('action menu (2I.1 Stage 6)', () => {
+    it('consolidates actions behind a labeled menu and never fires on open', () => {
+      loadFleet([gammaDevice()]);
+      component.ensureSelection();
+      fixture.detectChanges();
+
+      component.toggleActionMenu();
+      fixture.detectChanges();
+      const menu: HTMLElement | null = fixture.nativeElement.querySelector('.nx-fleet-menu');
+      expect(menu).toBeTruthy();
+      expect(menu!.textContent).toContain('Pause Mining');
+      expect(menu!.textContent).toContain('Restart…');
+      expect(menu!.textContent).toContain('Identify');
+      expect(menu!.textContent).toContain('Remove from list…');
+      httpMock.expectNone(() => true); // opening the menu performs nothing
+
+      // Restart from the menu still goes through the confirmation
+      component.actionMenuOpen = false;
+      component.confirmRestart(component.swarm[0]);
+      httpMock.expectNone(`http://10.0.0.10/api/system/restart`);
     });
   });
 
@@ -244,32 +383,44 @@ describe('SwarmComponent (Fleet Command Center, Phase 2I)', () => {
       httpMock.expectNone(() => true); // remove never talks to the device
     });
 
-    it('row click opens details only — no silent device action', () => {
+    it('table row click opens details only — no silent device action', () => {
       loadFleet([gammaDevice()]);
+      component.setViewMode('table');
+      fixture.detectChanges();
       const row: HTMLElement | null = fixture.nativeElement.querySelector('.nx-fleet-row');
       row?.click();
       fixture.detectChanges();
       expect(component.detailDevice).not.toBeNull();
       httpMock.expectNone(() => true);
+      component.setViewMode('command');
     });
   });
 
   describe('privacy (Stage 12)', () => {
-    it('masks hostname, IP and pool in the table, cards and drawer', () => {
+    it('masks hostname and pool in the navigator, workspace, table, cards and drawer', () => {
       loadFleet([gammaDevice()]);
-
-      const tableMasked = fixture.nativeElement.querySelectorAll('.nx-fleet-table [sensitive-data]');
-      expect(tableMasked.length).toBeGreaterThanOrEqual(3); // hostname, IP, pool
-
-      component.toggleGridView(true);
+      component.ensureSelection();
       fixture.detectChanges();
+
+      const navMasked = fixture.nativeElement.querySelectorAll('.nx-fleet-nav [sensitive-data]');
+      expect(navMasked.length).toBeGreaterThanOrEqual(1); // hostname
+      const wsMasked = fixture.nativeElement.querySelectorAll('.nx-fleet-workspace [sensitive-data]');
+      expect(wsMasked.length).toBeGreaterThanOrEqual(2); // hostname, pool
+
+      component.setViewMode('table');
+      fixture.detectChanges();
+      const tableMasked = fixture.nativeElement.querySelectorAll('.nx-fleet-table [sensitive-data]');
+      expect(tableMasked.length).toBeGreaterThanOrEqual(1); // hostname
+      component.setViewMode('command');
+      fixture.detectChanges();
+
       const cardMasked = fixture.nativeElement.querySelectorAll('.nx-fleet-card [sensitive-data]');
-      expect(cardMasked.length).toBeGreaterThanOrEqual(2); // hostname, pool
+      expect(cardMasked.length).toBeGreaterThanOrEqual(2); // hostname, pool (cards always rendered)
 
       component.openDetail(component.swarm[0]);
       fixture.detectChanges();
       const drawerMasked = fixture.nativeElement.querySelectorAll('.nx-fleet-drawer [sensitive-data]');
-      expect(drawerMasked.length).toBeGreaterThanOrEqual(3); // hostname, IP, pool
+      expect(drawerMasked.length).toBeGreaterThanOrEqual(2); // hostname, pool
     });
   });
 

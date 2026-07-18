@@ -12,6 +12,8 @@ import {
   lastSeenText,
   pairMismatch,
   rejectRatePct,
+  rejectSampleConfident,
+  shareSampleNote,
 } from './fleet-intel';
 
 /** A healthy online NeuralAxe Gamma as the fleet page holds it. */
@@ -138,6 +140,50 @@ describe('fleet-intel (Phase 2I)', () => {
 
     it('an unsupported board is not automatically unhealthy', () => {
       expect(deviceHealth(axeosDevice({ boardVersion: '702' })).state).toBe('healthy');
+    });
+
+    describe('reject-rate sample confidence (2I.1)', () => {
+      it('the real pilot sample (1 reject / 26 total, ~2 min uptime) is NOT Attention from reject rate alone', () => {
+        const pilot = neuralaxeDevice({ sharesAccepted: 25, sharesRejected: 1, uptimeSeconds: 120 });
+        expect(deviceHealth(pilot).state).toBe('healthy');
+        expect(shareSampleNote(pilot)).toContain('warming up');
+        expect(shareSampleNote(pilot)).toContain('1 rejected of 26');
+      });
+
+      it('1 reject / 100 total is below 2% — no Attention, no warming-up note', () => {
+        const device = neuralaxeDevice({ sharesAccepted: 99, sharesRejected: 1 });
+        expect(deviceHealth(device).state).toBe('healthy');
+        expect(shareSampleNote(device)).toBeNull();
+      });
+
+      it('3 rejects / 100 total (3%) is Attention — confident sample over threshold', () => {
+        const device = neuralaxeDevice({ sharesAccepted: 97, sharesRejected: 3 });
+        const health = deviceHealth(device);
+        expect(health.state).toBe('attention');
+        expect(health.reasons[0]).toContain('reject rate');
+      });
+
+      it('3 rejects / 30 total is Attention — repeated rejection at any sample size', () => {
+        expect(deviceHealth(neuralaxeDevice({ sharesAccepted: 27, sharesRejected: 3 })).state).toBe('attention');
+      });
+
+      it('zero-share startup carries no reject signal and no note', () => {
+        const device = neuralaxeDevice({ sharesAccepted: 0, sharesRejected: 0, uptimeSeconds: 20 });
+        expect(deviceHealth(device).state).toBe('healthy');
+        expect(shareSampleNote(device)).toBeNull();
+        expect(rejectSampleConfident(device)).toBeFalse();
+      });
+
+      it('another genuine Attention reason remains authoritative during a small sample', () => {
+        const health = deviceHealth(neuralaxeDevice({ sharesAccepted: 25, sharesRejected: 1, temp: 66 }));
+        expect(health.state).toBe('attention');
+        expect(health.reasons.some(r => r.includes('66 °C'))).toBeTrue();
+        expect(health.reasons.some(r => r.includes('reject'))).toBeFalse();
+      });
+
+      it('Critical always overrides sample-confidence logic', () => {
+        expect(deviceHealth(neuralaxeDevice({ sharesAccepted: 25, sharesRejected: 1, overheat_mode: 1 })).state).toBe('critical');
+      });
     });
   });
 

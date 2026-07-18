@@ -182,6 +182,16 @@ const VR_ATTENTION_C = 85;
 const FAN_SATURATION_PCT = 95;
 const ERROR_RATE_ATTENTION_PCT = 2;
 const REJECT_RATE_ATTENTION_PCT = 2;
+/**
+ * Sample-confidence contract (2I.1): the reject-rate rule only becomes
+ * actionable once enough evidence exists — at least 100 total shares OR at
+ * least 3 rejected shares. A single reject in a small startup sample (the
+ * real pilot showed 1/26 ≈ 3.85 % at two minutes uptime) says nothing about
+ * fleet health and must not raise Attention on its own. Persistent or
+ * repeated rejection (≥3 rejects) is actionable at any sample size.
+ */
+const REJECT_MIN_TOTAL_SHARES = 100;
+const REJECT_MIN_REJECTED = 3;
 
 /**
  * Deterministic device health. Absence of telemetry is never interpreted as
@@ -221,7 +231,9 @@ export function deviceHealth(device: FleetDevice): FleetHealth {
   const errPct = num(device.errorPercentage);
   if (errPct !== null && errPct > ERROR_RATE_ATTENTION_PCT) attention.push(`ASIC error rate ${errPct.toFixed(1)} %`);
   const rejectPct = rejectRatePct(device);
-  if (rejectPct !== null && rejectPct > REJECT_RATE_ATTENTION_PCT) attention.push(`Share reject rate ${rejectPct.toFixed(1)} %`);
+  if (rejectPct !== null && rejectPct > REJECT_RATE_ATTENTION_PCT && rejectSampleConfident(device)) {
+    attention.push(`Share reject rate ${rejectPct.toFixed(1)} %`);
+  }
   if (device.isUsingFallbackStratum === 1) attention.push('Mining on the fallback pool');
   if (device.miningPaused) attention.push('Mining paused');
   if (typeof device.fanCurveError === 'string' && device.fanCurveError) attention.push('Fan curve invalid — safe fallback active');
@@ -235,6 +247,31 @@ export function deviceHealth(device: FleetDevice): FleetHealth {
     return { state: 'attention', reasons: attention };
   }
   return { state: 'healthy', reasons: ['All reported values within normal ranges'] };
+}
+
+/**
+ * Whether the share sample is large enough for the reject-rate rule to be
+ * actionable: total >= 100 shares, or >= 3 rejects at any sample size.
+ */
+export function rejectSampleConfident(device: FleetDevice): boolean {
+  const accepted = num(device.sharesAccepted) ?? 0;
+  const rejected = num(device.sharesRejected) ?? 0;
+  return accepted + rejected >= REJECT_MIN_TOTAL_SHARES || rejected >= REJECT_MIN_REJECTED;
+}
+
+/**
+ * Neutral note for the warming-up window: rejects exist and the naive rate
+ * is above the threshold, but the sample is too small to act on. Display
+ * only — never a health state.
+ */
+export function shareSampleNote(device: FleetDevice): string | null {
+  const rejectPct = rejectRatePct(device);
+  if (rejectPct === null || rejectPct <= REJECT_RATE_ATTENTION_PCT || rejectSampleConfident(device)) {
+    return null;
+  }
+  const accepted = num(device.sharesAccepted) ?? 0;
+  const rejected = num(device.sharesRejected) ?? 0;
+  return `Share sample still warming up (${rejected} rejected of ${accepted + rejected} — too few shares to judge)`;
 }
 
 /** Reject percentage of all submitted shares; null before any share. */

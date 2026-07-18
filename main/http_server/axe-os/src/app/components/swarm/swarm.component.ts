@@ -26,14 +26,18 @@ import {
   fleetSummary,
   lastSeenText,
   pairMismatch,
+  shareSampleNote,
 } from './fleet-intel';
 
 const SWARM_DATA = 'SWARM_DATA';
 const SWARM_REFRESH_TIME = 'SWARM_REFRESH_TIME';
 const SWARM_SORTING = 'SWARM_SORTING';
-const SWARM_GRID_VIEW = 'SWARM_GRID_VIEW';
 const FLEET_FILTERS = 'FLEET_FILTERS';
 const FLEET_DENSITY = 'FLEET_DENSITY';
+const FLEET_VIEW_MODE = 'FLEET_VIEW_MODE';
+
+export type FleetViewMode = 'command' | 'table';
+export type WorkspaceTab = 'overview' | 'thermal' | 'mining' | 'software' | 'tuning';
 
 type SwarmDevice = { IP: string; ASICModel: string; deviceModel: string; swarmColor: string; asicCount: number; [key: string]: any };
 
@@ -66,7 +70,6 @@ export class SwarmComponent implements OnInit, OnDestroy {
 
   public refreshIntervalControl: FormControl;
 
-  public gridView: boolean;
   public selectedSort: { sortField: FleetSortField; sortDirection: 'asc' | 'desc' };
 
   public staticMenuDesktopInactive: boolean;
@@ -75,19 +78,29 @@ export class SwarmComponent implements OnInit, OnDestroy {
   // ---- Fleet Command Center state (2I) ----
   public filters: FleetFilters = { ...DEFAULT_FLEET_FILTERS };
   public density: 'comfortable' | 'compact';
-  /** Device shown in the detail drawer; null = closed. Typed `any` at the
-   * template boundary (house style for fleet rows) — the derivation logic
-   * itself is strictly typed and tested in fleet-intel.ts. */
+  /** Device shown in the overlay drawer (mobile cards / table Details);
+   * null = closed. Typed `any` at the template boundary (house style for
+   * fleet rows) — the derivation logic is strictly typed in fleet-intel.ts. */
   public detailDevice: any | null = null;
   /** Devices awaiting action confirmation; null = no dialog. */
   public pendingRestart: any | null = null;
   public pendingRemove: any | null = null;
 
+  // ---- master-detail state (2I.1) ----
+  public viewMode: FleetViewMode;
+  /** IP of the device selected in the command navigator. */
+  public selectedIp: string | null = null;
+  public workspaceTab: WorkspaceTab = 'overview';
+  /** Consolidated Actions menu (workspace/drawer header); false = closed. */
+  public actionMenuOpen = false;
+
   public readonly fmt = DeckFmt;
 
   @HostListener('document:keydown.esc', ['$event'])
   onEscKey() {
-    if (this.pendingRemove || this.pendingRestart) {
+    if (this.actionMenuOpen) {
+      this.actionMenuOpen = false;
+    } else if (this.pendingRemove || this.pendingRestart) {
       this.pendingRemove = null;
       this.pendingRestart = null;
     } else if (this.detailDevice) {
@@ -111,8 +124,8 @@ export class SwarmComponent implements OnInit, OnDestroy {
       manualAddIp: [null, [Validators.required, Validators.pattern('(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)')]]
     });
 
-    this.gridView = this.localStorageService.getBool(SWARM_GRID_VIEW);
     this.density = this.localStorageService.getItem(FLEET_DENSITY) === 'compact' ? 'compact' : 'comfortable';
+    this.viewMode = this.localStorageService.getItem(FLEET_VIEW_MODE) === 'table' ? 'table' : 'command';
     const storedFilters = this.localStorageService.getObject(FLEET_FILTERS);
     if (storedFilters) {
       this.filters = { ...DEFAULT_FLEET_FILTERS, ...storedFilters };
@@ -144,6 +157,7 @@ export class SwarmComponent implements OnInit, OnDestroy {
       this.scanNetwork();
     } else {
       this.swarm = swarmData;
+      this.ensureSelection();
       this.refreshList(true);
     }
 
@@ -199,6 +213,7 @@ export class SwarmComponent implements OnInit, OnDestroy {
         this.swarm = [...this.swarm, ...newItems];
         this.sortSwarm();
         this.localStorageService.setObject(SWARM_DATA, this.swarm);
+        this.ensureSelection();
       },
       complete: () => {
         this.scanning = false;
@@ -345,6 +360,7 @@ export class SwarmComponent implements OnInit, OnDestroy {
   public remove(axeOs: any) {
     this.swarm = this.swarm.filter(axe => axe.IP !== axeOs.IP);
     this.localStorageService.setObject(SWARM_DATA, this.swarm);
+    this.ensureSelection();
   }
 
   /**
@@ -389,6 +405,7 @@ export class SwarmComponent implements OnInit, OnDestroy {
         if (this.detailDevice) {
           this.detailDevice = this.swarm.find(axe => axe.IP === this.detailDevice!.IP) ?? null;
         }
+        this.ensureSelection();
       },
       complete: () => {
         this.isRefreshing = false;
@@ -567,11 +584,13 @@ export class SwarmComponent implements OnInit, OnDestroy {
   public setFilter<K extends keyof FleetFilters>(key: K, value: FleetFilters[K]): void {
     this.filters = { ...this.filters, [key]: value };
     this.persistFilters();
+    this.ensureSelection();
   }
 
   public clearFilters(): void {
     this.filters = { ...DEFAULT_FLEET_FILTERS };
     this.persistFilters();
+    this.ensureSelection();
   }
 
   get filtersActive(): boolean {
@@ -591,14 +610,80 @@ export class SwarmComponent implements OnInit, OnDestroy {
 
   public openDetail(axe: FleetDevice): void {
     this.detailDevice = axe;
+    this.selectedIp = axe.IP;
+    this.actionMenuOpen = false;
   }
 
   public closeDetail(): void {
     this.detailDevice = null;
+    this.actionMenuOpen = false;
   }
 
-  public toggleGridView(gridView: boolean): void {
-    this.localStorageService.setBool(SWARM_GRID_VIEW, this.gridView = gridView);
+  // ---- master-detail selection (2I.1) ----
+
+  public setViewMode(mode: FleetViewMode): void {
+    this.viewMode = mode;
+    this.localStorageService.setItem(FLEET_VIEW_MODE, mode);
+    this.actionMenuOpen = false;
+  }
+
+  /** Selection only — never triggers any remote action. */
+  public selectDevice(axe: FleetDevice): void {
+    this.selectedIp = axe.IP;
+    this.actionMenuOpen = false;
+  }
+
+  /** The selected device resolved against the live list; null when gone. */
+  get selectedDevice(): any | null {
+    if (!this.selectedIp) {
+      return null;
+    }
+    return this.swarm.find(axe => axe.IP === this.selectedIp) ?? null;
+  }
+
+  /**
+   * Keep the selection valid: when the selected device is filtered out or
+   * removed, fall back to the first visible device (or an explicit empty
+   * selection when nothing is visible).
+   */
+  public ensureSelection(): void {
+    const visible = this.filteredSwarm;
+    if (visible.length === 0) {
+      this.selectedIp = null;
+      return;
+    }
+    if (!this.selectedIp || !visible.some(axe => axe.IP === this.selectedIp)) {
+      this.selectedIp = visible[0].IP;
+    }
+  }
+
+  /** Arrow-key navigation across the visible navigator entries. */
+  public selectAdjacent(offset: 1 | -1): void {
+    const visible = this.filteredSwarm;
+    if (visible.length === 0) {
+      return;
+    }
+    const index = visible.findIndex(axe => axe.IP === this.selectedIp);
+    const next = index === -1 ? 0 : Math.min(visible.length - 1, Math.max(0, index + offset));
+    this.selectedIp = visible[next].IP;
+  }
+
+  public setWorkspaceTab(tab: WorkspaceTab): void {
+    this.workspaceTab = tab;
+  }
+
+  public toggleActionMenu(): void {
+    this.actionMenuOpen = !this.actionMenuOpen;
+  }
+
+  /** Run a supported per-device action from the consolidated menu. */
+  public menuAction(axe: FleetDevice, action: 'pause' | 'resume' | 'identify'): void {
+    this.actionMenuOpen = false;
+    this.postAction(axe, action);
+  }
+
+  public sampleNote(axe: FleetDevice): string | null {
+    return shareSampleNote(axe);
   }
 
   isThisDevice(IP: string): boolean {

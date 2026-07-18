@@ -190,14 +190,235 @@
 }
 
 // ---------------------------------------------------------------------------
-// cards (mobile always; desktop opt-in via view toggle)
+// master-detail split (2I.1) — command view, desktop/tablet only
+// ---------------------------------------------------------------------------
+.nx-fleet-split {
+    display: grid;
+    grid-template-columns: minmax(19rem, 37%) 1fr;
+    gap: 1rem;
+    align-items: start;
+}
+
+.nx-fleet-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    max-height: 72vh;
+    overflow-y: auto;
+    padding-right: 0.15rem;
+}
+
+.nx-fleet-nav-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.55rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid var(--surface-border);
+    border-radius: 8px;
+    background: var(--surface-card);
+    cursor: pointer;
+    min-width: 0;
+
+    &:hover { background: var(--surface-hover); }
+    &:focus-visible {
+        outline: 2px solid var(--primary-color);
+        outline-offset: -2px;
+    }
+    &.nx-fleet-nav-on {
+        border-color: var(--primary-color);
+        background: var(--surface-hover);
+    }
+    &.nx-fleet-nav-critical { border-left: 3px solid var(--nx-sem-danger, #ef5350); }
+    &.nx-fleet-nav-offline { opacity: 0.72; }
+
+    .nx-health-dot { margin-top: 0.3rem; }
+
+    .nx-fleet-nav-main {
+        display: flex;
+        flex-direction: column;
+        gap: 0.05rem;
+        min-width: 0;
+        flex: 1;
+
+        .nx-fleet-nav-name {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            min-width: 0;
+        }
+        small { font-size: 0.75rem; }
+    }
+
+    .nx-fleet-nav-metrics {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 0.05rem;
+        white-space: nowrap;
+
+        small { font-size: 0.75rem; }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// selected-device workspace
+// ---------------------------------------------------------------------------
+.nx-fleet-workspace {
+    border: 1px solid var(--surface-border);
+    border-radius: 8px;
+    background: var(--surface-card);
+    padding: 0.9rem 1rem 1.1rem;
+    min-width: 0;
+    min-height: 24rem;
+}
+
+.nx-fleet-ws-head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: 0.7rem;
+
+    .nx-fleet-ws-title {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        flex: 1;
+
+        b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1.05rem; }
+    }
+    .nx-fleet-ws-actions {
+        display: flex;
+        gap: 0.4rem;
+        align-items: center;
+    }
+}
+
+.nx-fleet-menu-wrap { position: relative; }
+.nx-fleet-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.3rem);
+    min-width: 14rem;
+    background: var(--surface-overlay, var(--surface-card));
+    border: 1px solid var(--surface-border);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    z-index: 1000;
+    padding: 0.3rem;
+
+    button {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        width: 100%;
+        background: none;
+        border: none;
+        color: var(--text-color);
+        font: inherit;
+        text-align: left;
+        padding: 0.55rem 0.6rem;
+        border-radius: 6px;
+        cursor: pointer;
+
+        &:hover, &:focus-visible { background: var(--surface-hover); }
+        &.nx-fleet-menu-danger { color: var(--nx-sem-danger, #ef5350); }
+    }
+    .nx-fleet-menu-sep {
+        border-top: 1px solid var(--surface-border);
+        margin: 0.3rem 0.2rem;
+    }
+}
+
+.nx-fleet-tabs {
+    display: flex;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--surface-border);
+    margin: 0.8rem 0 0.9rem;
+    overflow-x: auto;
+
+    button {
+        background: none;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: var(--text-color-secondary);
+        font: inherit;
+        padding: 0.45rem 0.7rem;
+        cursor: pointer;
+        white-space: nowrap;
+
+        &:hover, &:focus-visible { color: var(--text-color); }
+        &.nx-fleet-tab-on {
+            color: var(--text-color);
+            border-bottom-color: var(--primary-color);
+            font-weight: 600;
+        }
+    }
+}
+
+.nx-fleet-ws-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+    gap: 0.7rem;
+
+    .nx-fleet-ws-stat {
+        display: flex;
+        flex-direction: column;
+        gap: 0.1rem;
+        min-width: 0;
+
+        label {
+            font-size: 0.7rem;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--text-color-secondary);
+        }
+        b { font-size: 1.1rem; }
+        small { font-size: 0.75rem; }
+    }
+}
+
+.nx-fleet-ws-pairline {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.9rem;
+    padding-top: 0.7rem;
+    border-top: 1px solid var(--surface-border);
+    min-width: 0;
+
+    label {
+        font-size: 0.7rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--text-color-secondary);
+    }
+    small { min-width: 0; }
+}
+
+// summary hierarchy (2I.1)
+.nx-fleet-summary-primary {
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+
+    .nx-fleet-stat-alert {
+        border-color: var(--nx-sem-warn, #e6b23c);
+    }
+}
+.nx-fleet-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.35rem 0 1rem;
+    min-width: 0;
+}
+
+// ---------------------------------------------------------------------------
+// cards (mobile only)
 // ---------------------------------------------------------------------------
 .nx-fleet-cards {
     display: none;
     grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
     gap: 0.75rem;
-
-    &.nx-fleet-cards-forced { display: grid; }
 }
 
 .nx-fleet-card {
@@ -250,11 +471,20 @@
     }
 }
 
-// mobile: cards replace the table unconditionally
+// tablet: narrower navigator, workspace keeps priority
+@media (min-width: 992px) and (max-width: 1280px) {
+    .nx-fleet-split { grid-template-columns: minmax(16rem, 34%) 1fr; }
+}
+
+// mobile: cards replace both desktop views unconditionally
 @media (max-width: 991px) {
+    .nx-fleet-split { display: none; }
     .nx-fleet-tablewrap { display: none; }
     .nx-fleet-cards { display: grid; }
     .nx-fleet-viewtoggle { display: none; }
+
+    // the overlay drawer becomes a full-screen sheet
+    .nx-fleet-drawer { width: 100vw; }
 }
 
 // ---------------------------------------------------------------------------

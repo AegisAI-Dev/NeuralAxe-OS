@@ -391,6 +391,22 @@ describe('CommandDeckComponent (fleet glance, Phase 2I)', () => {
     window.localStorage.removeItem('SWARM_DATA');
   });
 
+  it('distinguishes never-refreshed devices from an outage (2I.1)', () => {
+    // Stored list without any reachability bookkeeping = awaiting first refresh.
+    window.localStorage.setItem('SWARM_DATA', JSON.stringify([
+      { IP: '10.0.0.10', hostname: 'gamma-01' },
+      { IP: '10.0.0.11', hostname: 'gamma-02' },
+      { IP: '10.0.0.12', hostname: 'gamma-03' },
+    ]));
+    const glance = recreate().fleetGlance;
+    expect(glance).not.toBeNull();
+    expect(glance!.pending).toBe(3);
+    expect(glance!.online).toBe(0);
+    // 0/3 "online" must not read as a fleet outage before any data exists —
+    // the template renders the awaiting-first-refresh wording instead.
+    window.localStorage.removeItem('SWARM_DATA');
+  });
+
   it('derives online/total, hashrate, alerts and data age from the stored fleet', () => {
     const now = Date.now();
     window.localStorage.setItem('SWARM_DATA', JSON.stringify([

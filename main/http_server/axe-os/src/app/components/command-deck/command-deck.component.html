@@ -444,7 +444,9 @@
             <div class="nx-statrow nx-statrow-tight">
                 <div class="nx-stat">
                     <label>Devices</label>
-                    <span>{{ fleet.online }} / {{ fleet.total }} online</span>
+                    <!-- Never-refreshed devices are pending, not an outage (2I.1) -->
+                    <span *ngIf="fleet.pending < fleet.total">{{ fleet.online }} / {{ fleet.total }} online</span>
+                    <span *ngIf="fleet.pending === fleet.total" class="nx-dim">{{ fleet.total }} awaiting first refresh</span>
                 </div>
                 <div class="nx-stat">
                     <label>Fleet Hashrate</label>

@@ -38,6 +38,8 @@ import { LocalStorageService } from 'src/app/local-storage.service';
 export interface FleetGlance {
   total: number;
   online: number;
+  /** Devices never refreshed yet — distinct from Offline (2I.1). */
+  pending: number;
   totalHashRate: number;
   alerts: number;
   /** Age of the newest stored device contact; null when no timestamp exists. */
@@ -169,6 +171,7 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
     return {
       total: summary.total,
       online: summary.online,
+      pending: summary.pendingFirstContact,
       totalHashRate: summary.totalHashRate,
       alerts: summary.attention + summary.critical,
       ageText,
