@@ -7,11 +7,33 @@ import { LocalStorageService } from 'src/app/local-storage.service';
 import { LayoutService } from "../../layout/service/app.layout.service";
 import { SystemApiService } from 'src/app/services/system.service';
 import { ModalComponent } from '../modal/modal.component';
+import { DeckFmt } from 'src/app/components/command-deck/deck-format';
+import {
+  DEFAULT_FLEET_FILTERS,
+  FleetClassification,
+  FleetDevice,
+  FleetFilters,
+  FleetHealth,
+  FleetSortField,
+  FleetSummary,
+  activePoolHost,
+  classifyDevice,
+  compareDevices,
+  deviceEfficiency,
+  deviceHealth,
+  deviceOnline,
+  filterDevices,
+  fleetSummary,
+  lastSeenText,
+  pairMismatch,
+} from './fleet-intel';
 
 const SWARM_DATA = 'SWARM_DATA';
 const SWARM_REFRESH_TIME = 'SWARM_REFRESH_TIME';
 const SWARM_SORTING = 'SWARM_SORTING';
 const SWARM_GRID_VIEW = 'SWARM_GRID_VIEW';
+const FLEET_FILTERS = 'FLEET_FILTERS';
+const FLEET_DENSITY = 'FLEET_DENSITY';
 
 type SwarmDevice = { IP: string; ASICModel: string; deviceModel: string; swarmColor: string; asicCount: number; [key: string]: any };
 
@@ -22,7 +44,9 @@ type SwarmDevice = { IP: string; ASICModel: string; deviceModel: string; swarmCo
 })
 export class SwarmComponent implements OnInit, OnDestroy {
 
-  @ViewChild(ModalComponent) modalComponent!: ModalComponent;
+  @ViewChild('editModal') modalComponent!: ModalComponent;
+  @ViewChild('restartModal') restartModal?: ModalComponent;
+  @ViewChild('removeModal') removeModal?: ModalComponent;
 
   public swarm: any[] = [];
 
@@ -36,24 +60,41 @@ export class SwarmComponent implements OnInit, OnDestroy {
   public refreshIntervalTime = 30;
   public refreshTimeSet = 30;
 
-  public totals: { hashRate: number; power: number; bestDiff: number } = { hashRate: 0, power: 0, bestDiff: 0 };
-
   public isRefreshing = false;
+  /** Set once the first scan/refresh cycle has completed (Stage 9 states). */
+  public hasCompletedFirstLoad = false;
 
   public refreshIntervalControl: FormControl;
 
   public gridView: boolean;
-  public selectedSort: { sortField: string; sortDirection: 'asc' | 'desc' };
+  public selectedSort: { sortField: FleetSortField; sortDirection: 'asc' | 'desc' };
 
   public staticMenuDesktopInactive: boolean;
   private staticMenuDesktopSubscription!: Subscription;
 
-  public filterText = '';
+  // ---- Fleet Command Center state (2I) ----
+  public filters: FleetFilters = { ...DEFAULT_FLEET_FILTERS };
+  public density: 'comfortable' | 'compact';
+  /** Device shown in the detail drawer; null = closed. Typed `any` at the
+   * template boundary (house style for fleet rows) — the derivation logic
+   * itself is strictly typed and tested in fleet-intel.ts. */
+  public detailDevice: any | null = null;
+  /** Devices awaiting action confirmation; null = no dialog. */
+  public pendingRestart: any | null = null;
+  public pendingRemove: any | null = null;
+
+  public readonly fmt = DeckFmt;
 
   @HostListener('document:keydown.esc', ['$event'])
   onEscKey() {
-    if (this.filterText) {
-      this.filterText = '';
+    if (this.pendingRemove || this.pendingRestart) {
+      this.pendingRemove = null;
+      this.pendingRestart = null;
+    } else if (this.detailDevice) {
+      this.detailDevice = null;
+    } else if (this.filters.text) {
+      this.filters = { ...this.filters, text: '' };
+      this.persistFilters();
     }
   }
 
@@ -71,6 +112,11 @@ export class SwarmComponent implements OnInit, OnDestroy {
     });
 
     this.gridView = this.localStorageService.getBool(SWARM_GRID_VIEW);
+    this.density = this.localStorageService.getItem(FLEET_DENSITY) === 'compact' ? 'compact' : 'comfortable';
+    const storedFilters = this.localStorageService.getObject(FLEET_FILTERS);
+    if (storedFilters) {
+      this.filters = { ...DEFAULT_FLEET_FILTERS, ...storedFilters };
+    }
 
     const storedRefreshTime = this.localStorageService.getNumber(SWARM_REFRESH_TIME) ?? 30;
     this.refreshIntervalTime = storedRefreshTime;
@@ -84,7 +130,7 @@ export class SwarmComponent implements OnInit, OnDestroy {
     });
 
     this.selectedSort = this.localStorageService.getObject(SWARM_SORTING) ?? {
-      sortField: 'IP',
+      sortField: 'IP' as FleetSortField,
       sortDirection: 'asc'
     };
 
@@ -153,10 +199,10 @@ export class SwarmComponent implements OnInit, OnDestroy {
         this.swarm = [...this.swarm, ...newItems];
         this.sortSwarm();
         this.localStorageService.setObject(SWARM_DATA, this.swarm);
-        this.calculateTotals();
       },
       complete: () => {
         this.scanning = false;
+        this.hasCompletedFirstLoad = true;
         this.refreshIntervalTime = this.refreshTimeSet;
       }
     });
@@ -195,15 +241,19 @@ export class SwarmComponent implements OnInit, OnDestroy {
       asic: this.httpClient.get<any>(`http://${IP}/api/system/asic`).pipe(catchError(() => of({})))
     }).pipe(
       timeout(5000),
-      catchError(error => this.refreshErrorHandler(error, IP))
-    ).subscribe(({ info, asic }) => {
-      if (!info.ASICModel || !asic.ASICModel) {
+      catchError(error => {
+        // Manual add keeps its explicit failure toast (the user is waiting).
+        const errorMessage = error?.message || error?.statusText || error?.toString() || 'Unknown error';
+        this.toastr.error(`Failed to get info: ${errorMessage}`, `Device at ${IP}`);
+        return of(null);
+      })
+    ).subscribe((result: any) => {
+      if (!result || !result.info?.ASICModel || !result.asic?.ASICModel) {
         return;
       }
-      this.swarm.push(this.mergeDeviceData(IP, {}, info, asic));
+      this.swarm.push(this.mergeDeviceData(IP, {}, result.info, result.asic));
       this.sortSwarm();
       this.localStorageService.setObject(SWARM_DATA, this.swarm);
-      this.calculateTotals();
     });
   }
 
@@ -240,15 +290,69 @@ export class SwarmComponent implements OnInit, OnDestroy {
     });
   }
 
+  // ---- confirmed actions (Stage 10): destructive/remote actions never run
+  // from the first click; the dialogs state exactly what will happen. ----
+
+  public confirmRestart(axe: FleetDevice): void {
+    this.pendingRestart = axe;
+    if (this.restartModal) {
+      this.restartModal.isVisible = true;
+    }
+  }
+
+  public cancelRestart(): void {
+    this.pendingRestart = null;
+    if (this.restartModal) {
+      this.restartModal.isVisible = false;
+    }
+  }
+
+  public executeRestart(): void {
+    if (!this.pendingRestart) {
+      return;
+    }
+    const device = this.pendingRestart;
+    this.cancelRestart();
+    this.postAction(device, 'restart');
+  }
+
+  public confirmRemove(axe: FleetDevice): void {
+    this.pendingRemove = axe;
+    if (this.removeModal) {
+      this.removeModal.isVisible = true;
+    }
+  }
+
+  public cancelRemove(): void {
+    this.pendingRemove = null;
+    if (this.removeModal) {
+      this.removeModal.isVisible = false;
+    }
+  }
+
+  public executeRemove(): void {
+    if (!this.pendingRemove) {
+      return;
+    }
+    const device = this.pendingRemove;
+    this.cancelRemove();
+    if (this.detailDevice?.IP === device.IP) {
+      this.detailDevice = null;
+    }
+    this.remove(device);
+  }
+
   public remove(axeOs: any) {
     this.swarm = this.swarm.filter(axe => axe.IP !== axeOs.IP);
     this.localStorageService.setObject(SWARM_DATA, this.swarm);
-    this.calculateTotals();
   }
 
+  /**
+   * Refresh failures mark the device unreachable (visible as the Offline
+   * state with its last-seen age) instead of toasting on every cycle; the
+   * previous telemetry zeroing is preserved so nothing stale renders as live.
+   */
   public refreshErrorHandler = (error: any, ip: string) => {
-    const errorMessage = error?.message || error?.statusText || error?.toString() || 'Unknown error';
-    this.toastr.error(`Failed to get info: ${errorMessage}`, `Device at ${ip}`);
     const existingDevice = this.swarm.find(axeOs => axeOs.IP === ip);
     return of({
       ...existingDevice,
@@ -261,6 +365,7 @@ export class SwarmComponent implements OnInit, OnDestroy {
       version: 0,
       uptimeSeconds: 0,
       poolDifficulty: 0,
+      nxReachable: false,
     });
   };
 
@@ -278,16 +383,21 @@ export class SwarmComponent implements OnInit, OnDestroy {
         this.swarm = result;
         this.sortSwarm();
         this.localStorageService.setObject(SWARM_DATA, this.swarm);
-        this.calculateTotals();
         this.isRefreshing = false;
+        this.hasCompletedFirstLoad = true;
+        // Keep the open drawer bound to the fresh object for its device.
+        if (this.detailDevice) {
+          this.detailDevice = this.swarm.find(axe => axe.IP === this.detailDevice!.IP) ?? null;
+        }
       },
       complete: () => {
         this.isRefreshing = false;
+        this.hasCompletedFirstLoad = true;
       }
     });
   }
 
-  sortBy(sortField: string, sortDirection?: 'asc' | 'desc' | undefined) {
+  sortBy(sortField: FleetSortField, sortDirection?: 'asc' | 'desc' | undefined) {
     if (sortDirection) {
       this.selectedSort = { sortField, sortDirection };
     } else if (this.selectedSort.sortField === sortField) {
@@ -301,43 +411,7 @@ export class SwarmComponent implements OnInit, OnDestroy {
   }
 
   private sortSwarm() {
-    this.swarm.sort((a, b) => {
-      let comparison = 0;
-      const fieldType = typeof a[this.selectedSort.sortField];
-
-      if (this.selectedSort.sortField === 'IP') {
-        // Split IP into octets and compare numerically
-        const aOctets = a[this.selectedSort.sortField].split('.').map(Number);
-        const bOctets = b[this.selectedSort.sortField].split('.').map(Number);
-        for (let i = 0; i < 4; i++) {
-          if (aOctets[i] !== bOctets[i]) {
-            comparison = aOctets[i] - bOctets[i];
-            break;
-          }
-        }
-      } else if (fieldType === 'number') {
-        comparison = a[this.selectedSort.sortField] - b[this.selectedSort.sortField];
-      } else if (fieldType === 'string') {
-        comparison = a[this.selectedSort.sortField].localeCompare(b[this.selectedSort.sortField], undefined, { numeric: true });
-      }
-      return this.selectedSort.sortDirection === 'asc' ? comparison : -comparison;
-    });
-  }
-
-  private calculateTotals() {
-    this.totals.hashRate = this.swarm.reduce((sum, axe) => sum + (axe.hashRate || 0), 0);
-    this.totals.power = this.swarm.reduce((sum, axe) => sum + (axe.power || 0), 0);
-    this.totals.bestDiff = this.swarm.reduce((max, axe) => Math.max(max, axe.bestDiff || 0), 0);
-  }
-
-  get deviceFamilies(): SwarmDevice[] {
-    return this.filteredSwarm.filter((v, i, a) =>
-      a.findIndex(({ deviceModel, ASICModel, asicCount }) =>
-        v.deviceModel === deviceModel &&
-        v.ASICModel === ASICModel &&
-        v.asicCount === asicCount
-      ) === i
-    );
+    this.swarm.sort((a, b) => compareDevices(a, b, this.selectedSort.sortField, this.selectedSort.sortDirection));
   }
 
   private deriveDeviceModel(data: any): string {
@@ -374,6 +448,10 @@ export class SwarmComponent implements OnInit, OnDestroy {
       blockFound: null,
       ...info,
       ...asic,
+      // Reachability bookkeeping (2I): this merge only runs on a successful
+      // response, so the device is online right now.
+      nxReachable: true,
+      nxLastSeenMs: Date.now(),
     };
 
     merged.deviceModel = merged.deviceModel || this.deriveDeviceModel(merged);
@@ -415,105 +493,112 @@ export class SwarmComponent implements OnInit, OnDestroy {
     return model + ' (' + asicCountPart + asicModel + ')';
   };
 
-  /**
-   * Fleet device classification (display only, no behavior change):
-   * - 'neuralaxe': the device reports the additive NeuralAxe identity fields
-   *   (productName) — it runs NeuralAxe OS;
-   * - 'compatible': a standard ESP-Miner/AxeOS device — fully controllable
-   *   from here, but NeuralAxe releases do not target it;
-   * - 'unsupported': reports a board other than 601 — NeuralAxe publishes no
-   *   release for it (this never implies e.g. board-702 support).
-   */
-  public deviceClass(axe: any): { kind: 'neuralaxe' | 'compatible' | 'unsupported'; label: string; tooltip: string } {
-    const board = String(axe?.boardVersion ?? '');
-    if (board && !board.startsWith('601')) {
-      return {
-        kind: 'unsupported',
-        label: `Board ${board}`,
-        tooltip: `Board ${board} is not a NeuralAxe release target (Gamma 601 only). The device remains controllable here as an AxeOS miner.`,
-      };
-    }
-    if (axe?.productName) {
-      return {
-        kind: 'neuralaxe',
-        label: 'NeuralAxe',
-        tooltip: `${axe.productName} ${axe.productVersion ?? ''}`.trim() + ' — NeuralAxe-managed device',
-      };
-    }
-    return {
-      kind: 'compatible',
-      label: 'AxeOS',
-      tooltip: 'Compatible ESP-Miner/AxeOS device (not running NeuralAxe OS)',
-    };
+  // ---- fleet-intel wrappers (pure, tested in fleet-intel.spec.ts) ----
+
+  public deviceClass(axe: FleetDevice): FleetClassification {
+    return classifyDevice(axe);
   }
 
+  public health(axe: FleetDevice): FleetHealth {
+    return deviceHealth(axe);
+  }
+
+  public healthDotClass(axe: FleetDevice): string {
+    switch (deviceHealth(axe).state) {
+      case 'healthy': return 'nx-health-dot nx-health-ok';
+      case 'attention': return 'nx-health-dot nx-health-warn';
+      case 'critical': return 'nx-health-dot nx-health-err';
+      case 'offline': return 'nx-health-dot nx-health-off';
+      default: return 'nx-health-dot nx-health-unknown';
+    }
+  }
+
+  public healthLabel(axe: FleetDevice): string {
+    switch (deviceHealth(axe).state) {
+      case 'healthy': return 'Healthy';
+      case 'attention': return 'Attention';
+      case 'critical': return 'Critical';
+      case 'offline': return 'Offline';
+      default: return 'Unknown';
+    }
+  }
+
+  public healthTooltip(axe: FleetDevice): string {
+    return deviceHealth(axe).reasons.join(' · ');
+  }
+
+  public online(axe: FleetDevice): boolean | null {
+    return deviceOnline(axe);
+  }
+
+  public lastSeen(axe: FleetDevice): string | null {
+    return lastSeenText(axe);
+  }
+
+  public efficiency(axe: FleetDevice): number | null {
+    return deviceEfficiency(axe);
+  }
+
+  public poolHost(axe: FleetDevice): string | null {
+    return activePoolHost(axe);
+  }
+
+  public hasPairMismatch(axe: FleetDevice): boolean {
+    return pairMismatch(axe);
+  }
+
+  get summary(): FleetSummary {
+    return fleetSummary(this.swarm);
+  }
+
+  /** `any[]` at the template boundary (house style for fleet rows). */
+  get filteredSwarm(): any[] {
+    return filterDevices(this.swarm, this.filters);
+  }
+
+  get poolOptions(): string[] {
+    return this.summary.pools.map(pool => pool.host);
+  }
+
+  get poolOptionItems(): Array<{ label: string; value: string }> {
+    return this.poolOptions.map(host => ({ label: host, value: host }));
+  }
+
+  public setFilter<K extends keyof FleetFilters>(key: K, value: FleetFilters[K]): void {
+    this.filters = { ...this.filters, [key]: value };
+    this.persistFilters();
+  }
+
+  public clearFilters(): void {
+    this.filters = { ...DEFAULT_FLEET_FILTERS };
+    this.persistFilters();
+  }
+
+  get filtersActive(): boolean {
+    return this.filters.text !== '' || this.filters.health !== 'all'
+      || this.filters.classification !== 'all' || this.filters.online !== 'all'
+      || this.filters.pool !== 'all';
+  }
+
+  private persistFilters(): void {
+    this.localStorageService.setObject(FLEET_FILTERS, this.filters);
+  }
+
+  public setDensity(density: 'comfortable' | 'compact'): void {
+    this.density = density;
+    this.localStorageService.setItem(FLEET_DENSITY, density);
+  }
+
+  public openDetail(axe: FleetDevice): void {
+    this.detailDevice = axe;
+  }
+
+  public closeDetail(): void {
+    this.detailDevice = null;
+  }
 
   public toggleGridView(gridView: boolean): void {
     this.localStorageService.setBool(SWARM_GRID_VIEW, this.gridView = gridView);
-  }
-
-  get sortOptions() {
-    return [
-      { label: 'Hostname', value: { sortField: 'hostname', sortDirection: 'desc' } },
-      { label: 'Hostname', value: { sortField: 'hostname', sortDirection: 'asc' } },
-      { label: 'IP', value: { sortField: 'IP', sortDirection: 'desc' } },
-      { label: 'IP', value: { sortField: 'IP', sortDirection: 'asc' } },
-      { label: 'Hashrate', value: { sortField: 'hashRate', sortDirection: 'desc' } },
-      { label: 'Hashrate', value: { sortField: 'hashRate', sortDirection: 'asc' } },
-      { label: 'Shares', value: { sortField: 'sharesAccepted', sortDirection: 'desc' } },
-      { label: 'Shares', value: { sortField: 'sharesAccepted', sortDirection: 'asc' } },
-      { label: 'Best Diff', value: { sortField: 'bestDiff', sortDirection: 'desc' } },
-      { label: 'Best Diff', value: { sortField: 'bestDiff', sortDirection: 'asc' } },
-      { label: 'Uptime', value: { sortField: 'uptimeSeconds', sortDirection: 'desc' } },
-      { label: 'Uptime', value: { sortField: 'uptimeSeconds', sortDirection: 'asc' } },
-      { label: 'Power', value: { sortField: 'power', sortDirection: 'desc' } },
-      { label: 'Power', value: { sortField: 'power', sortDirection: 'asc' } },
-      { label: 'Temp', value: { sortField: 'temp', sortDirection: 'desc' } },
-      { label: 'Temp', value: { sortField: 'temp', sortDirection: 'asc' } },
-      { label: 'Pool Diff', value: { sortField: 'poolDifficulty', sortDirection: 'desc' } },
-      { label: 'Pool Diff', value: { sortField: 'poolDifficulty', sortDirection: 'asc' } },
-      { label: 'Version', value: { sortField: 'version', sortDirection: 'desc' } },
-      { label: 'Version', value: { sortField: 'version', sortDirection: 'asc' } },
-    ];
-  }
-
-  onSortChange(event: {value: {sortField: string; sortDirection: 'asc' | 'desc'}}) {
-    const {sortField, sortDirection} = event.value;
-
-    this.sortBy(sortField, sortDirection);
-  }
-
-  get filteredSwarm() {
-    if (!this.filterText) {
-      return this.swarm;
-    }
-
-    const filter = this.filterText.toLowerCase();
-    return this.swarm.filter(axe =>
-      axe.hostname.toLowerCase().includes(filter) ||
-      axe.ASICModel.toLowerCase().includes(filter) ||
-      axe.deviceModel.toLowerCase().includes(filter) ||
-      axe.IP.includes(filter)
-    );
-  }
-
-  getDeviceNotification(axe: any): { color: string; msg: string } | undefined {
-    switch (true) {
-      case !!axe.miningPaused:
-        return { color: 'yellow', msg: 'Paused' };
-      case axe.overheat_mode === 1:
-        return { color: 'red', msg: 'Overheated' };
-      case !!axe.power_fault:
-        return { color: 'red', msg: 'Power Fault' };
-      case !axe.frequency || axe.frequency < 400:
-        return { color: 'orange', msg: 'Frequency Low' };
-      case axe.isUsingFallbackStratum === 1:
-        return { color: 'orange', msg: 'Fallback Pool' };
-      case axe.showNewBlock === 1:
-        return { color: 'green', msg: 'Block found' };
-      default:
-        return undefined;
-    }
   }
 
   isThisDevice(IP: string): boolean {

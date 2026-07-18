@@ -1,393 +1,329 @@
-<ng-template #noValue>--</ng-template>
+<ng-template #noValue><span class="nx-dim">—</span></ng-template>
 
 <div class="card">
-    <h2>Fleet</h2>
+    <h2>Fleet Command Center</h2>
 
     <p class="nx-page-desc">
-        Monitor and manage multiple miners on your local network from this device.
-        Scan the network or add devices by IP; totals are aggregated across all
-        reachable devices. NeuralAxe releases support the Gamma board 601 only —
-        other devices appear here as compatible AxeOS miners.
+        Monitor and manage the miners on your local network. Scan the network or add
+        devices by IP; values come only from what each device reports — nothing is
+        estimated. NeuralAxe releases support the Gamma board 601 only; other devices
+        appear as compatible AxeOS miners or unsupported targets.
     </p>
 
     <ng-container *ngIf="swarm.length; else noDevices">
-        <div class="grid">
-            <div class="col-6 xl:col-3" *ngFor="let metric of [
-                { label: 'Total Devices', value: swarm.length },
-                { label: 'Total Hashrate', value: totals.hashRate | hashSuffix},
-                { label: 'Total Power', value: (totals.power | number: '1.1-1')  + ' W' },
-                { label: 'Best Diff', value: totals.bestDiff | diffSuffix }
-            ]">
-                <div class="card flex flex-column mb-0">
-                    <span class="text-500 font-medium mb-3">{{metric.label}}</span>
-                    <div class="text-900 font-medium text-2xl">{{metric.value}}</div>
-                </div>
+
+        <!-- ===================== fleet summary bar (Stage 2) ===================== -->
+        <div class="nx-fleet-summary" *ngIf="summary as s">
+            <div class="nx-fleet-stat">
+                <label>Devices</label>
+                <b>{{ s.total }}</b>
+                <small>
+                    <span class="nx-ok-text">{{ s.online }} online</span>
+                    <span *ngIf="s.offline" class="nx-danger-text"> · {{ s.offline }} offline</span>
+                    <span *ngIf="s.pendingFirstContact" class="nx-dim"> · {{ s.pendingFirstContact }} pending</span>
+                </small>
+            </div>
+            <div class="nx-fleet-stat">
+                <label>Fleet Hashrate</label>
+                <b>{{ s.totalHashRate > 0 ? (s.totalHashRate | hashSuffix) : '—' }}</b>
+                <small class="nx-dim" *ngIf="s.hashRateDevices && s.hashRateDevices < s.online">from {{ s.hashRateDevices }} of {{ s.online }} online</small>
+                <small class="nx-dim" *ngIf="!s.hashRateDevices">no live data</small>
+            </div>
+            <div class="nx-fleet-stat">
+                <label>Fleet Power</label>
+                <b>{{ s.powerDevices ? (s.totalPower | number: '1.1-1') + ' W' : '—' }}</b>
+                <small class="nx-dim" *ngIf="s.powerDevices && s.powerDevices < s.online">from {{ s.powerDevices }} of {{ s.online }} online</small>
+                <small class="nx-dim" *ngIf="!s.powerDevices">no live data</small>
+            </div>
+            <div class="nx-fleet-stat">
+                <label>Fleet Efficiency</label>
+                <b>{{ s.efficiency !== null ? (s.efficiency | number: '1.1-1') + ' J/TH' : '—' }}</b>
+                <small class="nx-dim" *ngIf="s.efficiency === null">needs power + hashrate</small>
+            </div>
+            <div class="nx-fleet-stat">
+                <label>Managed</label>
+                <b>{{ s.neuralaxe }}</b>
+                <small class="nx-dim">NeuralAxe devices</small>
+            </div>
+            <div class="nx-fleet-stat">
+                <label>External</label>
+                <b>{{ s.compatible + s.unsupported }}</b>
+                <small class="nx-dim">{{ s.compatible }} AxeOS<span *ngIf="s.unsupported"> · {{ s.unsupported }} unsupported</span></small>
+            </div>
+            <div class="nx-fleet-stat">
+                <label>Alerts</label>
+                <b>
+                    <span [class.nx-warn-text]="s.attention > 0">{{ s.attention }}</span>
+                    <span class="nx-dim"> / </span>
+                    <span [class.nx-danger-text]="s.critical > 0">{{ s.critical }}</span>
+                </b>
+                <small class="nx-dim">attention / critical</small>
+            </div>
+            <div class="nx-fleet-stat" *ngIf="s.pools.length">
+                <label>Active Pools</label>
+                <b>{{ s.pools.length }}</b>
+                <small class="nx-ellipsis" sensitive-data>
+                    <ng-container *ngFor="let pool of s.pools; let last = last">{{ pool.host }} ({{ pool.devices }})<span *ngIf="!last"> · </span></ng-container>
+                </small>
             </div>
         </div>
 
-        <div class="mt-2 mb-3 gap-2 sm:gap-3 flex justify-content-end">
-            <div class="flex gap-2 sm:gap-3">
-                <div *ngIf="gridView && filteredSwarm.length">
-                    <ng-template #sortTemplate let-option>
-                        <span>{{option.label}}</span>
-                        <i class="pi pi-sort-{{option.value.sortDirection === 'asc' ? 'up' : 'down'}}-fill text-xs ml-2"></i>
-                    </ng-template>
-
-                    <p-dropdown
-                        [options]="sortOptions"
-                        [(ngModel)]="selectedSort"
-                        (onChange)="onSortChange($event)"
-                        optionLabel="label"
-                        optionValue="value"
-                        styleClass="w-10rem"
-                    >
-                        <ng-template let-option pTemplate="item">
-                            <ng-container *ngTemplateOutlet="sortTemplate; context: { $implicit: option }"></ng-container>
-                        </ng-template>
-
-                        <ng-template let-option pTemplate="selectedItem">
-                            <ng-container *ngTemplateOutlet="sortTemplate; context: { $implicit: option }"></ng-container>
-                        </ng-template>
-                    </p-dropdown>
-                </div>
-
-                <div class="w-full p-input-icon-left relative">
-                    <i class="pi pi-filter"></i>
-                    <input
-                        pInputText
-                        type="text"
-                        class="w-full sm:w-12rem lg:w-14rem pr-5"
-                        autocomplete="off"
-                        placeholder="Filter"
-                        [(ngModel)]="filterText" />
-                    <p-button
-                        icon="pi pi-times text-xs flex align-items-center justify-content-center"
-                        pp-button
-                        pTooltip="Clear"
-                        tooltipPosition="top"
-                        severity="secondary"
-                        styleClass="button-icon-small"
-                        class="absolute right-0 mt-2 mr-2"
-                        *ngIf="filterText"
-                        (click)="filterText = ''" />
-                </div>
-
-                <div class="flex align-items-center">
-                    <p-button
-                        icon="pi pi-list flex align-items-center justify-content-center"
-                        pp-button
-                        [ngClass]="gridView ? 'opacity-70' : ''"
-                        pTooltip="List View"
-                        tooltipPosition="top"
-                        (click)="toggleGridView(false)" />
-                    <p-button
-                        icon="pi pi-th-large flex align-items-center justify-content-center"
-                        pp-button
-                        [ngClass]="gridView ? '' : 'opacity-70'"
-                        pTooltip="Grid View"
-                        tooltipPosition="top"
-                        (click)="toggleGridView(true)" />
-                </div>
+        <!-- ===================== toolbar (Stage 7) ===================== -->
+        <div class="nx-fleet-toolbar">
+            <div class="p-input-icon-left nx-fleet-search">
+                <i class="pi pi-search"></i>
+                <input pInputText type="text" autocomplete="off"
+                    placeholder="Search hostname, model, board, IP"
+                    [ngModel]="filters.text"
+                    (ngModelChange)="setFilter('text', $event)" />
             </div>
+
+            <p-dropdown styleClass="nx-fleet-filter" [ngModel]="filters.health"
+                (ngModelChange)="setFilter('health', $event)"
+                [options]="[
+                    { label: 'Health: all', value: 'all' },
+                    { label: 'Healthy', value: 'healthy' },
+                    { label: 'Attention', value: 'attention' },
+                    { label: 'Critical', value: 'critical' },
+                    { label: 'Offline', value: 'offline' },
+                    { label: 'Unknown', value: 'unknown' }
+                ]"></p-dropdown>
+
+            <p-dropdown styleClass="nx-fleet-filter" [ngModel]="filters.classification"
+                (ngModelChange)="setFilter('classification', $event)"
+                [options]="[
+                    { label: 'Type: all', value: 'all' },
+                    { label: 'NeuralAxe managed', value: 'neuralaxe' },
+                    { label: 'AxeOS compatible', value: 'compatible' },
+                    { label: 'Unsupported target', value: 'unsupported' },
+                    { label: 'Unknown', value: 'unknown' }
+                ]"></p-dropdown>
+
+            <p-dropdown styleClass="nx-fleet-filter" [ngModel]="filters.online"
+                (ngModelChange)="setFilter('online', $event)"
+                [options]="[
+                    { label: 'State: all', value: 'all' },
+                    { label: 'Online', value: 'online' },
+                    { label: 'Offline', value: 'offline' }
+                ]"></p-dropdown>
+
+            <p-dropdown *ngIf="poolOptions.length > 1" styleClass="nx-fleet-filter" [ngModel]="filters.pool"
+                (ngModelChange)="setFilter('pool', $event)"
+                [options]="[{ label: 'Pool: all', value: 'all' }].concat(poolOptionItems)"></p-dropdown>
+
+            <button *ngIf="filtersActive" pButton type="button"
+                class="p-button-sm p-button-secondary" (click)="clearFilters()">Clear filters</button>
+
+            <span class="flex-grow-1"></span>
+
+            <div class="nx-fleet-toolbar-group" role="group" aria-label="Density">
+                <button pButton type="button" class="p-button-sm"
+                    [class.p-button-secondary]="density !== 'comfortable'"
+                    [attr.aria-pressed]="density === 'comfortable'"
+                    (click)="setDensity('comfortable')">Comfortable</button>
+                <button pButton type="button" class="p-button-sm"
+                    [class.p-button-secondary]="density !== 'compact'"
+                    [attr.aria-pressed]="density === 'compact'"
+                    (click)="setDensity('compact')">Compact</button>
+            </div>
+
+            <div class="nx-fleet-toolbar-group nx-fleet-viewtoggle" role="group" aria-label="View">
+                <button pButton type="button" class="p-button-sm" icon="pi pi-list" pTooltip="Table view"
+                    [class.p-button-secondary]="gridView"
+                    [attr.aria-pressed]="!gridView"
+                    aria-label="Table view"
+                    (click)="toggleGridView(false)"></button>
+                <button pButton type="button" class="p-button-sm" icon="pi pi-th-large" pTooltip="Card view"
+                    [class.p-button-secondary]="!gridView"
+                    [attr.aria-pressed]="gridView"
+                    aria-label="Card view"
+                    (click)="toggleGridView(true)"></button>
+            </div>
+        </div>
+
+        <div *ngIf="isRefreshing" class="nx-dim text-sm mb-2" role="status">
+            <i class="pi pi-spin pi-spinner mr-1"></i>Refreshing fleet telemetry…
         </div>
 
         <ng-container *ngIf="filteredSwarm.length; else noFilterResults">
-            <div class="grid" *ngIf="gridView">
-                <div class="col-12 sm:col-6 xl:col-{{staticMenuDesktopInactive ? 3 : 4}}" *ngFor="let axe of filteredSwarm">
-                    <div class="card flex justify-content-between mb-0 h-full">
-                        <div class="flex flex-column justify-content-between">
-                            <div class="flex flex-column">
-                                <div class="flex flex-column">
-                                    <div class="white-space-nowrap">
-                                        <a [href]="'http://' + axe.IP" target="_blank" class="text-900" pTooltip="Hostname" tooltipPosition="top">
-                                            <span sensitive-data>{{axe.hostname}}</span>
-                                        </a>
-                                        <span class="ml-1 text-lg line-height-1 cursor-pointer" [ngStyle]="{color: axe.swarmColor}" pTooltip="{{stringifyDeviceLabel(axe)}}" tooltipPosition="top">
-                                            ●
-                                        </span>
-                                    </div>
-                                    <div class="white-space-nowrap mt-1" *ngIf="deviceClass(axe) as cls">
-                                        <span class="nx-pill"
-                                            [ngClass]="{'nx-pill-ok': cls.kind === 'neuralaxe', 'nx-pill-warn': cls.kind === 'unsupported'}"
-                                            [pTooltip]="cls.tooltip" tooltipPosition="top">{{ cls.label }}</span>
-                                    </div>
-                                    <div class="white-space-nowrap">
-                                        <a [href]="'http://' + axe.IP" target="_blank" class="text-800" pTooltip="IP" tooltipPosition="top">
-                                            <span sensitive-data>{{axe.IP}}</span>
-                                        </a>
-                                        <span *ngIf="isThisDevice(axe.IP)" class="ml-1 cursor-pointer" pTooltip="This device" tooltipPosition="top">
-                                            <i class="pi pi-star-fill text-xs"></i>
-                                        </span>
-                                    </div>
-                                </div>
-                                <span class="text-500 cursor-pointer" pTooltip="Version" tooltipPosition="top">
-                                    {{axe.version}}
-                                </span>
-                                <span class="text-500 cursor-pointer" pTooltip="Uptime: {{axe.uptimeSeconds | dateAgo}}" tooltipPosition="top">
-                                    {{axe.uptimeSeconds | dateAgo: {intervals: 1} }}
-                                </span>
-                            </div>
-                            <div class="flex align-items-center mb-1 gap-3 md:gap-2">
-                                <p-button
-                                    icon="pi pi-pencil text-sm"
-                                    pp-button
-                                    pTooltip="Edit"
-                                    tooltipPosition="top"
-                                    severity="secondary"
-                                    class="inline-block"
-                                    styleClass="button-icon-small"
-                                    (click)="edit(axe)" />
-                                <p-button
-                                    [icon]="'pi text-sm ' + (axe.miningPaused ? 'pi-play-circle' : 'pi-pause-circle')"
-                                    pp-button
-                                    [pTooltip]="axe.miningPaused ? 'Resume Mining' : 'Pause Mining'"
-                                    tooltipPosition="top"
-                                    severity="secondary"
-                                    class="inline-block"
-                                    styleClass="button-icon-small"
-                                    (click)="postAction(axe, axe.miningPaused ? 'resume' : 'pause')" />
-                                <p-button
-                                    icon="pi pi-refresh text-sm"
-                                    pp-button
-                                    pTooltip="Restart"
-                                    tooltipPosition="top"
-                                    severity="secondary"
-                                    class="inline-block"
-                                    styleClass="button-icon-small"
-                                    (click)="postAction(axe, 'restart')" />
-                                <p-button
-                                    icon="pi pi-lightbulb text-sm"
-                                    pp-button
-                                    pTooltip="Identify"
-                                    tooltipPosition="top"
-                                    ariaLabel="Identify device"
-                                    severity="secondary"
-                                    class="inline-block"
-                                    styleClass="button-icon-small"
-                                    (click)="postAction(axe, 'identify')" />
-                                <p-button
-                                    icon="pi pi-trash text-sm"
-                                    pp-button
-                                    pTooltip="Remove from fleet list (does not affect the device itself)"
-                                    tooltipPosition="top"
-                                    ariaLabel="Remove device from list"
-                                    severity="danger"
-                                    class="inline-block ml-2 nx-destructive-action"
-                                    styleClass="button-icon-small p-button-outlined p-button-danger"
-                                    (click)="remove(axe)" />
-                                <i
-                                    *ngIf="getDeviceNotification(axe) as notification"
-                                    class="pi pi-exclamation-triangle cursor-pointer text-lg"
-                                    pTooltip="{{ notification.msg }}"
-                                    tooltipPosition="top"
-                                    [ngClass]="'text-' + notification.color + '-500'"></i>
-                            </div>
-                        </div>
-                        <div class="flex flex-column text-right white-space-nowrap cursor-pointer">
-                            <span pTooltip="Hashrate" tooltipPosition="top">
-                                {{axe.hashRate | hashSuffix}}
-                            </span>
-                            <div>
-                                <span class="text-500 cursor-pointer mr-2" pTooltip="Shares Rejected" tooltipPosition="top">
-                                    {{axe.sharesRejected | number: '1.0-0'}}
-                                </span>
-                                <span class="cursor-pointer" pTooltip="Shares Accepted" tooltipPosition="top">
-                                    {{axe.sharesAccepted | number: '1.0-0'}}
-                                </span>
-                            </div>
-                            <div>
-                                <span class="text-500 cursor-pointer mr-2" pTooltip="Best Session Diff" tooltipPosition="top">
-                                    {{axe.bestSessionDiff | diffSuffix}}
-                                </span>
-                                <span class="cursor-pointer" pTooltip="Best Diff" tooltipPosition="top">
-                                    {{axe.bestDiff | diffSuffix}}
-                                </span>
-                            </div>
-                            <div>
-                                <span *ngIf="axe.vrTemp" class="text-500 cursor-pointer mr-2" [ngClass]="{'text-red-500': axe.vrTemp > 105}" pTooltip="Voltage Regulator Temperature" tooltipPosition="top">
-                                    {{axe.vrTemp | number: '1.0-1'}} °C
-                                </span>
-                                <span *ngIf="axe.temp2 > 0" class="cursor-pointer mr-2" [ngClass]="{'text-red-500': axe.temp2 > 70}" pTooltip="ASIC Temperature 2" tooltipPosition="top">
-                                    {{axe.temp2 | number: '1.0-1'}} °C
-                                </span>
-                                <span class="cursor-pointer" [ngClass]="{'text-red-500': axe.temp > 70}" pTooltip="ASIC Temperature{{ axe.temp2 > 0 ? ' 1' : '' }}" tooltipPosition="top">
-                                    <ng-container *ngIf="axe.temp > 0; else noValue">
-                                        {{axe.temp | number: '1.0-1'}} °C
-                                    </ng-container>
-                                </span>
-                            </div>
-                            <span class="cursor-pointer" pTooltip="Power" tooltipPosition="top">
-                                {{axe.power | number: '1.1-1'}} W
-                            </span>
-                            <span class="cursor-pointer" pTooltip="Pool Diff" tooltipPosition="top">
-                                {{axe.poolDifficulty}}
-                            </span>
-                        </div>
-                    </div>
-                </div>
-            </div>
 
-            <div class="card overflow-x-auto" *ngIf="!gridView">
-                <table class="w-full">
+            <!-- ===================== desktop table (Stage 4) ===================== -->
+            <div class="nx-fleet-tablewrap" [class.nx-density-compact]="density === 'compact'" *ngIf="!gridView">
+                <table class="nx-fleet-table" aria-label="Fleet devices">
                     <thead>
                         <tr>
                             <th *ngFor="let field of [
-                                { label: 'Hostname', name: 'hostname' },
-                                { label: 'IP', name: 'IP' },
+                                { label: 'Health', name: 'health' },
+                                { label: 'Device', name: 'hostname' },
                                 { label: 'Hashrate', name: 'hashRate' },
-                                { label: 'Shares', name: 'sharesAccepted' },
-                                { label: 'Best Diff', name: 'bestDiff' },
+                                { label: 'Efficiency', name: 'efficiency' },
+                                { label: 'Errors', name: 'errorPercentage' },
+                                { label: 'Thermal', name: 'temp' },
+                                { label: 'Mining', name: 'sharesAccepted' },
                                 { label: 'Uptime', name: 'uptimeSeconds' },
-                                { label: 'Power', name: 'power' },
-                                { label: 'Temp', name: 'temp' },
-                                { label: 'Pool Diff', name: 'poolDifficulty' },
-                                { label: 'Version', name: 'version' },
-                            ]" class="text-500 font-medium">
-                                <div class="flex align-items-center cursor-pointer select-none relative" (click)="sortBy(field.name)">
-                                    <span class="pr-3">{{field.label}}</span>
-                                    <i class="pi text-xs absolute right-0" [ngClass]="{
+                                { label: 'Software', name: 'version' }
+                            ]" scope="col">
+                                <button type="button" class="nx-fleet-sort" (click)="sortBy($any(field.name))">
+                                    {{ field.label }}
+                                    <i class="pi text-xs" [ngClass]="{
                                         'pi-sort-up-fill': selectedSort.sortField === field.name && selectedSort.sortDirection === 'asc',
                                         'pi-sort-down-fill': selectedSort.sortField === field.name && selectedSort.sortDirection === 'desc'
                                     }"></i>
-                                </div>
+                                </button>
                             </th>
-                            <th></th>
+                            <th scope="col" class="nx-fleet-actions-col">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <tr *ngFor="let axe of filteredSwarm">
+                        <tr *ngFor="let axe of filteredSwarm" (click)="openDetail(axe)" (keydown.enter)="openDetail(axe)"
+                            tabindex="0" class="nx-fleet-row" [attr.aria-label]="'Details for ' + axe.hostname">
                             <td>
-                                <a [href]="'http://' + axe.IP" target="_blank">
-                                    <span class="text-900" sensitive-data>{{axe.hostname}}</span>
-                                    <span class="ml-2 text-lg line-height-1 cursor-pointer" [ngStyle]="{color: axe.swarmColor}" pTooltip="{{stringifyDeviceLabel(axe)}}" tooltipPosition="top">●</span>
-                                </a>
-                                <div class="mt-1" *ngIf="deviceClass(axe) as cls">
-                                    <span class="nx-pill"
-                                        [ngClass]="{'nx-pill-ok': cls.kind === 'neuralaxe', 'nx-pill-warn': cls.kind === 'unsupported'}"
-                                        [pTooltip]="cls.tooltip" tooltipPosition="top">{{ cls.label }}</span>
-                                </div>
-                                <div *ngIf="getDeviceNotification(axe) as notification" class="flex align-items-center gap-1" [ngClass]="'text-' + notification.color + '-500'">
-                                    <i class="pi pi-exclamation-triangle"></i>
-                                    <span class="text-sm">{{ notification.msg }}</span>
-                                </div>
-                            </td>
-                            <td>
-                                <a [href]="'http://' + axe.IP" target="_blank" class="text-800"><span sensitive-data>{{axe.IP}}</span></a>
-                                <span *ngIf="isThisDevice(axe.IP)" class="ml-2 cursor-pointer" pTooltip="This device" tooltipPosition="top">
-                                    <i class="pi pi-star-fill text-xs"></i>
+                                <span class="nx-fleet-health">
+                                    <span [class]="healthDotClass(axe)" aria-hidden="true"></span>
+                                    <span [pTooltip]="healthTooltip(axe)" tooltipPosition="top">{{ healthLabel(axe) }}</span>
                                 </span>
-                            </td>
-                            <td>{{axe.hashRate | hashSuffix}}</td>
-                            <td>
-                                <p class="cursor-pointer m-0" pTooltip="Shares Accepted" tooltipPosition="top">
-                                    {{axe.sharesAccepted | number: '1.0-0'}}
-                                </p>
-                                <p class="text-500 cursor-pointer m-0" pTooltip="Shares Rejected" tooltipPosition="top">
-                                    {{axe.sharesRejected | number: '1.0-0'}}
-                                </p>
+                                <div *ngIf="online(axe) === false && lastSeen(axe) as seen" class="nx-dim text-xs">seen {{ seen }}</div>
                             </td>
                             <td>
-                                <p class="cursor-pointer m-0" pTooltip="Best Diff" tooltipPosition="top">
-                                    {{axe.bestDiff | diffSuffix}}
-                                </p>
-                                <p class="text-500 cursor-pointer m-0" pTooltip="Best Session Diff" tooltipPosition="top">
-                                    {{axe.bestSessionDiff | diffSuffix}}
-                                </p>
+                                <div class="nx-fleet-ident">
+                                    <span class="text-color nx-ellipsis" sensitive-data>{{ axe.hostname || '—' }}</span>
+                                    <i *ngIf="isThisDevice(axe.IP)" class="pi pi-star-fill text-xs" pTooltip="This device"></i>
+                                </div>
+                                <div class="nx-dim text-xs nx-ellipsis" [pTooltip]="stringifyDeviceLabel(axe)">{{ stringifyDeviceLabel(axe) }}</div>
+                                <div class="nx-dim text-xs"><a [href]="'http://' + axe.IP" target="_blank" (click)="$event.stopPropagation()" class="nx-dim"><span sensitive-data>{{ axe.IP }}</span></a></div>
+                                <span class="nx-pill nx-pill-tight" *ngIf="deviceClass(axe) as cls"
+                                    [ngClass]="{'nx-pill-ok': cls.kind === 'neuralaxe', 'nx-pill-warn': cls.kind === 'unsupported'}"
+                                    [pTooltip]="cls.tooltip" tooltipPosition="top">{{ cls.label }}</span>
                             </td>
-                            <td class="cursor-pointer" pTooltip="Uptime: {{axe.uptimeSeconds | dateAgo}}" tooltipPosition="top">
-                                {{axe.uptimeSeconds | dateAgo: {intervals: 1} }}
-                            </td>
-                            <td>{{axe.power | number: '1.1-1'}} W</td>
                             <td>
-                                <p class="cursor-pointer m-0" [ngClass]="{'text-red-500': axe.temp > 70}" pTooltip="ASIC Temperature{{ axe.temp2 > 0 ? ' 1' : '' }}" tooltipPosition="top">
-                                    <ng-container *ngIf="axe.temp > 0; else noValue">
-                                        {{axe.temp | number: '1.0-1'}} °C
-                                    </ng-container>
-                                </p>
-                                <p *ngIf="axe.temp2 > 0" class="cursor-pointer m-0" [ngClass]="{'text-red-500': axe.temp2 > 70}" pTooltip="ASIC Temperature 2" tooltipPosition="top">
-                                    {{axe.temp2 | number: '1.0-1'}} °C
-                                </p>
-                                <p *ngIf="axe.vrTemp" class="text-500 cursor-pointer m-0" [ngClass]="{'text-red-500': axe.vrTemp > 105}" pTooltip="Voltage Regulator Temperature" tooltipPosition="top">
-                                    {{axe.vrTemp | number: '1.0-1'}} °C
-                                </p>
+                                <b>{{ (axe.hashRate > 0) ? (axe.hashRate | hashSuffix) : '—' }}</b>
+                                <div class="nx-dim text-xs" *ngIf="axe.expectedHashrate > 0">exp {{ axe.expectedHashrate | hashSuffix }}</div>
+                                <div class="nx-dim text-xs" *ngIf="axe.power > 0">{{ axe.power | number: '1.1-1' }} W</div>
                             </td>
-                            <td>{{axe.poolDifficulty}}</td>
-                            <td>{{axe.version}}</td>
-                            <td class="flex align-items-center mb-1 gap-3 md:gap-2">
-                                <p-button
-                                    icon="pi pi-pencil"
-                                    pp-button
-                                    pTooltip="Edit"
-                                    tooltipPosition="top"
-                                    severity="secondary"
-                                    class="inline-block"
-                                    styleClass="button-icon"
-                                    (click)="edit(axe)" />
-                                <p-button
+                            <td>
+                                <ng-container *ngIf="efficiency(axe) as eff; else noValue">{{ eff | number: '1.1-1' }} <span class="nx-dim">J/TH</span></ng-container>
+                            </td>
+                            <td>
+                                <ng-container *ngIf="axe.errorPercentage !== undefined && axe.errorPercentage !== null; else noValue">
+                                    <span [class.nx-warn-text]="axe.errorPercentage > 2">{{ axe.errorPercentage | number: '1.1-2' }} %</span>
+                                </ng-container>
+                            </td>
+                            <td>
+                                <span *ngIf="axe.temp > 0; else noValue"
+                                    [class.nx-warn-text]="axe.temp >= 65 && axe.temp < 70"
+                                    [class.nx-danger-text]="axe.temp >= 70">{{ axe.temp | number: '1.0-0' }} °C</span>
+                                <div class="nx-dim text-xs" *ngIf="axe.vrTemp > 0">VRM {{ axe.vrTemp | number: '1.0-0' }} °C</div>
+                                <div class="nx-dim text-xs" *ngIf="axe.fanspeed !== undefined && axe.fanspeed !== null">
+                                    fan {{ axe.fanspeed | number: '1.0-0' }} %<span *ngIf="axe.fanrpm > 0"> · {{ axe.fanrpm | number: '1.0-0' }} RPM</span>
+                                </div>
+                                <div class="nx-dim text-xs" *ngIf="axe.thermalControlMode">{{ axe.thermalControlMode }}</div>
+                            </td>
+                            <td>
+                                <div class="nx-ellipsis" *ngIf="poolHost(axe) as pool; else noValue"><span sensitive-data>{{ pool }}</span></div>
+                                <div class="nx-dim text-xs">
+                                    {{ axe.sharesAccepted | number: '1.0-0' }} acc<span *ngIf="axe.sharesRejected > 0" class="nx-warn-text"> · {{ axe.sharesRejected | number: '1.0-0' }} rej</span>
+                                </div>
+                                <div class="nx-dim text-xs" *ngIf="axe.responseTime > 0">{{ fmt.latency(axe.responseTime) }}</div>
+                            </td>
+                            <td>
+                                <ng-container *ngIf="axe.uptimeSeconds > 0; else noValue">{{ axe.uptimeSeconds | dateAgo: {intervals: 1} }}</ng-container>
+                            </td>
+                            <td>
+                                <div class="nx-ellipsis" [pTooltip]="axe.version">{{ axe.version || '—' }}</div>
+                                <div class="nx-dim text-xs nx-ellipsis" *ngIf="axe.axeOSVersion" [pTooltip]="'Web: ' + axe.axeOSVersion">web {{ axe.axeOSVersion }}</div>
+                                <span *ngIf="hasPairMismatch(axe)" class="nx-pill nx-pill-warn nx-pill-tight"
+                                    pTooltip="Firmware and web revisions differ (may be a boot snapshot — a restart refreshes it)">pair differs</span>
+                            </td>
+                            <td class="nx-fleet-actions" (click)="$event.stopPropagation()" (keydown.enter)="$event.stopPropagation()">
+                                <button pButton type="button" class="p-button-sm p-button-secondary" icon="pi pi-search-plus"
+                                    pTooltip="Details" aria-label="Open device details" (click)="openDetail(axe)"></button>
+                                <button pButton type="button" class="p-button-sm p-button-secondary" icon="pi pi-pencil"
+                                    pTooltip="Settings" aria-label="Edit device settings" (click)="edit(axe)"></button>
+                                <button pButton type="button" class="p-button-sm p-button-secondary"
                                     [icon]="'pi ' + (axe.miningPaused ? 'pi-play-circle' : 'pi-pause-circle')"
-                                    pp-button
-                                    [pTooltip]="axe.miningPaused ? 'Resume Mining' : 'Pause Mining'"
-                                    tooltipPosition="top"
-                                    severity="secondary"
-                                    class="inline-block"
-                                    styleClass="button-icon"
-                                    (click)="postAction(axe, axe.miningPaused ? 'resume' : 'pause')" />
-                                <p-button
-                                    icon="pi pi-refresh"
-                                    pp-button
-                                    pTooltip="Restart"
-                                    tooltipPosition="top"
-                                    severity="secondary"
-                                    styleClass="button-icon"
-                                    class="inline-block"
-                                    (click)="postAction(axe, 'restart')" />
-                                <p-button
-                                    icon="pi pi-lightbulb"
-                                    pp-button
-                                    pTooltip="Identify"
-                                    tooltipPosition="top"
-                                    ariaLabel="Identify device"
-                                    severity="secondary"
-                                    class="inline-block"
-                                    styleClass="button-icon"
-                                    (click)="postAction(axe, 'identify')" />
-                                <p-button
-                                    icon="pi pi-trash"
-                                    pp-button
-                                    pTooltip="Remove from fleet list (does not affect the device itself)"
-                                    tooltipPosition="top"
-                                    ariaLabel="Remove device from list"
-                                    severity="danger"
-                                    class="inline-block ml-2 nx-destructive-action"
-                                    styleClass="button-icon p-button-outlined p-button-danger"
-                                    (click)="remove(axe)" />
+                                    [pTooltip]="axe.miningPaused ? 'Resume mining' : 'Pause mining'"
+                                    [attr.aria-label]="axe.miningPaused ? 'Resume mining' : 'Pause mining'"
+                                    (click)="postAction(axe, axe.miningPaused ? 'resume' : 'pause')"></button>
+                                <button pButton type="button" class="p-button-sm p-button-secondary" icon="pi pi-refresh"
+                                    pTooltip="Restart device (asks for confirmation)" aria-label="Restart device"
+                                    (click)="confirmRestart(axe)"></button>
+                                <button pButton type="button" class="p-button-sm p-button-secondary" icon="pi pi-lightbulb"
+                                    pTooltip="Identify (device says Hi)" aria-label="Identify device"
+                                    (click)="postAction(axe, 'identify')"></button>
+                                <button pButton type="button" class="p-button-sm p-button-outlined p-button-danger nx-fleet-remove" icon="pi pi-trash"
+                                    pTooltip="Remove from this list (asks for confirmation; does not affect the device)"
+                                    aria-label="Remove device from list" (click)="confirmRemove(axe)"></button>
                             </td>
                         </tr>
                     </tbody>
                 </table>
             </div>
 
-            <div class="flex flex-wrap gap-2 mt-3 text-sm justify-content-center">
-                <div *ngFor="let item of deviceFamilies" class="flex align-items-center gap-1">
-                    <span [ngStyle]="{color: item.swarmColor}">●</span>
-                    <span class="text-500">{{stringifyDeviceLabel(item)}}</span>
+            <!-- ===================== cards (Stage 8 mobile + optional desktop grid) ===================== -->
+            <div class="nx-fleet-cards" [class.nx-fleet-cards-forced]="gridView">
+                <div class="nx-fleet-card" *ngFor="let axe of filteredSwarm"
+                    [class.nx-fleet-card-critical]="health(axe).state === 'critical'"
+                    [class.nx-fleet-card-offline]="health(axe).state === 'offline'">
+                    <div class="nx-fleet-card-head">
+                        <span [class]="healthDotClass(axe)" aria-hidden="true"></span>
+                        <div class="nx-fleet-card-title">
+                            <b class="nx-ellipsis" sensitive-data>{{ axe.hostname || '—' }}</b>
+                            <small class="nx-dim nx-ellipsis">{{ stringifyDeviceLabel(axe) }}</small>
+                        </div>
+                        <span class="nx-pill nx-pill-tight" *ngIf="deviceClass(axe) as cls"
+                            [ngClass]="{'nx-pill-ok': cls.kind === 'neuralaxe', 'nx-pill-warn': cls.kind === 'unsupported'}">{{ cls.label }}</span>
+                    </div>
+
+                    <div class="nx-fleet-card-alert nx-warn-text" *ngIf="health(axe).state === 'attention'">{{ health(axe).reasons[0] }}</div>
+                    <div class="nx-fleet-card-alert nx-danger-text" *ngIf="health(axe).state === 'critical'">{{ health(axe).reasons[0] }}</div>
+                    <div class="nx-fleet-card-alert nx-dim" *ngIf="health(axe).state === 'offline'">
+                        Unreachable<span *ngIf="lastSeen(axe) as seen"> — last seen {{ seen }}</span>
+                    </div>
+
+                    <div class="nx-fleet-card-grid">
+                        <div><label>Hashrate</label><b>{{ (axe.hashRate > 0) ? (axe.hashRate | hashSuffix) : '—' }}</b></div>
+                        <div><label>ASIC</label><b><span *ngIf="axe.temp > 0; else noValue" [class.nx-danger-text]="axe.temp >= 70">{{ axe.temp | number: '1.0-0' }} °C</span></b></div>
+                        <div><label>Power</label><b>{{ (axe.power > 0) ? (axe.power | number: '1.1-1') + ' W' : '—' }}</b></div>
+                        <div><label>Efficiency</label><b><ng-container *ngIf="efficiency(axe) as eff; else noValue">{{ eff | number: '1.1-1' }} J/TH</ng-container></b></div>
+                    </div>
+                    <div class="nx-fleet-card-pool nx-dim nx-ellipsis" *ngIf="poolHost(axe) as pool"><span sensitive-data>{{ pool }}</span></div>
+
+                    <div class="nx-fleet-card-actions">
+                        <button pButton type="button" class="p-button-sm p-button-secondary w-full" (click)="openDetail(axe)">Details</button>
+                    </div>
                 </div>
             </div>
         </ng-container>
     </ng-container>
 
+    <!-- ===================== states (Stage 9) ===================== -->
     <ng-template #noFilterResults>
-        <div class="text-500 text-center w-full pt-5">
-            No matches found
+        <div class="nx-fleet-state">
+            <i class="pi pi-filter-slash text-2xl nx-dim"></i>
+            <p>No devices match the current filters.</p>
+            <button pButton type="button" class="p-button-sm p-button-secondary" (click)="clearFilters()">Clear filters</button>
         </div>
     </ng-template>
 
     <ng-template #noDevices>
-        <p class="text-500 text-center pt-5">
-            Scan your network for devices or add a device manually by using its IP address.
-        </p>
+        <div class="nx-fleet-state" *ngIf="scanning">
+            <i class="pi pi-spin pi-spinner text-2xl"></i>
+            <p>Scanning the local network for miners…</p>
+            <small class="nx-dim">Every address in this /24 subnet is probed once; this takes a moment.</small>
+        </div>
+        <div class="nx-fleet-state" *ngIf="!scanning && hasCompletedFirstLoad">
+            <i class="pi pi-inbox text-2xl nx-dim"></i>
+            <p>No miners found on this subnet.</p>
+            <small class="nx-dim">Scan again, or add a device manually by its IP address below.</small>
+        </div>
+        <div class="nx-fleet-state" *ngIf="!scanning && !hasCompletedFirstLoad">
+            <i class="pi pi-inbox text-2xl nx-dim"></i>
+            <p>No devices yet.</p>
+            <small class="nx-dim">Scan your network for miners or add a device by IP.</small>
+        </div>
     </ng-template>
 
+    <!-- ===================== scan / refresh / add controls (existing behavior) ===================== -->
     <form *ngIf="form" [formGroup]="form" class="card flex flex-column md:flex-row gap-3 mt-5">
         <button pButton (click)="scanNetwork()" [disabled]="scanning" class="white-space-nowrap w-full md:w-auto block text-center button-text">
             {{scanning ? 'Scanning...' : 'Auto Scan'}}
@@ -412,7 +348,163 @@
         </div>
     </form>
 
-    <app-modal [headline]="selectedAxeOs?.IP">
+    <!-- ===================== detail drawer (Stage 5) ===================== -->
+    <div class="nx-fleet-drawer-backdrop" *ngIf="detailDevice" (click)="closeDetail()"></div>
+    <aside class="nx-fleet-drawer" *ngIf="detailDevice as axe" role="dialog" aria-modal="true"
+        [attr.aria-label]="'Device details for ' + axe.hostname">
+        <div class="nx-fleet-drawer-head">
+            <span [class]="healthDotClass(axe)" aria-hidden="true"></span>
+            <div class="nx-fleet-drawer-title">
+                <b sensitive-data>{{ axe.hostname || '—' }}</b>
+                <small class="nx-dim">{{ stringifyDeviceLabel(axe) }}</small>
+            </div>
+            <button pButton type="button" class="p-button-sm p-button-secondary" icon="pi pi-times"
+                aria-label="Close details" (click)="closeDetail()"></button>
+        </div>
+
+        <div class="nx-fleet-drawer-body">
+            <div class="nx-note nx-note-warn" *ngIf="deviceClass(axe).kind === 'unsupported'">
+                {{ deviceClass(axe).tooltip }}
+            </div>
+            <div class="nx-note" *ngIf="health(axe) as h">
+                <b>{{ healthLabel(axe) }}.</b> {{ h.reasons.join(' · ') }}
+            </div>
+
+            <div class="nx-subtitle">Overview</div>
+            <div class="nx-kv">
+                <div class="nx-kv-row"><label>Classification</label><b>{{ deviceClass(axe).label }}</b></div>
+                <div class="nx-kv-row"><label>State</label>
+                    <b>
+                        <ng-container [ngSwitch]="online(axe)">
+                            <span *ngSwitchCase="true" class="nx-ok-text">Online</span>
+                            <span *ngSwitchCase="false" class="nx-danger-text">Offline<ng-container *ngIf="lastSeen(axe) as seen"> — last seen {{ seen }}</ng-container></span>
+                            <span *ngSwitchDefault class="nx-dim">Not refreshed yet</span>
+                        </ng-container>
+                    </b>
+                </div>
+                <div class="nx-kv-row"><label>IP</label><b><span sensitive-data>{{ axe.IP }}</span></b></div>
+                <div class="nx-kv-row"><label>Board</label><b>{{ axe.boardVersion || '—' }}</b></div>
+                <div class="nx-kv-row"><label>ASIC</label><b>{{ (axe.asicCount > 1 ? axe.asicCount + 'x ' : '') + (axe.ASICModel || '—') }}</b></div>
+                <div class="nx-kv-row"><label>Uptime</label><b><ng-container *ngIf="axe.uptimeSeconds > 0; else noValue">{{ axe.uptimeSeconds | dateAgo }}</ng-container></b></div>
+            </div>
+
+            <div class="nx-subtitle">Performance</div>
+            <div class="nx-kv">
+                <div class="nx-kv-row"><label>Hashrate</label><b>{{ (axe.hashRate > 0) ? (axe.hashRate | hashSuffix) : '—' }}</b></div>
+                <div class="nx-kv-row" *ngIf="axe.expectedHashrate > 0"><label>Expected</label><b>{{ axe.expectedHashrate | hashSuffix }}</b></div>
+                <div class="nx-kv-row"><label>Power</label><b>{{ (axe.power > 0) ? (axe.power | number: '1.1-1') + ' W' : '—' }}</b></div>
+                <div class="nx-kv-row"><label>Efficiency</label><b><ng-container *ngIf="efficiency(axe) as eff; else noValue">{{ eff | number: '1.1-1' }} J/TH</ng-container></b></div>
+                <div class="nx-kv-row" *ngIf="axe.errorPercentage !== undefined && axe.errorPercentage !== null"><label>ASIC Errors</label>
+                    <b [class.nx-warn-text]="axe.errorPercentage > 2">{{ axe.errorPercentage | number: '1.1-2' }} %</b></div>
+                <div class="nx-kv-row"><label>Shares</label>
+                    <b>{{ axe.sharesAccepted | number: '1.0-0' }} acc<span *ngIf="axe.sharesRejected > 0" class="nx-warn-text"> / {{ axe.sharesRejected | number: '1.0-0' }} rej</span></b></div>
+                <div class="nx-kv-row" *ngIf="axe.bestDiff > 0"><label>Best Diff</label><b>{{ axe.bestDiff | diffSuffix }}</b></div>
+            </div>
+
+            <div class="nx-subtitle">Thermal</div>
+            <div class="nx-kv">
+                <div class="nx-kv-row"><label>ASIC Temp</label>
+                    <b><span *ngIf="axe.temp > 0; else noValue" [class.nx-danger-text]="axe.temp >= 70">{{ axe.temp | number: '1.0-1' }} °C</span></b></div>
+                <div class="nx-kv-row" *ngIf="axe.temp2 > 0"><label>ASIC Temp 2</label><b>{{ axe.temp2 | number: '1.0-1' }} °C</b></div>
+                <div class="nx-kv-row" *ngIf="axe.vrTemp > 0"><label>VRM Temp</label>
+                    <b [class.nx-danger-text]="axe.vrTemp >= 105">{{ axe.vrTemp | number: '1.0-1' }} °C</b></div>
+                <div class="nx-kv-row" *ngIf="axe.fanspeed !== undefined && axe.fanspeed !== null"><label>Fan</label>
+                    <b>{{ axe.fanspeed | number: '1.0-0' }} %<span *ngIf="axe.fanrpm > 0" class="nx-dim"> · {{ axe.fanrpm | number: '1.0-0' }} RPM</span></b></div>
+                <ng-container *ngIf="axe.thermalControlMode">
+                    <div class="nx-kv-row"><label>Thermal Mode</label><b>{{ axe.thermalControlMode }}</b></div>
+                    <div class="nx-kv-row" *ngIf="axe.requestedFanPercent !== undefined"><label>Req / Applied Fan</label>
+                        <b>{{ axe.requestedFanPercent | number: '1.0-0' }} % / {{ axe.appliedFanPercent | number: '1.0-0' }} %</b></div>
+                    <div class="nx-kv-row" *ngIf="axe.thermalControlMode === 'curve'"><label>Hysteresis</label>
+                        <b>{{ axe.hysteresisHolding === 1 ? 'Holding' : 'Tracking' }}</b></div>
+                    <div class="nx-kv-row" *ngIf="axe.emergencyOverrideActive === 1"><label>Emergency</label>
+                        <b class="nx-danger-text">OVERRIDE ACTIVE</b></div>
+                </ng-container>
+                <div class="nx-kv-row" *ngIf="!axe.thermalControlMode"><label>Thermal Mode</label>
+                    <b class="nx-dim">not reported by this device</b></div>
+            </div>
+
+            <div class="nx-subtitle">Pool &amp; Network</div>
+            <div class="nx-kv">
+                <div class="nx-kv-row"><label>Active Pool</label>
+                    <b class="nx-ellipsis"><ng-container *ngIf="poolHost(axe) as pool; else noValue"><span sensitive-data>{{ pool }}</span></ng-container></b></div>
+                <div class="nx-kv-row" *ngIf="axe.isUsingFallbackStratum !== null && axe.isUsingFallbackStratum !== undefined"><label>Fallback</label>
+                    <b>{{ axe.isUsingFallbackStratum === 1 ? 'Active' : 'Standby' }}</b></div>
+                <div class="nx-kv-row" *ngIf="axe.responseTime > 0"><label>Pool Latency</label><b>{{ fmt.latency(axe.responseTime) }}</b></div>
+                <div class="nx-kv-row" *ngIf="axe.wifiRSSI"><label>Wi-Fi RSSI</label><b>{{ axe.wifiRSSI }} dBm</b></div>
+            </div>
+
+            <div class="nx-subtitle">Software</div>
+            <div class="nx-kv">
+                <div class="nx-kv-row" *ngIf="axe.productName"><label>Product</label><b>{{ axe.productName }} {{ axe.productVersion }}</b></div>
+                <div class="nx-kv-row"><label>Firmware</label><b class="nx-ellipsis">{{ axe.version || '—' }}</b></div>
+                <div class="nx-kv-row" *ngIf="axe.axeOSVersion"><label>Web (at boot)</label><b class="nx-ellipsis">{{ axe.axeOSVersion }}</b></div>
+                <div class="nx-kv-row"><label>Pair</label>
+                    <b>
+                        <span *ngIf="!axe.version || !axe.axeOSVersion" class="nx-dim">—</span>
+                        <span *ngIf="axe.version && axe.axeOSVersion && !hasPairMismatch(axe)" class="nx-ok-text">Match</span>
+                        <span *ngIf="hasPairMismatch(axe)" class="nx-warn-text"
+                            pTooltip="Firmware and web revisions differ (may be a boot snapshot — a restart refreshes it)">Differs</span>
+                    </b>
+                </div>
+                <div class="nx-kv-row" *ngIf="axe.runningPartition"><label>OTA Partition</label><b>{{ axe.runningPartition }}</b></div>
+                <div class="nx-kv-row" *ngIf="axe.resetReason"><label>Reset Reason</label><b class="nx-ellipsis" [pTooltip]="axe.resetReason">{{ axe.resetReason }}</b></div>
+            </div>
+
+            <div class="nx-subtitle">Tuning</div>
+            <div class="nx-kv">
+                <div class="nx-kv-row" *ngIf="axe.frequency"><label>Frequency</label><b>{{ axe.frequency | number: '1.0-0' }} MHz</b></div>
+                <div class="nx-kv-row" *ngIf="axe.coreVoltage"><label>Core Voltage</label><b>{{ axe.coreVoltage | number: '1.0-0' }} mV</b></div>
+                <div class="nx-kv-row" *ngIf="axe.coreVoltageActual"><label>Measured</label><b>{{ axe.coreVoltageActual / 1000 | number: '1.2-2' }} V</b></div>
+                <div class="nx-kv-row" *ngIf="axe.temptarget && axe.thermalControlMode === 'target'"><label>Target Temp</label><b>{{ axe.temptarget }} °C</b></div>
+                <div class="nx-kv-row" *ngIf="axe.minFanSpeed !== undefined && axe.minFanSpeed !== null"><label>Min Fan</label><b>{{ axe.minFanSpeed }} %</b></div>
+            </div>
+
+            <div class="nx-fleet-drawer-actions">
+                <button pButton type="button" class="p-button-sm p-button-secondary" icon="pi pi-pencil"
+                    label="Settings" (click)="edit(axe)"></button>
+                <button pButton type="button" class="p-button-sm p-button-secondary" icon="pi pi-refresh"
+                    label="Restart" (click)="confirmRestart(axe)"></button>
+                <button pButton type="button" class="p-button-sm p-button-outlined p-button-danger nx-fleet-remove ml-auto" icon="pi pi-trash"
+                    label="Remove" (click)="confirmRemove(axe)"></button>
+            </div>
+        </div>
+    </aside>
+
+    <!-- ===================== confirmations (Stage 10) ===================== -->
+    <app-modal #restartModal [headline]="'Restart device?'">
+        <ng-container *ngIf="pendingRestart as axe">
+            <p>
+                Restart <b sensitive-data>{{ axe.hostname }}</b>
+                (<span sensitive-data>{{ axe.IP }}</span>)?
+                Mining stops for the duration of the reboot and resumes automatically.
+                No settings are changed.
+            </p>
+            <div class="flex gap-3 mt-4">
+                <p-button (onClick)="executeRestart()">Restart Device</p-button>
+                <p-button styleClass="p-button-secondary" (onClick)="cancelRestart()">Cancel</p-button>
+            </div>
+        </ng-container>
+    </app-modal>
+
+    <app-modal #removeModal [headline]="'Remove from fleet list?'">
+        <ng-container *ngIf="pendingRemove as axe">
+            <p>
+                Remove <b sensitive-data>{{ axe.hostname }}</b>
+                (<span sensitive-data>{{ axe.IP }}</span>) from this list?
+            </p>
+            <p class="text-500">
+                This only removes the entry from the Fleet page on this browser.
+                The device itself keeps mining and is untouched; a network scan or
+                manual add brings it back.
+            </p>
+            <div class="flex gap-3 mt-4">
+                <p-button styleClass="p-button-danger" (onClick)="executeRemove()">Remove from List</p-button>
+                <p-button styleClass="p-button-secondary" (onClick)="cancelRemove()">Cancel</p-button>
+            </div>
+        </ng-container>
+    </app-modal>
+
+    <app-modal #editModal [headline]="selectedAxeOs?.IP">
         <app-edit *ngIf="selectedAxeOs" [uri]="'http://' + selectedAxeOs.IP"></app-edit>
     </app-modal>
 </div>

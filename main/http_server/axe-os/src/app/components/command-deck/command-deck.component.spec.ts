@@ -25,6 +25,8 @@ describe('CommandDeckComponent', () => {
       providers: [provideRouter([]), provideHttpClient(), provideToastr()]
     }).compileComponents();
 
+    // Deterministic fleet-glance state regardless of other spec files.
+    window.localStorage.removeItem('SWARM_DATA');
     fixture = TestBed.createComponent(CommandDeckComponent);
     component = fixture.componentInstance;
     fixture.detectChanges();
@@ -317,6 +319,7 @@ describe('CommandDeckComponent (rendered with live-like data)', () => {
   });
 
   function render(): ComponentFixture<CommandDeckComponent> {
+    window.localStorage.removeItem('SWARM_DATA');
     fixture = TestBed.createComponent(CommandDeckComponent);
     fixture.detectChanges();
     tick(1200);
@@ -360,4 +363,48 @@ describe('CommandDeckComponent (rendered with live-like data)', () => {
     fixture.destroy();
     discardPeriodicTasks();
   }));
+});
+
+describe('CommandDeckComponent (fleet glance, Phase 2I)', () => {
+  beforeEach(async () => {
+    await TestBed.configureTestingModule({
+      declarations: [CommandDeckComponent, HashSuffixPipe, DiffSuffixPipe, AddressPipe],
+      imports: [ChartModule, TooltipModule],
+      providers: [provideRouter([]), provideHttpClient(), provideToastr()]
+    }).compileComponents();
+  });
+
+  function recreate(): CommandDeckComponent {
+    return TestBed.createComponent(CommandDeckComponent).componentInstance;
+  }
+
+  it('is hidden without stored fleet data', () => {
+    window.localStorage.removeItem('SWARM_DATA');
+    expect(recreate().fleetGlance).toBeNull();
+  });
+
+  it('is hidden when the stored list only contains this device', () => {
+    window.localStorage.setItem('SWARM_DATA', JSON.stringify([
+      { IP: window.location.hostname, hostname: 'self', nxReachable: true },
+    ]));
+    expect(recreate().fleetGlance).toBeNull();
+    window.localStorage.removeItem('SWARM_DATA');
+  });
+
+  it('derives online/total, hashrate, alerts and data age from the stored fleet', () => {
+    const now = Date.now();
+    window.localStorage.setItem('SWARM_DATA', JSON.stringify([
+      { IP: '10.0.0.10', hostname: 'gamma-01', nxReachable: true, nxLastSeenMs: now - 30_000, hashRate: 1230, power: 22, temp: 57 },
+      { IP: '10.0.0.11', hostname: 'gamma-02', nxReachable: true, nxLastSeenMs: now - 30_000, hashRate: 1100, power: 21, temp: 66 },
+      { IP: '10.0.0.12', hostname: 'gamma-03', nxReachable: false, nxLastSeenMs: now - 600_000 },
+    ]));
+    const glance = recreate().fleetGlance;
+    expect(glance).not.toBeNull();
+    expect(glance!.total).toBe(3);
+    expect(glance!.online).toBe(2);
+    expect(glance!.totalHashRate).toBeCloseTo(2330, 5);
+    expect(glance!.alerts).toBe(1); // the 66 °C device needs attention
+    expect(glance!.ageText).toBe('just now');
+    window.localStorage.removeItem('SWARM_DATA');
+  });
 });

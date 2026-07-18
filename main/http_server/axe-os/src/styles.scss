@@ -14,6 +14,7 @@
 @import "app/layout/styles/theme/themes/vela/bitaxe/theme.scss";
 /* NeuralAxe Command Deck (global on purpose: anyComponentStyle budget is 4KB) */
 @import "app/components/command-deck/command-deck.styles.scss";
+@import "app/components/swarm/fleet.styles.scss";
 
 @import "app/layout/styles/modules/primeicons.css";
 @import "app/layout/styles/modules/primeng.min.css";

@@ -31,6 +31,18 @@ import {
   thermalHeadroom,
 } from './deck-intel';
 import { curveSegmentLabel, fanCurveSummary, thermalModeLabel } from '../edit/tuning';
+import { FleetDevice, fleetSummary } from '../swarm/fleet-intel';
+import { LocalStorageService } from 'src/app/local-storage.service';
+
+/** Snapshot of the stored fleet list for the compact deck entry (2I). */
+export interface FleetGlance {
+  total: number;
+  online: number;
+  totalHashRate: number;
+  alerts: number;
+  /** Age of the newest stored device contact; null when no timestamp exists. */
+  ageText: string | null;
+}
 
 /** One derived, read-only operational insight (frontend-only view model). */
 export interface DeckInsight {
@@ -113,17 +125,54 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
 
   private destroy$ = new Subject<void>();
 
+  /** Non-null only when the Fleet page has genuinely discovered devices. */
+  public fleetGlance: FleetGlance | null = null;
+
   constructor(
     private liveDataService: LiveDataService,
     private systemService: SystemApiService,
     private webVersionService: WebVersionService,
     private toastr: ToastrService,
+    private localStorageService: LocalStorageService,
   ) {
     this.info$ = this.liveDataService.info$;
     this.connected$ = this.liveDataService.connected$;
     this.asic$ = this.systemService.getAsicSettings().pipe(
       shareReplay({ refCount: true, bufferSize: 1 })
     );
+    this.fleetGlance = this.deriveFleetGlance();
+  }
+
+  /**
+   * Compact fleet snapshot from the list the Fleet page stores locally. This
+   * is a point-in-time view (refreshed whenever Fleet runs), so it carries an
+   * explicit data age instead of pretending to be live. Hidden entirely when
+   * no fleet beyond this device exists.
+   */
+  private deriveFleetGlance(): FleetGlance | null {
+    const stored = this.localStorageService.getObject('SWARM_DATA') as FleetDevice[] | null;
+    if (!Array.isArray(stored) || stored.length === 0) {
+      return null;
+    }
+    const others = stored.filter(device => device.IP !== window.location.hostname);
+    if (others.length === 0) {
+      return null;
+    }
+    const summary = fleetSummary(stored);
+    const newest = stored.reduce((max, device) =>
+      typeof device.nxLastSeenMs === 'number' && device.nxLastSeenMs > max ? device.nxLastSeenMs : max, 0);
+    let ageText: string | null = null;
+    if (newest > 0) {
+      const ageMin = Math.round((Date.now() - newest) / 60000);
+      ageText = ageMin < 2 ? 'just now' : ageMin < 90 ? `${ageMin} min ago` : `${Math.round(ageMin / 60)} h ago`;
+    }
+    return {
+      total: summary.total,
+      online: summary.online,
+      totalHashRate: summary.totalHashRate,
+      alerts: summary.attention + summary.critical,
+      ageText,
+    };
   }
 
   ngOnInit(): void {

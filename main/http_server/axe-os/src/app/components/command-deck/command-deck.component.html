@@ -438,6 +438,30 @@
             </small>
         </section>
 
+        <!-- FLEET GLANCE (2I): only when a fleet beyond this device exists -->
+        <section class="nx-panel" *ngIf="fleetGlance as fleet">
+            <div class="nx-panel-title nx-cyan">Fleet</div>
+            <div class="nx-statrow nx-statrow-tight">
+                <div class="nx-stat">
+                    <label>Devices</label>
+                    <span>{{ fleet.online }} / {{ fleet.total }} online</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Fleet Hashrate</label>
+                    <span>{{ fleet.totalHashRate > 0 ? (fleet.totalHashRate | hashSuffix) : '—' }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Alerts</label>
+                    <span [class.nx-warn-text]="fleet.alerts > 0">{{ fleet.alerts }}</span>
+                </div>
+            </div>
+            <div class="flex align-items-center justify-content-between mt-2">
+                <small class="nx-dim" *ngIf="fleet.ageText">as of {{ fleet.ageText }} (last Fleet refresh)</small>
+                <small class="nx-dim" *ngIf="!fleet.ageText">from the stored fleet list</small>
+                <a routerLink="/swarm" class="text-sm">Open Fleet →</a>
+            </div>
+        </section>
+
         <!-- SYSTEM STATUS -->
         <section class="nx-panel">
             <div class="nx-panel-title nx-cyan">System Status</div>
