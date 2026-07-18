@@ -70,6 +70,7 @@ INCLUDE_DIRS
 PRIV_REQUIRES
     "app_update"
     "driver"
+    "thermal_control"
     "esp_adc"
     "esp_app_format"
     "esp_event"

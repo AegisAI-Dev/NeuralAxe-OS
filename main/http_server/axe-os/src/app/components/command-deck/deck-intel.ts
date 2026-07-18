@@ -204,6 +204,91 @@ export function compactNumber(value: number): string {
   return Math.round(value).toLocaleString('en-US');
 }
 
+// ---------- thermal control decision (Phase 2H) ----------
+
+export interface ThermalControlInsight {
+  severity: 'ok' | 'info' | 'warn' | 'error';
+  icon: string;
+  label: string;
+  detail: string;
+}
+
+/**
+ * Transparent one-line summary of the firmware's live fan decision, straight
+ * from the Phase 2H telemetry. Red (error) is reserved for the genuine
+ * emergency override; an invalid stored curve is a warning because the
+ * firmware is already running its safe target-control fallback.
+ */
+export function thermalControlInsight(info: {
+  thermalControlMode?: unknown;
+  thermalControlReason?: unknown;
+  emergencyOverrideActive?: unknown;
+  controlSensorValid?: unknown;
+  hysteresisHolding?: unknown;
+  fanCurveError?: unknown;
+  requestedFanPercent?: unknown;
+  appliedFanPercent?: unknown;
+}): ThermalControlInsight {
+  const requested = num(info.requestedFanPercent);
+  const applied = num(info.appliedFanPercent);
+  const fanText = (value: number | null) => value === null ? '—' : `${Math.round(value)} %`;
+
+  if (info.emergencyOverrideActive === 1) {
+    return {
+      severity: 'error', icon: 'pi-exclamation-triangle',
+      label: 'Emergency thermal override',
+      detail: 'Hard protection is forcing 100 % fan — every mode is overridden',
+    };
+  }
+  if (typeof info.fanCurveError === 'string' && info.fanCurveError) {
+    return {
+      severity: 'warn', icon: 'pi-exclamation-circle',
+      label: 'Curve configuration invalid — safe fallback active',
+      detail: `Stored curve rejected (${info.fanCurveError}); target control is running instead`,
+    };
+  }
+  if (info.controlSensorValid !== 1) {
+    return {
+      severity: 'info', icon: 'pi-clock',
+      label: 'Waiting for valid sensor data',
+      detail: 'Fan held at the safe fallback duty until a valid temperature arrives',
+    };
+  }
+  switch (info.thermalControlMode) {
+    case 'curve':
+      if (info.hysteresisHolding === 1) {
+        return {
+          severity: 'ok', icon: 'pi-chart-line',
+          label: 'Curve control stable',
+          detail: `Hysteresis holding ${fanText(applied)} while the curve requests ${fanText(requested)}`,
+        };
+      }
+      return {
+        severity: 'ok', icon: 'pi-chart-line',
+        label: 'Curve control stable',
+        detail: `Following the curve at ${fanText(applied)}`,
+      };
+    case 'manual':
+      return {
+        severity: 'info', icon: 'pi-sliders-v',
+        label: 'Manual fan active',
+        detail: `Fixed ${fanText(applied)} — thermal protection still overrides on overheat`,
+      };
+    case 'target':
+      return {
+        severity: 'ok', icon: 'pi-sliders-v',
+        label: 'Target control active',
+        detail: `PID holding the target temperature at ${fanText(applied)} fan`,
+      };
+    default:
+      return {
+        severity: 'info', icon: 'pi-question-circle',
+        label: 'Thermal control state unknown',
+        detail: 'The device did not report a thermal control mode',
+      };
+  }
+}
+
 // ---------- thermal headroom ----------
 
 export interface ThermalHeadroom {

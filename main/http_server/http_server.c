@@ -40,6 +40,7 @@
 #include "log_buffer.h"
 #include "cjson_utils.h"
 #include "utils.h"
+#include "thermal_control.h"
 
 static const char * TAG = "http_server";
 static const char * CORS_TAG = "CORS";
@@ -509,6 +510,33 @@ static esp_err_t handle_options_request(httpd_req_t * req)
     return ESP_OK;
 }
 
+/* Strict structural validation of a fanCurve request array: exactly
+ * THERMAL_CURVE_POINTS objects with integer tempC / fanPercent fields.
+ * Semantic validation (ranges, ordering) happens in thermal_curve_validate. */
+static bool parse_fan_curve_json(const cJSON * const arr, ThermalCurve * out)
+{
+    if (!cJSON_IsArray(arr) || cJSON_GetArraySize(arr) != THERMAL_CURVE_POINTS) {
+        ESP_LOGW(TAG, "Invalid fan curve: expected an array of %d points", THERMAL_CURVE_POINTS);
+        return false;
+    }
+    for (int i = 0; i < THERMAL_CURVE_POINTS; i++) {
+        const cJSON * point = cJSON_GetArrayItem(arr, i);
+        const cJSON * temp = cJSON_GetObjectItem(point, "tempC");
+        const cJSON * fan = cJSON_GetObjectItem(point, "fanPercent");
+        if (!cJSON_IsNumber(temp) || !cJSON_IsNumber(fan)
+            || temp->valuedouble != (double) temp->valueint
+            || fan->valuedouble != (double) fan->valueint
+            || temp->valueint < 0 || temp->valueint > 255
+            || fan->valueint < 0 || fan->valueint > 255) {
+            ESP_LOGW(TAG, "Invalid fan curve point %d", i);
+            return false;
+        }
+        out->temp_c[i] = (uint8_t) temp->valueint;
+        out->fan_pct[i] = (uint8_t) fan->valueint;
+    }
+    return true;
+}
+
 bool check_settings_and_update(const cJSON * const root)
 {
     bool result = true;
@@ -597,6 +625,37 @@ bool check_settings_and_update(const cJSON * const root)
                 result = false;
             }
         }
+        if (key == NVS_CONFIG_THERMAL_MODE) {
+            ThermalControlMode mode;
+            if (!cJSON_IsString(item) || item->valuestring == NULL || !thermal_mode_from_string(item->valuestring, &mode)) {
+                ESP_LOGW(TAG, "Invalid thermal control mode");
+                result = false;
+            }
+        }
+    }
+
+    // NeuralAxe Phase 2H: the fan curve is only accepted as a structured
+    // array of {tempC, fanPercent} points. It is fully validated here and
+    // stored in its serialized "v1;..." form - never as a free-form string.
+    char fan_curve_serialized[THERMAL_CURVE_STR_MAX];
+    bool fan_curve_present = false;
+    cJSON * fan_curve_item = cJSON_GetObjectItem(root, "fanCurve");
+    if (fan_curve_item != NULL) {
+        ThermalCurve curve_in;
+        if (!parse_fan_curve_json(fan_curve_item, &curve_in)) {
+            result = false;
+        } else {
+            ThermalCurveStatus status = thermal_curve_validate(&curve_in);
+            if (status != THERMAL_CURVE_OK) {
+                ESP_LOGW(TAG, "Invalid fan curve: %s", thermal_curve_status_str(status));
+                result = false;
+            } else if (thermal_curve_serialize(&curve_in, fan_curve_serialized, sizeof(fan_curve_serialized)) < 0) {
+                ESP_LOGW(TAG, "Fan curve serialization failed");
+                result = false;
+            } else {
+                fan_curve_present = true;
+            }
+        }
     }
 
     if (result) {
@@ -627,6 +686,21 @@ bool check_settings_and_update(const cJSON * const root)
                 case TYPE_FLOAT:
                     nvs_config_set_float(key, (float)item->valuedouble);
                     break;
+            }
+        }
+
+        if (fan_curve_present) {
+            nvs_config_set_string(NVS_CONFIG_FAN_CURVE, fan_curve_serialized);
+        }
+
+        // Keep the legacy autofanspeed flag consistent with an explicit mode
+        // change so a rollback to pre-2H firmware lands in the matching safe
+        // mode: target/curve -> automatic PID control, manual -> manual fan.
+        cJSON * mode_item = cJSON_GetObjectItem(root, "thermalControlMode");
+        if (cJSON_IsString(mode_item) && mode_item->valuestring != NULL) {
+            ThermalControlMode mode;
+            if (thermal_mode_from_string(mode_item->valuestring, &mode)) {
+                nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, mode != THERMAL_MODE_MANUAL);
             }
         }
     }

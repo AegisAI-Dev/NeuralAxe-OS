@@ -1,6 +1,6 @@
 import { HttpErrorResponse } from '@angular/common/http';
 import { Component, Input, OnInit, OnDestroy, OnChanges, SimpleChanges } from '@angular/core';
-import { FormBuilder, FormGroup, FormControl, Validators } from '@angular/forms';
+import { AbstractControl, FormBuilder, FormGroup, FormControl, ValidationErrors, ValidatorFn, Validators } from '@angular/forms';
 import { ToastrService } from 'ngx-toastr';
 import { forkJoin, startWith, Subject, takeUntil, pairwise, BehaviorSubject, Observable, first } from 'rxjs';
 import { LoadingService } from 'src/app/services/loading.service';
@@ -17,6 +17,21 @@ import {
   buildTuningPresets,
   firmwareRangeValidator,
   pendingChanges,
+  FAN_CURVE_BOUNDS,
+  FanCurvePoint,
+  ThermalControlMode,
+  ThermalProfile,
+  THERMAL_PROFILES,
+  CURVE_TEMP_CONTROLS,
+  CURVE_FAN_CONTROLS,
+  CurvePreviewModel,
+  activeThermalProfile,
+  buildSettingsPayload,
+  curveFromFormValue,
+  curvePreviewModel,
+  curveSegmentLabel,
+  thermalModeLabel,
+  validateFanCurve,
 } from './tuning';
 import { SemanticSeverity, asicTempSeverity, fanSaturationSeverity, thermalDeltaSeverity, vrTempSeverity } from 'src/app/services/semantic-status';
 
@@ -207,7 +222,13 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
           frequency: [info.frequency, [
             firmwareRangeValidator(TUNING_BOUNDS.frequency.min, TUNING_BOUNDS.frequency.max)
           ]],
-          autofanspeed: [info.autofanspeed == 1, [Validators.required]],
+          // Three explicit thermal modes (Phase 2H). The device already
+          // resolves legacy installs (autofanspeed) to target/manual, but we
+          // keep the same derivation as a defensive fallback.
+          thermalControlMode: [
+            (info.thermalControlMode as ThermalControlMode) ?? (info.autofanspeed == 1 ? 'target' : 'manual'),
+            [Validators.required]
+          ],
           minfanspeed: [info.minFanSpeed, [
             firmwareRangeValidator(TUNING_BOUNDS.minFanSpeed.min, TUNING_BOUNDS.minFanSpeed.max, true)
           ]],
@@ -217,13 +238,19 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
           temptarget: [info.temptarget, [
             firmwareRangeValidator(TUNING_BOUNDS.temptarget.min, TUNING_BOUNDS.temptarget.max, true)
           ]],
+          // Flat fan-curve point controls (structured editor only — the
+          // firmware receives a validated fanCurve array, never free text).
+          ...this.buildCurveControls(info.fanCurve as FanCurvePoint[] | undefined),
+          fanCurveHysteresis: [info.fanCurveHysteresis ?? 2, [
+            firmwareRangeValidator(FAN_CURVE_BOUNDS.hysteresis.min, FAN_CURVE_BOUNDS.hysteresis.max, true)
+          ]],
           overheat_mode: [info.overheat_mode, [Validators.required]],
           statsFrequency: [info.statsFrequency, [
             Validators.required,
             Validators.min(0),
             Validators.max(this.statsFrequencyMaxValue)
           ]]
-        });
+        }, { validators: [this.curveGroupValidator] });
 
         this.baseline = this.form.getRawValue();
         this.presets = buildTuningPresets(
@@ -233,17 +260,28 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
 
         this.formSubject.next(this.form);
 
-      this.form.controls['autofanspeed'].valueChanges.pipe(
-        startWith(this.form.controls['autofanspeed'].value),
+      this.form.controls['thermalControlMode'].valueChanges.pipe(
+        startWith(this.form.controls['thermalControlMode'].value),
         takeUntil(this.destroy$)
-      ).subscribe(autofanspeed => {
-        if (autofanspeed) {
-          this.form.controls['manualFanSpeed'].disable();
-          this.form.controls['temptarget'].enable();
-        } else {
-          this.form.controls['manualFanSpeed'].enable();
-          this.form.controls['temptarget'].disable();
+      ).subscribe((mode: ThermalControlMode) => {
+        const set = (name: string, enabled: boolean) => {
+          const control = this.form.controls[name];
+          if (enabled) {
+            control.enable({ emitEvent: false });
+          } else {
+            control.disable({ emitEvent: false });
+          }
+        };
+        // target: PID setpoint + min fan; curve: curve editor + min fan
+        // (the firmware keeps min fan authoritative as a floor); manual:
+        // fan slider only. Emergency protection is independent of all three.
+        set('temptarget', mode === 'target');
+        set('manualFanSpeed', mode === 'manual');
+        set('minfanspeed', mode === 'target' || mode === 'curve');
+        for (const name of [...CURVE_TEMP_CONTROLS, ...CURVE_FAN_CONTROLS, 'fanCurveHysteresis']) {
+          set(name, mode === 'curve');
         }
+        this.form.updateValueAndValidity({ emitEvent: false });
       });
 
       // Add custom value to predefined steps
@@ -281,9 +319,13 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
       delete form.stratumPassword;
     }
 
+    // The flat curve editor controls become a validated fanCurve array; the
+    // legacy autofanspeed flag is kept in sync with the selected mode.
+    const payload = buildSettingsPayload(form);
+
     const restartWasNeeded = this.isRestartRequired;
     const deviceUri = this.uri || '';
-    this.systemService.updateSystem(deviceUri, form)
+    this.systemService.updateSystem(deviceUri, payload)
       .pipe(this.loadingService.lockUIUntilComplete())
       .subscribe({
         next: () => {
@@ -328,6 +370,98 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
     );
     this.form.patchValue(this.baseline);
     this.form.markAsPristine();
+  }
+
+  // ---- thermal control (Phase 2H) ----
+
+  /** Flat controls for the 4 curve points, seeded from the device curve. */
+  private buildCurveControls(curve: FanCurvePoint[] | undefined): { [key: string]: any } {
+    const fallback = THERMAL_PROFILES.find(p => p.id === 'balanced')!.points;
+    const points = Array.isArray(curve) && curve.length === FAN_CURVE_BOUNDS.points ? curve : fallback;
+    const controls: { [key: string]: any } = {};
+    points.forEach((point, i) => {
+      controls[CURVE_TEMP_CONTROLS[i]] = [point.tempC, [
+        firmwareRangeValidator(FAN_CURVE_BOUNDS.tempC.min, FAN_CURVE_BOUNDS.tempC.max, true)
+      ]];
+      controls[CURVE_FAN_CONTROLS[i]] = [point.fanPercent, [
+        firmwareRangeValidator(FAN_CURVE_BOUNDS.fanPercent.min, FAN_CURVE_BOUNDS.fanPercent.max, true)
+      ]];
+    });
+    return controls;
+  }
+
+  /**
+   * Cross-field curve validation (ordering), active only while curve mode is
+   * pending. Blocks Save on exactly what the firmware would reject.
+   */
+  private curveGroupValidator: ValidatorFn = (group: AbstractControl): ValidationErrors | null => {
+    const raw = (group as FormGroup).getRawValue ? (group as FormGroup).getRawValue() : group.value;
+    if (raw['thermalControlMode'] !== 'curve') {
+      return null;
+    }
+    const errors = validateFanCurve(curveFromFormValue(raw));
+    return errors.length ? { fanCurve: errors } : null;
+  };
+
+  get thermalMode(): ThermalControlMode {
+    return this.form?.get('thermalControlMode')?.value ?? 'target';
+  }
+
+  public setThermalMode(mode: ThermalControlMode) {
+    if (this.thermalMode === mode) {
+      return;
+    }
+    this.form.patchValue({ thermalControlMode: mode });
+    this.form.get('thermalControlMode')?.markAsDirty();
+  }
+
+  public thermalModeLabelFor(mode: unknown): string {
+    return thermalModeLabel(mode);
+  }
+
+  public curveSegmentText(segment: unknown): string {
+    return curveSegmentLabel(segment);
+  }
+
+  /** The pending curve as points (for validation display and the preview). */
+  get pendingCurve(): FanCurvePoint[] {
+    return curveFromFormValue(this.form.getRawValue());
+  }
+
+  /** Human-readable validation errors for the pending curve; [] = valid. */
+  get curveErrors(): string[] {
+    const groupErrors = this.form?.errors?.['fanCurve'];
+    return Array.isArray(groupErrors) ? groupErrors : [];
+  }
+
+  get curvePreview(): CurvePreviewModel {
+    return curvePreviewModel(this.pendingCurve);
+  }
+
+  public readonly thermalProfiles: ThermalProfile[] = THERMAL_PROFILES;
+  public readonly curveBounds = FAN_CURVE_BOUNDS;
+  public readonly curveTempControls = CURVE_TEMP_CONTROLS;
+  public readonly curveFanControls = CURVE_FAN_CONTROLS;
+
+  /** Template matching the pending curve, or 'custom' the moment it diverges. */
+  get activeThermalProfile(): string {
+    return activeThermalProfile(this.pendingCurve);
+  }
+
+  /**
+   * Fill the pending curve editor with a template's exact documented values.
+   * Nothing is saved and nothing restarts — Save stays an explicit action.
+   */
+  public applyThermalProfile(profile: ThermalProfile) {
+    const patch: { [key: string]: number } = {};
+    profile.points.forEach((point, i) => {
+      patch[CURVE_TEMP_CONTROLS[i]] = point.tempC;
+      patch[CURVE_FAN_CONTROLS[i]] = point.fanPercent;
+    });
+    this.form.patchValue(patch);
+    for (const name of [...CURVE_TEMP_CONTROLS, ...CURVE_FAN_CONTROLS]) {
+      this.form.get(name)?.markAsDirty();
+    }
   }
 
   // ---- presets (existing valid board values only; display + pending fill) ----
@@ -507,13 +641,21 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
   }
 
   get noRestartFields(): string[] {
+    // Everything the firmware applies live. The fan controller re-reads the
+    // thermal configuration (mode, curve, hysteresis, min fan) within one
+    // second of a save — no restart involved.
     return [
       'displayTimeout',
       'coreVoltage',
       'frequency',
       'autofanspeed',
+      'thermalControlMode',
       'manualFanSpeed',
       'temptarget',
+      'minfanspeed',
+      ...CURVE_TEMP_CONTROLS,
+      ...CURVE_FAN_CONTROLS,
+      'fanCurveHysteresis',
       'overheat_mode',
       'statsFrequency'
     ];

@@ -234,4 +234,130 @@ describe('EditComponent', () => {
       expect(text).not.toContain('undefined');
     });
   });
+
+  describe('thermal control (Phase 2H)', () => {
+    const fb = new FormBuilder();
+
+    /** Full form as loadDeviceSettings builds it, including the curve editor. */
+    function setupThermal(mode: 'target' | 'curve' | 'manual') {
+      component.form = fb.group({
+        coreVoltage: [1150],
+        frequency: [485],
+        thermalControlMode: [mode],
+        minfanspeed: [25],
+        manualFanSpeed: [50],
+        temptarget: [60],
+        fanCurveTemp0: [45], fanCurveFan0: [25],
+        fanCurveTemp1: [52], fanCurveFan1: [45],
+        fanCurveTemp2: [58], fanCurveFan2: [70],
+        fanCurveTemp3: [64], fanCurveFan3: [100],
+        fanCurveHysteresis: [2],
+        overheat_mode: [0],
+        display: ['NONE'],
+        rotation: [0],
+        displayTimeout: [-1],
+        invertscreen: [false],
+        statsFrequency: [0],
+      }, { validators: [(component as any).curveGroupValidator] });
+      component.baseline = component.form.getRawValue();
+      // Deterministic live stream for the read-only telemetry sections.
+      component.measured$ = of({} as SystemInfo);
+      fixture.detectChanges();
+    }
+
+    it('an invalid pending curve blocks Save in curve mode but not in target mode', () => {
+      setupThermal('curve');
+      component.form.patchValue({ fanCurveTemp1: 45 }); // duplicate temperature
+      expect(component.form.invalid).toBeTrue();
+      expect(component.curveErrors.length).toBeGreaterThan(0);
+
+      // The same values are ignored outside curve mode: Save stays possible.
+      component.form.patchValue({ thermalControlMode: 'target' });
+      expect(component.form.invalid).toBeFalse();
+      expect(component.curveErrors).toEqual([]);
+    });
+
+    it('Save sends the structured fanCurve array and never the flat editor controls', () => {
+      setupThermal('curve');
+      const systemService = TestBed.inject(SystemApiService);
+      let sent: any = null;
+      spyOn(systemService, 'updateSystem').and.callFake((_uri: string, body: any) => { sent = body; return of(undefined); });
+
+      component.updateSystem();
+
+      expect(sent['fanCurve']).toEqual([
+        { tempC: 45, fanPercent: 25 },
+        { tempC: 52, fanPercent: 45 },
+        { tempC: 58, fanPercent: 70 },
+        { tempC: 64, fanPercent: 100 },
+      ]);
+      expect(sent['thermalControlMode']).toBe('curve');
+      expect(sent['autofanspeed']).toBeTrue();
+      expect(Object.keys(sent).some(k => k.startsWith('fanCurveTemp') || k.startsWith('fanCurveFan'))).toBeFalse();
+    });
+
+    it('manual mode syncs autofanspeed false for rollback safety', () => {
+      setupThermal('manual');
+      const systemService = TestBed.inject(SystemApiService);
+      let sent: any = null;
+      spyOn(systemService, 'updateSystem').and.callFake((_uri: string, body: any) => { sent = body; return of(undefined); });
+
+      component.updateSystem();
+
+      expect(sent['autofanspeed']).toBeFalse();
+      expect(sent['fanCurve']).toBeUndefined();
+    });
+
+    it('selecting a template only fills the pending editor (no save, no restart)', () => {
+      setupThermal('curve');
+      const systemService = TestBed.inject(SystemApiService);
+      const saveSpy = spyOn(systemService, 'updateSystem');
+      const restartSpy = spyOn(systemService, 'restart');
+
+      const aggressive = component.thermalProfiles.find(p => p.id === 'aggressive')!;
+      component.applyThermalProfile(aggressive);
+
+      expect(component.form.get('fanCurveTemp3')?.value).toBe(60);
+      expect(component.form.get('fanCurveFan3')?.value).toBe(100);
+      expect(component.form.dirty).toBeTrue();
+      expect(component.activeThermalProfile).toBe('aggressive');
+      expect(saveSpy).not.toHaveBeenCalled();
+      expect(restartSpy).not.toHaveBeenCalled();
+    });
+
+    it('editing any curve value flips the active template to custom', () => {
+      setupThermal('curve');
+      expect(component.activeThermalProfile).toBe('balanced');
+      component.form.patchValue({ fanCurveFan2: 71 });
+      expect(component.activeThermalProfile).toBe('custom');
+    });
+
+    it('mode changes appear in the pending list and revert cleanly', () => {
+      setupThermal('target');
+      component.setThermalMode('curve');
+
+      const modeChange = component.pendingList.find(c => c.field === 'thermalControlMode');
+      expect(modeChange?.current).toBe('Target Temperature');
+      expect(modeChange?.pending).toBe('Fan Curve');
+      expect(modeChange?.restartRequired).toBeFalse(); // applied live by the fan task
+
+      component.revertChanges();
+      expect(component.thermalMode).toBe('target');
+      expect(component.form.dirty).toBeFalse();
+    });
+
+    it('curve mode renders the manual-protection warning nowhere and curve editor UI', () => {
+      setupThermal('curve');
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text).toContain('Curve Templates');
+      expect(text).toContain('Hysteresis');
+      expect(text).toContain('Speed increases are never delayed');
+    });
+
+    it('manual mode clearly states that thermal protection stays active', () => {
+      setupThermal('manual');
+      const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+      expect(text.toLowerCase()).toContain('does not disable thermal protection');
+    });
+  });
 });

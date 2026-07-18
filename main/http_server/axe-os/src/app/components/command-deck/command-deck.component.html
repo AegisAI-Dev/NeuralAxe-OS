@@ -154,6 +154,38 @@
                         · Vcore {{ fmt.volts(info.coreVoltageActual) }} vs {{ fmt.int(info.coreVoltage, ' mV') }} set ({{ dv > 0 ? '+' : '' }}{{ fmt.int(dv, ' mV') }})
                     </small>
                 </div>
+
+                <!-- Phase 2H: live fan-decision transparency -->
+                <div class="nx-statrow nx-statrow-tight mt-2">
+                    <div class="nx-stat">
+                        <label>Thermal Mode</label>
+                        <span>{{ thermalModeText(info) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Control Temp</label>
+                        <span pTooltip="EMA-smoothed temperature feeding the active control path">{{ controlTempText(info) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Req / Applied Fan</label>
+                        <span pTooltip="Raw control decision vs the duty actually commanded (they differ while hysteresis holds)">
+                            {{ fmt.int(info.requestedFanPercent, ' %') }} / {{ fmt.int(info.appliedFanPercent, ' %') }}</span>
+                    </div>
+                    <div class="nx-stat" *ngIf="info.thermalControlMode === 'curve'">
+                        <label>Curve Segment</label>
+                        <span>{{ curveSegmentText(info) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Sensor</label>
+                        <span [class.nx-warn-text]="info.controlSensorValid !== 1">
+                            {{ info.controlSensorValid === 1 ? info.controlSensor : 'no valid data' }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>State</label>
+                        <span [class.nx-danger-text]="info.emergencyOverrideActive === 1"
+                              [class.nx-warn-text]="info.emergencyOverrideActive !== 1 && !!info.fanCurveError">
+                            {{ info.emergencyOverrideActive === 1 ? 'EMERGENCY' : (info.hysteresisHolding === 1 ? 'Hysteresis hold' : 'Tracking') }}</span>
+                    </div>
+                </div>
             </section>
 
             <!-- MINING HEALTH / SESSION PERFORMANCE -->
@@ -294,8 +326,10 @@
                         <div class="nx-kv">
                             <div class="nx-kv-row"><label>Frequency</label><b>{{ fmt.int(info.frequency, ' MHz') }}</b></div>
                             <div class="nx-kv-row"><label>Core Voltage</label><b>{{ fmt.int(info.coreVoltage, ' mV') }}</b></div>
-                            <div class="nx-kv-row"><label>Fan Mode</label><b>{{ info.autofanspeed ? 'Automatic' : 'Manual' }}</b></div>
-                            <div class="nx-kv-row"><label>Target Temp</label><b>{{ fmt.temp(info.temptarget) }}</b></div>
+                            <div class="nx-kv-row"><label>Thermal Mode</label><b>{{ thermalModeText(info) }}</b></div>
+                            <div class="nx-kv-row" *ngIf="info.thermalControlMode === 'target'"><label>Target Temp</label><b>{{ fmt.temp(info.temptarget) }}</b></div>
+                            <div class="nx-kv-row" *ngIf="info.thermalControlMode === 'curve'"><label>Fan Curve</label><b class="nx-ellipsis">{{ fanCurveText(info) }}</b></div>
+                            <div class="nx-kv-row" *ngIf="info.thermalControlMode === 'curve'"><label>Hysteresis</label><b>{{ fmt.int(info.fanCurveHysteresis, ' °C') }}</b></div>
                             <div class="nx-kv-row"><label>Min Fan</label><b>{{ fmt.int(info.minFanSpeed, ' %') }}</b></div>
                             <div class="nx-kv-row"><label>Worker</label><b sensitive-data class="nx-ellipsis">{{ (info.isUsingFallbackStratum ? info.fallbackStratumUser : info.stratumUser) | address: { length: 16 } }}</b></div>
                         </div>

@@ -151,6 +151,25 @@ export class SystemApiService {
         fanrpm: 3583,
         fan2rpm: 4146,
 
+        // Phase 2H thermal-control contract (mirrors system_api_json.c)
+        thermalControlMode: 'target' as const,
+        fanCurve: [
+          { tempC: 45, fanPercent: 25 },
+          { tempC: 52, fanPercent: 45 },
+          { tempC: 58, fanPercent: 70 },
+          { tempC: 64, fanPercent: 100 },
+        ],
+        fanCurveHysteresis: 2,
+        effectiveControlTemperature: 60,
+        requestedFanPercent: 50,
+        appliedFanPercent: 50,
+        activeCurveSegment: -1,
+        thermalControlReason: 'target control active',
+        emergencyOverrideActive: 0,
+        hysteresisHolding: 0,
+        controlSensor: 'asic' as const,
+        controlSensorValid: 1,
+
         boardtemp1: 30,
         boardtemp2: 40,
         overheat_mode: 0,

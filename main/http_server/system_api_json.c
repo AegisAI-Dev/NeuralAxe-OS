@@ -14,6 +14,7 @@
 #include "cjson_utils.h"
 #include "statistics_task.h"
 #include "stratum_v2_task.h"
+#include "thermal_control.h"
 
 
 static const char *get_reset_reason_str(esp_reset_reason_t reason)
@@ -55,6 +56,23 @@ static void system_api_add_telemetry(cJSON *root, GlobalState *g) {
     cJSON_AddNumberToObject(root, "fanspeed", g->POWER_MANAGEMENT_MODULE.fan_perc);
     cJSON_AddNumberToObject(root, "fanrpm", g->POWER_MANAGEMENT_MODULE.fan_rpm);
     cJSON_AddNumberToObject(root, "fan2rpm", g->POWER_MANAGEMENT_MODULE.fan2_rpm);
+
+    // NeuralAxe Phase 2H thermal-control decision telemetry (additive).
+    // Written by fan_controller_task each control cycle; strings are static.
+    cJSON_AddFloatToObject(root, "effectiveControlTemperature", g->POWER_MANAGEMENT_MODULE.effective_control_temp);
+    cJSON_AddFloatToObject(root, "requestedFanPercent", g->POWER_MANAGEMENT_MODULE.requested_fan_perc);
+    cJSON_AddFloatToObject(root, "appliedFanPercent", g->POWER_MANAGEMENT_MODULE.fan_perc);
+    cJSON_AddNumberToObject(root, "activeCurveSegment", g->POWER_MANAGEMENT_MODULE.active_curve_segment);
+    cJSON_AddStringToObject(root, "thermalControlReason",
+                            g->POWER_MANAGEMENT_MODULE.thermal_control_reason ? g->POWER_MANAGEMENT_MODULE.thermal_control_reason : "none");
+    cJSON_AddNumberToObject(root, "emergencyOverrideActive", g->POWER_MANAGEMENT_MODULE.thermal_emergency_override ? 1 : 0);
+    cJSON_AddNumberToObject(root, "hysteresisHolding", g->POWER_MANAGEMENT_MODULE.thermal_hysteresis_holding ? 1 : 0);
+    cJSON_AddStringToObject(root, "controlSensor",
+                            g->POWER_MANAGEMENT_MODULE.control_sensor ? g->POWER_MANAGEMENT_MODULE.control_sensor : "none");
+    cJSON_AddNumberToObject(root, "controlSensorValid", g->POWER_MANAGEMENT_MODULE.control_sensor_valid ? 1 : 0);
+    if (g->POWER_MANAGEMENT_MODULE.fan_curve_error) {
+        cJSON_AddStringToObject(root, "fanCurveError", g->POWER_MANAGEMENT_MODULE.fan_curve_error);
+    }
 
     // Hashrate / Mining Group
     cJSON_AddFloatToObject(root, "hashRate", g->SYSTEM_MODULE.current_hashrate);
@@ -225,6 +243,40 @@ static void system_api_add_config(cJSON *root, GlobalState *g) {
     cJSON_AddNumberToObject(root, "manualFanSpeed", nvs_config_get_u16(NVS_CONFIG_MANUAL_FAN_SPEED));
     cJSON_AddNumberToObject(root, "minFanSpeed", nvs_config_get_u16(NVS_CONFIG_MIN_FAN_SPEED));
     cJSON_AddNumberToObject(root, "temptarget", nvs_config_get_u16(NVS_CONFIG_TEMP_TARGET));
+
+    // NeuralAxe Phase 2H thermal-control configuration (additive). The mode
+    // is the resolved effective mode: an unset/legacy value derives from
+    // autofanspeed so existing installs read back target/manual unchanged.
+    {
+        char *mode_str = nvs_config_get_string(NVS_CONFIG_THERMAL_MODE);
+        ThermalControlMode mode = thermal_mode_resolve(mode_str, nvs_config_get_bool(NVS_CONFIG_AUTO_FAN_SPEED));
+        free(mode_str);
+        cJSON_AddStringToObject(root, "thermalControlMode", thermal_mode_to_string(mode));
+
+        // Stored curve when valid, board default otherwise (an invalid
+        // stored curve is reported live via fanCurveError and the control
+        // loop falls back to target control).
+        ThermalCurve curve;
+        char *curve_str = nvs_config_get_string(NVS_CONFIG_FAN_CURVE);
+        if (curve_str == NULL || curve_str[0] == '\0' || thermal_curve_parse(curve_str, &curve) != THERMAL_CURVE_OK) {
+            thermal_curve_default(&curve);
+        }
+        free(curve_str);
+
+        cJSON *curve_arr = cJSON_CreateArray();
+        if (curve_arr) {
+            for (int i = 0; i < THERMAL_CURVE_POINTS; i++) {
+                cJSON *point = cJSON_CreateObject();
+                if (point) {
+                    cJSON_AddNumberToObject(point, "tempC", curve.temp_c[i]);
+                    cJSON_AddNumberToObject(point, "fanPercent", curve.fan_pct[i]);
+                    cJSON_AddItemToArray(curve_arr, point);
+                }
+            }
+            cJSON_AddItemToObject(root, "fanCurve", curve_arr);
+        }
+        cJSON_AddNumberToObject(root, "fanCurveHysteresis", nvs_config_get_u16(NVS_CONFIG_FAN_CURVE_HYSTERESIS));
+    }
     cJSON_AddNumberToObject(root, "coreVoltage", nvs_config_get_u16(NVS_CONFIG_ASIC_VOLTAGE));
     cJSON_AddFloatToObject(root, "frequency", nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY));
     cJSON_AddNumberToObject(root, "statsFrequency", nvs_config_get_u16(NVS_CONFIG_STATISTICS_FREQUENCY));

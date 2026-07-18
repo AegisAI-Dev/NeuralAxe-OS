@@ -51,6 +51,11 @@ typedef enum {
     NVS_CONFIG_MIN_FAN_SPEED,
     NVS_CONFIG_TEMP_TARGET,
     NVS_CONFIG_OVERHEAT_MODE,
+    // NeuralAxe Phase 2H thermal control (additive; legacy keys above keep
+    // their exact meaning and remain what older firmware reads on rollback)
+    NVS_CONFIG_THERMAL_MODE,
+    NVS_CONFIG_FAN_CURVE,
+    NVS_CONFIG_FAN_CURVE_HYSTERESIS,
     
     NVS_CONFIG_STATISTICS_FREQUENCY,
     

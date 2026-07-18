@@ -1,5 +1,6 @@
 #include "nvs_config.h"
 #include "sv2_protocol.h"
+#include "thermal_control.h"
 #include "global_state.h"
 #include <esp_err.h>
 #include "esp_log.h"
@@ -93,6 +94,15 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_MIN_FAN_SPEED]                         = {.nvs_key_name = "minfanspeed",     .type = TYPE_U16,   .default_value = {.u16 = 25},                                          .rest_name = "minFanSpeed",                        .min = 0,  .max = 99},
     [NVS_CONFIG_TEMP_TARGET]                           = {.nvs_key_name = "temptarget",      .type = TYPE_U16,   .default_value = {.u16 = 60},                                          .rest_name = "temptarget",                         .min = 35, .max = 66},
     [NVS_CONFIG_OVERHEAT_MODE]                         = {.nvs_key_name = "overheat_mode",   .type = TYPE_BOOL,                                                                         .rest_name = "overheat_mode",                      .min = 0,  .max = 0},
+    // Phase 2H thermal control. thermalmode "" = not explicitly configured:
+    // the effective mode is derived from autofanspeed (thermal_mode_resolve).
+    // fancurve "" = built-in board-601 default curve; the serialized "v1;..."
+    // form is validated by thermal_curve_parse before use. fancurve has no
+    // rest_name on purpose: PATCH accepts a structured fanCurve array that is
+    // validated and serialized in http_server.c, never a free-form string.
+    [NVS_CONFIG_THERMAL_MODE]                          = {.nvs_key_name = "thermalmode",     .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "thermalControlMode",                 .min = 5,  .max = 6},
+    [NVS_CONFIG_FAN_CURVE]                             = {.nvs_key_name = "fancurve",        .type = TYPE_STR,   .default_value = {.str = ""}},
+    [NVS_CONFIG_FAN_CURVE_HYSTERESIS]                  = {.nvs_key_name = "fanhyst",         .type = TYPE_U16,   .default_value = {.u16 = THERMAL_HYSTERESIS_DEFAULT_C},                .rest_name = "fanCurveHysteresis",                 .min = 0,  .max = THERMAL_HYSTERESIS_MAX_C},
 
     [NVS_CONFIG_STATISTICS_FREQUENCY]                  = {.nvs_key_name = "statsFrequency",  .type = TYPE_U16,                                                                          .rest_name = "statsFrequency",                     .min = 0,  .max = UINT16_MAX},
 

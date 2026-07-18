@@ -5,6 +5,17 @@ import {
   buildTuningPresets,
   firmwareRangeValidator,
   pendingChanges,
+  FAN_CURVE_BOUNDS,
+  FanCurvePoint,
+  THERMAL_PROFILES,
+  activeThermalProfile,
+  buildSettingsPayload,
+  curveFromFormValue,
+  curvePreviewModel,
+  curveSegmentLabel,
+  fanCurveSummary,
+  thermalModeLabel,
+  validateFanCurve,
 } from './tuning';
 
 // Board-601 (Gamma / BM1370) values as served by GET /api/system/asic.
@@ -150,6 +161,203 @@ describe('tuning', () => {
 
     it('is empty when nothing changed', () => {
       expect(pendingChanges({ frequency: 625 }, { frequency: 625 }, NO_RESTART)).toEqual([]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2H — thermal control model (mirrors the firmware contract)
+// ---------------------------------------------------------------------------
+
+describe('tuning thermal control (Phase 2H)', () => {
+  const validCurve: FanCurvePoint[] = [
+    { tempC: 45, fanPercent: 25 },
+    { tempC: 52, fanPercent: 45 },
+    { tempC: 58, fanPercent: 70 },
+    { tempC: 64, fanPercent: 100 },
+  ];
+
+  describe('validateFanCurve', () => {
+    it('accepts the firmware default curve', () => {
+      expect(validateFanCurve(validCurve)).toEqual([]);
+    });
+
+    it('rejects wrong point counts', () => {
+      expect(validateFanCurve(validCurve.slice(0, 3)).length).toBe(1);
+      expect(validateFanCurve([...validCurve, { tempC: 66, fanPercent: 100 }]).length).toBe(1);
+      expect(validateFanCurve([]).length).toBe(1);
+      expect(validateFanCurve(null).length).toBe(1);
+      expect(validateFanCurve(undefined).length).toBe(1);
+    });
+
+    it('rejects duplicate and descending temperatures', () => {
+      const dup = validCurve.map(p => ({ ...p }));
+      dup[1].tempC = 45;
+      expect(validateFanCurve(dup).some(e => e.includes('higher than'))).toBeTrue();
+
+      const desc = validCurve.map(p => ({ ...p }));
+      desc[2].tempC = 40;
+      expect(validateFanCurve(desc).length).toBeGreaterThan(0);
+    });
+
+    it('rejects descending fan percentages', () => {
+      const bad = validCurve.map(p => ({ ...p }));
+      bad[3].fanPercent = 10;
+      expect(validateFanCurve(bad).some(e => e.includes('may not decrease'))).toBeTrue();
+    });
+
+    it('rejects out-of-range and non-integer and non-finite values', () => {
+      const hot = validCurve.map(p => ({ ...p }));
+      hot[3].tempC = FAN_CURVE_BOUNDS.tempC.max + 1;
+      expect(validateFanCurve(hot).length).toBeGreaterThan(0);
+
+      const cold = validCurve.map(p => ({ ...p }));
+      cold[0].tempC = FAN_CURVE_BOUNDS.tempC.min - 1;
+      expect(validateFanCurve(cold).length).toBeGreaterThan(0);
+
+      const overFan = validCurve.map(p => ({ ...p }));
+      overFan[3].fanPercent = 101;
+      expect(validateFanCurve(overFan).length).toBeGreaterThan(0);
+
+      const fractional = validCurve.map(p => ({ ...p }));
+      fractional[1].tempC = 52.5;
+      expect(validateFanCurve(fractional).some(e => e.includes('whole number'))).toBeTrue();
+
+      const nan = validCurve.map(p => ({ ...p }));
+      nan[1].fanPercent = NaN;
+      expect(validateFanCurve(nan).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('thermal profiles (pending templates only)', () => {
+    it('every profile is valid under the firmware contract', () => {
+      for (const profile of THERMAL_PROFILES) {
+        expect(validateFanCurve(profile.points))
+          .withContext(`profile ${profile.id}`)
+          .toEqual([]);
+      }
+    });
+
+    it('every profile still reaches 100% fan at or before 64 °C (no silence-over-protection)', () => {
+      for (const profile of THERMAL_PROFILES) {
+        const final = profile.points[profile.points.length - 1];
+        expect(final.fanPercent).withContext(`profile ${profile.id}`).toBe(100);
+        expect(final.tempC).withContext(`profile ${profile.id}`).toBeLessThanOrEqual(64);
+      }
+    });
+
+    it('Balanced matches the firmware default curve exactly', () => {
+      expect(THERMAL_PROFILES.find(p => p.id === 'balanced')?.points).toEqual(validCurve);
+    });
+
+    it('activeThermalProfile identifies matches and falls back to custom on any divergence', () => {
+      expect(activeThermalProfile(validCurve)).toBe('balanced');
+      const custom = validCurve.map(p => ({ ...p }));
+      custom[2].fanPercent = 71;
+      expect(activeThermalProfile(custom)).toBe('custom');
+    });
+  });
+
+  describe('curvePreviewModel', () => {
+    it('maps curve points into the viewbox with the firmware plateaus', () => {
+      const model = curvePreviewModel(validCurve, 280, 120, 8);
+      expect(model.markers.length).toBe(4);
+      // strictly increasing x, strictly decreasing y (fan rises)
+      for (let i = 1; i < model.markers.length; i++) {
+        expect(model.markers[i].x).toBeGreaterThan(model.markers[i - 1].x);
+        expect(model.markers[i].y).toBeLessThan(model.markers[i - 1].y);
+      }
+      // polyline includes the plateau endpoints at 20 °C and 70 °C
+      const xs = model.polyline.split(' ').map(pair => Number(pair.split(',')[0]));
+      expect(xs[0]).toBe(8);
+      expect(xs[xs.length - 1]).toBe(272);
+    });
+
+    it('renders nothing for an invalid curve instead of a misleading shape', () => {
+      const bad = validCurve.map(p => ({ ...p }));
+      bad[1].tempC = 45;
+      const model = curvePreviewModel(bad);
+      expect(model.polyline).toBe('');
+      expect(model.markers).toEqual([]);
+    });
+
+    it('places the live-temperature marker only inside the drawable range', () => {
+      const model = curvePreviewModel(validCurve);
+      expect(model.tempX(45)).not.toBeNull();
+      expect(model.tempX(10)).toBeNull();
+      expect(model.tempX(80)).toBeNull();
+      expect(model.tempX(null)).toBeNull();
+      expect(model.tempX(NaN)).toBeNull();
+    });
+  });
+
+  describe('buildSettingsPayload', () => {
+    const rawCurveControls = {
+      fanCurveTemp0: 45, fanCurveFan0: 25,
+      fanCurveTemp1: 52, fanCurveFan1: 45,
+      fanCurveTemp2: 58, fanCurveFan2: 70,
+      fanCurveTemp3: 64, fanCurveFan3: 100,
+    };
+
+    it('sends a structured fanCurve array and syncs autofanspeed in curve mode', () => {
+      const payload = buildSettingsPayload({
+        thermalControlMode: 'curve', fanCurveHysteresis: 2, temptarget: 60, ...rawCurveControls,
+      });
+      expect(payload['fanCurve']).toEqual(validCurve);
+      expect(payload['autofanspeed']).toBeTrue();
+      expect(payload['thermalControlMode']).toBe('curve');
+      expect(payload['fanCurveHysteresis']).toBe(2);
+      // internal editor controls never leak into the API payload
+      expect(Object.keys(payload).some(k => k.startsWith('fanCurveTemp') || k.startsWith('fanCurveFan'))).toBeFalse();
+    });
+
+    it('never sends an invalid curve', () => {
+      const payload = buildSettingsPayload({
+        thermalControlMode: 'curve', ...rawCurveControls, fanCurveTemp1: 45,
+      });
+      expect(payload['fanCurve']).toBeUndefined();
+    });
+
+    it('maps target and manual modes onto the legacy autofanspeed flag', () => {
+      expect(buildSettingsPayload({ thermalControlMode: 'target', ...rawCurveControls })['autofanspeed']).toBeTrue();
+      expect(buildSettingsPayload({ thermalControlMode: 'manual', ...rawCurveControls })['autofanspeed']).toBeFalse();
+      // no fanCurve outside curve mode
+      expect(buildSettingsPayload({ thermalControlMode: 'target', ...rawCurveControls })['fanCurve']).toBeUndefined();
+    });
+
+    it('leaves unrelated fields untouched and does not add a mode when none is set', () => {
+      const payload = buildSettingsPayload({ frequency: 485, coreVoltage: 1150 });
+      expect(payload).toEqual({ frequency: 485, coreVoltage: 1150 });
+    });
+
+    it('curveFromFormValue reads the flat controls in order', () => {
+      expect(curveFromFormValue(rawCurveControls as any)).toEqual(validCurve);
+    });
+  });
+
+  describe('labels', () => {
+    it('thermalModeLabel names the three modes and dashes the unknown', () => {
+      expect(thermalModeLabel('target')).toBe('Target Temperature');
+      expect(thermalModeLabel('curve')).toBe('Fan Curve');
+      expect(thermalModeLabel('manual')).toBe('Manual Fan');
+      expect(thermalModeLabel('bogus')).toBe('—');
+      expect(thermalModeLabel(undefined)).toBe('—');
+    });
+
+    it('curveSegmentLabel maps the firmware segment semantics', () => {
+      expect(curveSegmentLabel(-1)).toBe('—');
+      expect(curveSegmentLabel(0)).toBe('Below curve');
+      expect(curveSegmentLabel(1)).toBe('P1 → P2');
+      expect(curveSegmentLabel(3)).toBe('P3 → P4');
+      expect(curveSegmentLabel(4)).toBe('Above final point');
+      expect(curveSegmentLabel('x')).toBe('—');
+      expect(curveSegmentLabel(2.5)).toBe('—');
+    });
+
+    it('fanCurveSummary renders a compact readable line', () => {
+      expect(fanCurveSummary(validCurve)).toBe('45°→25% · 52°→45% · 58°→70% · 64°→100%');
+      expect(fanCurveSummary([])).toBe('—');
+      expect(fanCurveSummary(undefined)).toBe('—');
     });
   });
 });

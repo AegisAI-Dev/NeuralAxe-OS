@@ -173,6 +173,10 @@ void POWER_MANAGEMENT_task(void * pvParameters)
             last_known_asic_frequency = nvs_config_get_float(NVS_CONFIG_ASIC_FREQUENCY);
             nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, false);
             nvs_config_set_u16(NVS_CONFIG_MANUAL_FAN_SPEED, 100);
+            // Phase 2H: stamp the mode field to match the forced manual-100%
+            // writes above, so recovery keeps the exact legacy semantics
+            // (manual full fan until the owner reconfigures) in every mode.
+            nvs_config_set_string(NVS_CONFIG_THERMAL_MODE, "manual");
             nvs_config_set_bool(NVS_CONFIG_OVERHEAT_MODE, true);
             ESP_LOGW(TAG, "Entering safe mode due to overheat condition. System operation halted.");
             mining_stop(GLOBAL_STATE);

@@ -12,6 +12,7 @@ import { DateAgoPipe } from 'src/app/pipes/date-ago.pipe';
 import { DeckFmt, fmtLatency } from './deck-format';
 import {
   SoloOdds,
+  ThermalControlInsight,
   ThermalHeadroom,
   bestDiffPctOfNetwork,
   compactNumber,
@@ -24,8 +25,10 @@ import {
   rejectRatePct,
   sharesPerHour,
   soloOdds,
+  thermalControlInsight,
   thermalHeadroom,
 } from './deck-intel';
+import { curveSegmentLabel, fanCurveSummary, thermalModeLabel } from '../edit/tuning';
 
 /** One derived, read-only operational insight (frontend-only view model). */
 export interface DeckInsight {
@@ -416,6 +419,32 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
     return thermalHeadroom(info.temp, info.temptarget, (info.autofanspeed ?? 0) == 1, info.fanspeed);
   }
 
+  // ---- Phase 2H thermal-control visibility (thin wrappers, tested logic) ----
+
+  public thermalIntel(info: ISystemInfo): ThermalControlInsight {
+    return thermalControlInsight(info);
+  }
+
+  public thermalModeText(info: ISystemInfo): string {
+    return thermalModeLabel(info.thermalControlMode);
+  }
+
+  public curveSegmentText(info: ISystemInfo): string {
+    return curveSegmentLabel(info.activeCurveSegment);
+  }
+
+  public fanCurveText(info: ISystemInfo): string {
+    return fanCurveSummary(info.fanCurve);
+  }
+
+  public controlTempText(info: ISystemInfo): string {
+    const t = info.effectiveControlTemperature;
+    if (typeof t !== 'number' || !isFinite(t) || t <= 0 || info.controlSensorValid !== 1) {
+      return DeckFmt.INVALID;
+    }
+    return DeckFmt.temp(t);
+  }
+
   /** Measured minus configured core voltage in mV; null without both readings. */
   public voltageDeltaMv(info: ISystemInfo): number | null {
     const configured = info.coreVoltage;
@@ -439,6 +468,13 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
       insights.push({ icon: 'pi-exclamation-triangle', severity: 'error', label: 'Overheat protection', detail: 'Device entered overheat mode' });
     } else {
       insights.push({ icon: 'pi-wave-pulse', severity: 'ok', label: 'Stable', detail: 'All systems normal' });
+    }
+
+    // Live fan-decision transparency (Phase 2H). Skipped during overheat:
+    // the emergency insight above already owns that state.
+    if (!overheat) {
+      const thermal = thermalControlInsight(info);
+      insights.push({ icon: thermal.icon, severity: thermal.severity, label: thermal.label, detail: thermal.detail });
     }
 
     const eff = this.efficiency(info);

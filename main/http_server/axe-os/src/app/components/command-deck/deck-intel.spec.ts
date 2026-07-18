@@ -9,6 +9,7 @@ import {
   rejectRatePct,
   sharesPerHour,
   soloOdds,
+  thermalControlInsight,
   thermalHeadroom,
 } from './deck-intel';
 
@@ -168,6 +169,65 @@ describe('deck-intel', () => {
     it('reports the signed delta from target', () => {
       expect(thermalHeadroom(58, 55, true, 40).deltaC).toBe(3);
       expect(thermalHeadroom(50, 55, true, 40).deltaC).toBe(-5);
+    });
+  });
+
+  describe('thermalControlInsight (Phase 2H fan-decision transparency)', () => {
+    const curveInfo = {
+      thermalControlMode: 'curve', thermalControlReason: 'curve active',
+      emergencyOverrideActive: 0, controlSensorValid: 1, hysteresisHolding: 0,
+      requestedFanPercent: 62, appliedFanPercent: 62,
+    };
+
+    it('reserves the error severity for the genuine emergency override', () => {
+      const insight = thermalControlInsight({ ...curveInfo, emergencyOverrideActive: 1 });
+      expect(insight.severity).toBe('error');
+      expect(insight.label).toBe('Emergency thermal override');
+
+      // Everything below emergency must never be red.
+      expect(thermalControlInsight(curveInfo).severity).not.toBe('error');
+      expect(thermalControlInsight({ ...curveInfo, fanCurveError: 'malformed' }).severity).not.toBe('error');
+      expect(thermalControlInsight({ ...curveInfo, controlSensorValid: 0 }).severity).not.toBe('error');
+    });
+
+    it('warns on an invalid stored curve and names the safe fallback', () => {
+      const insight = thermalControlInsight({ ...curveInfo, fanCurveError: 'temperatures not ascending' });
+      expect(insight.severity).toBe('warn');
+      expect(insight.label).toBe('Curve configuration invalid — safe fallback active');
+      expect(insight.detail).toContain('temperatures not ascending');
+      expect(insight.detail).toContain('target control');
+    });
+
+    it('reports waiting for valid sensor data before telemetry exists', () => {
+      const insight = thermalControlInsight({ ...curveInfo, controlSensorValid: 0 });
+      expect(insight.severity).toBe('info');
+      expect(insight.label).toBe('Waiting for valid sensor data');
+    });
+
+    it('describes stable curve control including the hysteresis hold', () => {
+      expect(thermalControlInsight(curveInfo).label).toBe('Curve control stable');
+      expect(thermalControlInsight(curveInfo).detail).toContain('62 %');
+
+      const holding = thermalControlInsight({
+        ...curveInfo, hysteresisHolding: 1, requestedFanPercent: 55, appliedFanPercent: 70,
+      });
+      expect(holding.label).toBe('Curve control stable');
+      expect(holding.detail).toContain('70 %');
+      expect(holding.detail).toContain('55 %');
+    });
+
+    it('labels target and manual modes and keeps manual honest about protection', () => {
+      expect(thermalControlInsight({ ...curveInfo, thermalControlMode: 'target' }).label).toBe('Target control active');
+      const manual = thermalControlInsight({ ...curveInfo, thermalControlMode: 'manual' });
+      expect(manual.label).toBe('Manual fan active');
+      expect(manual.severity).toBe('info');
+      expect(manual.detail.toLowerCase()).toContain('thermal protection still overrides');
+    });
+
+    it('degrades gracefully when the device reports no mode', () => {
+      const insight = thermalControlInsight({ controlSensorValid: 1 });
+      expect(insight.severity).toBe('info');
+      expect(insight.label).toBe('Thermal control state unknown');
     });
   });
 });

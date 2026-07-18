@@ -167,48 +167,196 @@
             <h3 class="nx-section-heading mt-0">Thermal Control</h3>
 
             <div class="card h-full">
-                <div class="field-checkbox grid my-2">
-                    <div class="col-1 md:col-8 md:flex-order-2">
-                        <p-checkbox name="autofanspeed" formControlName="autofanspeed" inputId="autofanspeed" [binary]="true"></p-checkbox>
-                    </div>
-                    <label for="autofanspeed" class="col-11 m-0 pl-3 md:col-4 md:flex-order-1 md:p-2">Automatic Fan Control</label>
+                <label class="block mb-2 text-sm">Control Mode
+                    <span class="text-500">(explicit choice — nothing switches modes automatically)</span></label>
+                <div class="flex gap-2 flex-wrap mb-3" role="radiogroup" aria-label="Thermal control mode">
+                    <button *ngFor="let mode of ['target', 'curve', 'manual']" pButton type="button"
+                        class="p-button-sm"
+                        [class.p-button-secondary]="thermalMode !== mode"
+                        [attr.aria-pressed]="thermalMode === mode"
+                        (click)="setThermalMode(mode === 'target' ? 'target' : mode === 'curve' ? 'curve' : 'manual')">
+                        {{ thermalModeLabelFor(mode) }}
+                    </button>
                 </div>
 
-                <div *ngIf="form.controls['autofanspeed'].value" class="grid p-fluid my-2">
-                    <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Target Temperature</label>
-                    <div class="col-12 md:col-8">
-                        <label class="block mb-1">
-                            <span class="md:hidden mr-1">Target Temperature:</span>{{form.controls['temptarget'].value}} °C
-                        </label>
-                        <p-slider [min]="35" [max]="66" formControlName="temptarget"></p-slider>
+                <!-- TARGET: the existing PID target-temperature behavior -->
+                <ng-container *ngIf="thermalMode === 'target'">
+                    <div class="grid p-fluid my-2">
+                        <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Target Temperature</label>
+                        <div class="col-12 md:col-8">
+                            <label class="block mb-1">
+                                <span class="md:hidden mr-1">Target Temperature:</span>{{form.controls['temptarget'].value}} °C
+                            </label>
+                            <p-slider [min]="35" [max]="66" formControlName="temptarget"></p-slider>
+                        </div>
                     </div>
-                </div>
 
-                <div *ngIf="form.controls['autofanspeed'].value" class="grid p-fluid">
-                    <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Minimum Fan Speed</label>
-                    <div class="col-12 md:col-8">
-                        <label class="block mb-1">
-                            <span class="md:hidden mr-1">Minimum Fan Speed:</span>{{form.controls['minfanspeed'].value}} %
-                        </label>
-                        <p-slider [min]="0" [max]="99" formControlName="minfanspeed"></p-slider>
+                    <div class="grid p-fluid">
+                        <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Minimum Fan Speed</label>
+                        <div class="col-12 md:col-8">
+                            <label class="block mb-1">
+                                <span class="md:hidden mr-1">Minimum Fan Speed:</span>{{form.controls['minfanspeed'].value}} %
+                            </label>
+                            <p-slider [min]="0" [max]="99" formControlName="minfanspeed"></p-slider>
+                        </div>
                     </div>
-                </div>
+                </ng-container>
 
-                <div *ngIf="!form.controls['autofanspeed'].value" class="grid p-fluid mt-2">
-                    <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Fan Speed</label>
-                    <div class="col-12 md:col-8">
-                        <label class="block mb-1">
-                            <span class="md:hidden mr-1">Fan Speed:</span>{{form.controls['manualFanSpeed'].value}} %
-                            <b *ngIf="form.controls['manualFanSpeed'].value < 33" class="text-primary">
-                                Danger: Could Cause Overheating
-                            </b>
-                            <b *ngIf="form.controls['manualFanSpeed'].value == 100" class="text-orange-500 ml-2">
-                                S19 Simulator
-                            </b>
-                        </label>
-                        <p-slider formControlName="manualFanSpeed"></p-slider>
+                <!-- CURVE: NeuralAxe fan curve (opt-in) -->
+                <ng-container *ngIf="thermalMode === 'curve'">
+                    <div class="mb-3">
+                        <label class="block mb-2 text-sm">Curve Templates
+                            <span class="text-500">(fills the pending editor — nothing applies until you save)</span></label>
+                        <div class="flex gap-2 flex-wrap">
+                            <button *ngFor="let profile of thermalProfiles" pButton type="button"
+                                class="p-button-sm"
+                                [class.p-button-secondary]="activeThermalProfile !== profile.id"
+                                [attr.aria-pressed]="activeThermalProfile === profile.id"
+                                (click)="applyThermalProfile(profile)"
+                                [pTooltip]="profile.description">
+                                {{ profile.label }}
+                            </button>
+                            <span class="nx-pill align-self-center" *ngIf="activeThermalProfile === 'custom'">Custom</span>
+                        </div>
                     </div>
-                </div>
+
+                    <div class="mb-3" *ngIf="curvePreview as preview">
+                        <svg [attr.viewBox]="'0 0 ' + preview.width + ' ' + preview.height"
+                             [attr.width]="'100%'" [attr.height]="preview.height" role="img"
+                             aria-label="Fan curve preview: fan percentage over temperature"
+                             style="max-width: 100%; display: block;">
+                            <rect x="0" y="0" [attr.width]="preview.width" [attr.height]="preview.height"
+                                  fill="none" stroke="var(--surface-border)" />
+                            <polyline *ngIf="preview.polyline" [attr.points]="preview.polyline"
+                                      fill="none" stroke="var(--primary-color)" stroke-width="2" />
+                            <circle *ngFor="let marker of preview.markers"
+                                    [attr.cx]="marker.x" [attr.cy]="marker.y" r="3.5"
+                                    fill="var(--primary-color)">
+                                <title>{{ marker.tempC }} °C → {{ marker.fanPercent }} %</title>
+                            </circle>
+                            <ng-container *ngIf="!uri && (measured$ | async) as live">
+                                <line *ngIf="preview.tempX(live.effectiveControlTemperature) as liveX"
+                                      [attr.x1]="liveX" [attr.x2]="liveX" y1="0" [attr.y2]="preview.height"
+                                      stroke="var(--text-color-secondary)" stroke-dasharray="4 3" stroke-width="1">
+                                    <title>Effective control temperature now</title>
+                                </line>
+                            </ng-container>
+                        </svg>
+                        <small class="flex justify-content-between text-500">
+                            <span>{{ curveBounds.tempC.min }} °C</span>
+                            <span>fan 0–100 % · dashed line = control temperature now</span>
+                            <span>{{ curveBounds.tempC.max }} °C</span>
+                        </small>
+                    </div>
+
+                    <div class="grid p-fluid" *ngFor="let tempControl of curveTempControls; let i = index">
+                        <label class="col-12 md:col-4 md:m-0 flex align-items-center" [attr.for]="tempControl">Point {{ i + 1 }}</label>
+                        <div class="col-6 md:col-4">
+                            <span class="p-input-icon-right w-full">
+                                <input pInputText [id]="tempControl" [formControlName]="tempControl" type="number"
+                                       [attr.min]="curveBounds.tempC.min" [attr.max]="curveBounds.tempC.max" step="1"
+                                       [attr.aria-label]="'Point ' + (i + 1) + ' temperature in °C'" />
+                            </span>
+                            <small class="block text-500">°C</small>
+                        </div>
+                        <div class="col-6 md:col-4">
+                            <input pInputText [id]="curveFanControls[i]" [formControlName]="curveFanControls[i]" type="number"
+                                   [attr.min]="curveBounds.fanPercent.min" [attr.max]="curveBounds.fanPercent.max" step="1"
+                                   [attr.aria-label]="'Point ' + (i + 1) + ' fan percent'" />
+                            <small class="block text-500">% fan</small>
+                        </div>
+                    </div>
+
+                    <div *ngIf="curveErrors.length" class="mt-2">
+                        <small *ngFor="let error of curveErrors" class="block text-red-500">{{ error }}</small>
+                    </div>
+
+                    <div class="grid p-fluid mt-2">
+                        <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Hysteresis</label>
+                        <div class="col-12 md:col-8">
+                            <label class="block mb-1">
+                                <span class="md:hidden mr-1">Hysteresis:</span>{{form.controls['fanCurveHysteresis'].value}} °C
+                            </label>
+                            <p-slider [min]="curveBounds.hysteresis.min" [max]="curveBounds.hysteresis.max"
+                                      formControlName="fanCurveHysteresis"></p-slider>
+                            <small class="block text-500 mt-1">
+                                Prevents fan-speed bouncing: after the fan speeds up, it only slows down again once the
+                                control temperature has cooled this many °C below the temperature at that change.
+                                <b class="text-color">Speed increases are never delayed.</b>
+                            </small>
+                        </div>
+                    </div>
+
+                    <div class="grid p-fluid">
+                        <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Minimum Fan Speed</label>
+                        <div class="col-12 md:col-8">
+                            <label class="block mb-1">
+                                <span class="md:hidden mr-1">Minimum Fan Speed:</span>{{form.controls['minfanspeed'].value}} %
+                            </label>
+                            <p-slider [min]="0" [max]="99" formControlName="minfanspeed"></p-slider>
+                            <small class="block text-500 mt-1">Stays authoritative as a floor under the whole curve.</small>
+                        </div>
+                    </div>
+
+                    <ng-container *ngIf="!uri && (measured$ | async) as live">
+                        <div class="nx-statrow mt-2">
+                            <div class="nx-stat">
+                                <label>Control Temp</label>
+                                <span>{{ (live.effectiveControlTemperature ?? -1) > 0 ? fmt.temp(live.effectiveControlTemperature) : '—' }}</span>
+                            </div>
+                            <div class="nx-stat">
+                                <label>Requested Fan</label>
+                                <span>{{ fmt.int(live.requestedFanPercent, ' %') }}</span>
+                            </div>
+                            <div class="nx-stat">
+                                <label>Applied Fan</label>
+                                <span>{{ fmt.int(live.appliedFanPercent, ' %') }}</span>
+                            </div>
+                            <div class="nx-stat">
+                                <label>Segment</label>
+                                <span>{{ curveSegmentText(live.activeCurveSegment) }}</span>
+                            </div>
+                            <div class="nx-stat">
+                                <label>Driving Sensor</label>
+                                <span>{{ live.controlSensorValid === 1 ? live.controlSensor : 'none' }}</span>
+                            </div>
+                            <div class="nx-stat">
+                                <label>State</label>
+                                <span [class.nx-danger-text]="live.emergencyOverrideActive === 1"
+                                      [class.nx-warn-text]="live.emergencyOverrideActive !== 1 && !!live.fanCurveError">
+                                    {{ live.emergencyOverrideActive === 1 ? 'EMERGENCY OVERRIDE' : (live.thermalControlReason || '—') }}
+                                </span>
+                            </div>
+                        </div>
+                        <small *ngIf="live.fanCurveError" class="block nx-warn-text mt-1">
+                            Stored curve rejected ({{ live.fanCurveError }}) — the firmware is running the safe
+                            target-temperature fallback until a valid curve is saved.
+                        </small>
+                    </ng-container>
+                </ng-container>
+
+                <!-- MANUAL: the existing manual fan percentage -->
+                <ng-container *ngIf="thermalMode === 'manual'">
+                    <div class="grid p-fluid mt-2">
+                        <label class="hidden md:flex md:col-4 md:m-0 hover-next-input">Fan Speed</label>
+                        <div class="col-12 md:col-8">
+                            <label class="block mb-1">
+                                <span class="md:hidden mr-1">Fan Speed:</span>{{form.controls['manualFanSpeed'].value}} %
+                                <b *ngIf="form.controls['manualFanSpeed'].value < 33" class="text-primary">
+                                    Danger: Could Cause Overheating
+                                </b>
+                                <b *ngIf="form.controls['manualFanSpeed'].value == 100" class="text-orange-500 ml-2">
+                                    S19 Simulator
+                                </b>
+                            </label>
+                            <p-slider formControlName="manualFanSpeed"></p-slider>
+                        </div>
+                    </div>
+                    <div class="nx-note mt-2">
+                        Manual mode does <b class="text-color">not</b> disable thermal protection: on overheat the
+                        firmware still forces 100&nbsp;% fan, stops mining and enters safe mode regardless of this slider.
+                    </div>
+                </ng-container>
 
                 <div *ngIf="!uri && (measured$ | async) as live" class="nx-note mt-3">
                     Measured right now: <b class="text-color">{{ fmt.temp(live.temp) }}</b> ASIC
@@ -218,11 +366,10 @@
                 </div>
 
                 <div class="nx-note mt-3">
-                    Supported thermal controls: automatic fan mode, target temperature (35–66 °C),
-                    minimum fan speed, manual fan speed. Fan curves, temperature-limit tuning,
-                    hysteresis and power-limit controls are
-                    <b class="text-500">not supported by the current firmware contract</b>
-                    and are deliberately not offered here.
+                    All three modes control normal operation only. Emergency thermal protection
+                    (overheat shutdown, forced 100&nbsp;% fan, VRM limits) is firmware-fixed and always
+                    overrides the selected mode, curve, hysteresis and minimum/maximum fan settings.
+                    Thermal settings apply live after Save — no restart needed.
                 </div>
             </div>
         </div>

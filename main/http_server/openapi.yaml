@@ -109,6 +109,23 @@ components:
           description: Number of errors
           type: number
 
+    FanCurvePoint:
+      type: object
+      required:
+        - tempC
+        - fanPercent
+      properties:
+        tempC:
+          type: integer
+          minimum: 20
+          maximum: 70
+          description: Curve point temperature in °C (board-601 bounds; the final point stays at least 5 °C below the 75 °C hard-throttle limit)
+        fanPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Fan duty percentage at this temperature
+
     SystemInfo:
       type: object
       required:
@@ -134,6 +151,18 @@ components:
         - fan2rpm
         - fanspeed
         - temptarget
+        - thermalControlMode
+        - fanCurve
+        - fanCurveHysteresis
+        - effectiveControlTemperature
+        - requestedFanPercent
+        - appliedFanPercent
+        - activeCurveSegment
+        - thermalControlReason
+        - emergencyOverrideActive
+        - hysteresisHolding
+        - controlSensor
+        - controlSensorValid
         - rotation
         - cpuUsage
         - freeHeap
@@ -282,6 +311,53 @@ components:
         temptarget:
           type: number
           description: Target Temperature for the PID Controller
+        thermalControlMode:
+          type: string
+          enum: [target, curve, manual]
+          description: Effective configured thermal-control mode. Legacy installations without a stored mode resolve from autofanspeed (1=target, 0=manual); curve is opt-in only.
+        fanCurve:
+          type: array
+          items:
+            $ref: '#/components/schemas/FanCurvePoint'
+          minItems: 4
+          maxItems: 4
+          description: Configured fan curve (stored curve when valid, board-601 default otherwise; see fanCurveError)
+        fanCurveHysteresis:
+          type: integer
+          minimum: 0
+          maximum: 8
+          description: Curve-mode hysteresis in °C. Downward fan transitions wait until the control temperature has cooled this far below the temperature at the last duty change; upward transitions are never delayed.
+        effectiveControlTemperature:
+          type: number
+          description: Temperature currently feeding the active control path (EMA-smoothed max of valid ASIC temperatures); -1 when no valid reading exists
+        requestedFanPercent:
+          type: number
+          description: Raw control decision before hysteresis and emergency overrides
+        appliedFanPercent:
+          type: number
+          description: Fan duty actually commanded to the fan controller
+        activeCurveSegment:
+          type: integer
+          description: Active curve segment (-1 outside curve control, 0 below the first point, 1-3 interpolating, 4 at/above the final point)
+        thermalControlReason:
+          type: string
+          description: Human-readable reason for the current fan decision
+        emergencyOverrideActive:
+          type: integer
+          description: Whether emergency thermal protection is forcing 100% fan (0=no, 1=yes)
+        hysteresisHolding:
+          type: integer
+          description: Whether curve hysteresis is holding a higher duty than requested (0=no, 1=yes)
+        controlSensor:
+          type: string
+          enum: [asic, asic2, none]
+          description: Sensor currently driving the fan decision
+        controlSensorValid:
+          type: integer
+          description: Whether the driving temperature reading is currently valid (0=no, 1=yes)
+        fanCurveError:
+          type: string
+          description: Present only when the persisted fan curve failed validation; the control loop is running the safe target-control fallback
         responseTime:
           type: number
           description: Pool response time in ms
@@ -848,6 +924,26 @@ components:
           maximum: 100
           examples:
             - 66
+        thermalControlMode:
+          type: string
+          enum: [target, curve, manual]
+          description: Thermal-control mode. Saving a mode also syncs the legacy autofanspeed flag (target/curve → 1, manual → 0) so a firmware rollback lands in the matching safe mode. Curve control is opt-in only.
+          examples:
+            - target
+        fanCurve:
+          type: array
+          items:
+            $ref: '#/components/schemas/FanCurvePoint'
+          minItems: 4
+          maxItems: 4
+          description: Fan curve as exactly 4 points with strictly ascending temperatures and non-decreasing fan percentages. The firmware rejects the whole request if any point is invalid; the curve is never accepted as a free-form string.
+        fanCurveHysteresis:
+          type: integer
+          minimum: 0
+          maximum: 8
+          description: Curve-mode hysteresis in °C (downward transitions only; upward fan changes are never delayed)
+          examples:
+            - 2
         displayTimeout:
           type: integer
           description: Set display timeout time in minutes (-1=display on, 0=display off)
