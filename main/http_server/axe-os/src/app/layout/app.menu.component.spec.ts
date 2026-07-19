@@ -30,7 +30,7 @@ describe('AppMenuComponent (NeuralAxe navigation architecture)', () => {
     const links = flatItems().filter(i => i.routerLink).map(i => String(i.routerLink[0]));
     expect(links.sort()).toEqual([
       '/', 'about', 'classic', 'design', 'logs', 'network',
-      'pool', 'scoreboard', 'settings', 'swarm', 'system', 'update',
+      'pool', 'scoreboard', 'settings', 'stability-lab', 'swarm', 'system', 'update',
     ].sort());
     expect(new Set(links).size).toBe(links.length);
   });

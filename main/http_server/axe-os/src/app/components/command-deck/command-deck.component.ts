@@ -34,6 +34,15 @@ import { curveSegmentLabel, fanCurveSummary, thermalModeLabel } from '../edit/tu
 import { FleetDevice, fleetSummary } from '../swarm/fleet-intel';
 import { LocalStorageService } from 'src/app/local-storage.service';
 
+/** Compact Stability Lab entry (2K): shown only when a session is active or
+ *  completed sessions exist. */
+export interface LabGlance {
+  active: boolean;
+  sessions: number;
+  lastState: string | null;
+  lastAt: number | null;
+}
+
 /** Snapshot of the stored fleet list for the compact deck entry (2I). */
 export interface FleetGlance {
   total: number;
@@ -130,6 +139,9 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
   /** Non-null only when the Fleet page has genuinely discovered devices. */
   public fleetGlance: FleetGlance | null = null;
 
+  /** Non-null only when a Stability Lab session is active or has completed. */
+  public labGlance: LabGlance | null = null;
+
   constructor(
     private liveDataService: LiveDataService,
     private systemService: SystemApiService,
@@ -143,6 +155,28 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
       shareReplay({ refCount: true, bufferSize: 1 })
     );
     this.fleetGlance = this.deriveFleetGlance();
+    this.labGlance = this.deriveLabGlance();
+  }
+
+  /**
+   * Compact Stability Lab snapshot for the deck (2K). Shown only when a session
+   * is genuinely active or at least one session has completed — never an empty
+   * placeholder. Reads the same localStorage keys the Lab writes.
+   */
+  private deriveLabGlance(): LabGlance | null {
+    const active = !!this.localStorageService.getObject('NX_STABILITY_ACTIVE');
+    const sessions = this.localStorageService.getObject('NX_STABILITY_SESSIONS');
+    const list = Array.isArray(sessions) ? sessions : [];
+    if (!active && list.length === 0) {
+      return null;
+    }
+    const last = list[0];
+    return {
+      active,
+      sessions: list.length,
+      lastState: last?.finalState ?? null,
+      lastAt: typeof last?.finishedAt === 'number' ? last.finishedAt : null,
+    };
   }
 
   /**

@@ -1,0 +1,462 @@
+<div class="layout-main nx-lab" *ngIf="info$ | async as info">
+  <h2 class="nx-page-title">Stability Lab</h2>
+  <p class="nx-page-desc">
+    Benchmark your own tuning profiles with measured evidence. The Lab applies profiles you choose,
+    collects real telemetry, stops safely when your limits are crossed, and restores your original
+    configuration. It never overclocks on its own, never raises voltage on its own, and never promotes
+    a profile without your explicit action.
+  </p>
+
+  <!-- Interrupted-session recovery notice -->
+  <div class="card nx-note nx-note-warn nx-lab-interrupt" *ngIf="interruptedNotice">
+    <i class="pi pi-exclamation-triangle"></i>
+    <b>Operator session interrupted.</b>
+    A previous Stability Lab run was cut off (browser closed or refreshed) before it finished cleanly.
+    On-device settings may not reflect a completed restore — please verify the device configuration on the
+    Tuning &amp; Thermal page before starting a new session.
+    <button class="nx-chip" (click)="interruptedNotice = false">Dismiss</button>
+  </div>
+
+  <!-- ===================== TOP STATUS ROW ===================== -->
+  <div class="nx-lab-top">
+    <!-- Supported device -->
+    <div class="card nx-lab-card" [ngClass]="supported.supported ? 'nx-lab-ok' : 'nx-lab-block'">
+      <div class="nx-card-title" [ngClass]="supported.supported ? '' : 'nx-cyan'">Supported device</div>
+      <div class="nx-lab-devclass" [ngClass]="supported.supported ? 'nx-ok-text' : 'nx-warn-text'">
+        <i class="pi" [ngClass]="supported.supported ? 'pi-check-circle' : 'pi-ban'"></i>
+        <b>{{ supported.label }}</b>
+      </div>
+      <p class="nx-lab-detail">{{ supported.detail }}</p>
+      <ul class="nx-lab-reasons" *ngIf="!supported.supported && supported.reasons.length">
+        <li *ngFor="let r of supported.reasons">{{ r }}</li>
+      </ul>
+    </div>
+
+    <!-- Current baseline -->
+    <div class="card nx-lab-card" *ngIf="supported.supported">
+      <div class="nx-card-title">Current baseline</div>
+      <div class="nx-kv" *ngIf="baseline as b; else noBaseline">
+        <div class="nx-kv-row"><label>Frequency</label><b>{{ b.frequency }} MHz</b></div>
+        <div class="nx-kv-row"><label>Core Voltage</label><b>{{ b.coreVoltage }} mV</b></div>
+        <div class="nx-kv-row"><label>Thermal Mode</label><b>{{ b.thermalControlMode | titlecase }}</b></div>
+        <div class="nx-kv-row" *ngIf="b.thermalControlMode === 'target'"><label>Target</label><b>{{ b.temptarget }} °C</b></div>
+        <div class="nx-kv-row" *ngIf="b.thermalControlMode === 'manual'"><label>Manual Fan</label><b>{{ b.manualFanSpeed }} %</b></div>
+        <div class="nx-kv-row" *ngIf="b.thermalControlMode === 'curve'"><label>Fan Curve</label><b>{{ fanCurveSummary(b.fanCurve) }}</b></div>
+      </div>
+      <ng-template #noBaseline><p class="nx-lab-detail nx-dim">Waiting for a telemetry snapshot to capture the current configuration…</p></ng-template>
+    </div>
+
+    <!-- Session state -->
+    <div class="card nx-lab-card" *ngIf="supported.supported">
+      <div class="nx-card-title nx-cyan">Session state</div>
+      <div class="nx-lab-state">
+        <span class="nx-pill" [ngClass]="isTerminalState() ? (snapshot.state === 'complete' ? 'nx-pill-ok' : 'nx-pill-warn') : 'nx-pill-ok'">{{ stateLabel(snapshot.state) }}</span>
+      </div>
+      <p class="nx-lab-detail">{{ stateExplanation(snapshot.state) }}</p>
+      <p class="nx-lab-detail nx-warn-text" *ngIf="snapshot.reason && snapshot.state !== 'complete'">{{ snapshot.reason }}</p>
+      <div class="nx-lab-fresh" [ngClass]="freshness.online ? 'nx-ok-text' : 'nx-warn-text'">
+        <i class="pi" [ngClass]="freshness.online ? 'pi-circle-fill' : 'pi-exclamation-circle'"></i>
+        <span>Telemetry {{ telemetryAgeText() }} old — {{ freshness.online ? 'fresh' : 'stale' }}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Read-only stop for unsupported / offline devices -->
+  <div class="card nx-note" *ngIf="!supported.supported">
+    <b>This device cannot run a Stability Lab session.</b>
+    The Lab is read-only here. You can still review past sessions below. Execution requires a
+    NeuralAxe-Managed Gamma on board 601 with a BM1370 ASIC, online, with valid sensors and a matching
+    firmware/web release.
+  </div>
+
+  <!-- ===================== SUPPORTED WORKSPACE ===================== -->
+  <ng-container *ngIf="supported.supported">
+
+    <!-- ---------- IDLE: build the session ---------- -->
+    <ng-container *ngIf="snapshot.state === 'idle'">
+
+      <!-- Preflight -->
+      <div class="card" *ngIf="preflightResult as pf">
+        <div class="nx-card-title">Preflight</div>
+        <p class="nx-page-desc" style="margin:0 0 0.8rem">Every precondition is checked explicitly — a run starts only when all of them pass.</p>
+        <div class="nx-lab-checks">
+          <div class="nx-lab-check" *ngFor="let c of pf.checks" [ngClass]="!c.applicable ? 'nx-lab-na' : (c.ok ? 'nx-lab-pass' : 'nx-lab-fail')">
+            <i class="pi" [ngClass]="!c.applicable ? 'pi-minus-circle' : (c.ok ? 'pi-check-circle' : 'pi-times-circle')"></i>
+            <div>
+              <b>{{ c.label }}</b>
+              <small>{{ c.detail }}</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Starter profiles -->
+      <div class="card">
+        <div class="nx-card-title">Starter profiles</div>
+        <p class="nx-page-desc" style="margin:0 0 0.8rem">Derived only from your device's served option list and current thermal setup — nothing is invented.</p>
+        <div class="nx-lab-starters">
+          <button class="nx-lab-starter" *ngFor="let s of starters" (click)="addStarter(s)" [disabled]="profiles.length >= bounds.profileLimits.maxProfiles">
+            <b>{{ s.label }}</b>
+            <small>{{ s.description }}</small>
+            <span class="nx-lab-starter-cfg">{{ s.config.frequency }} MHz · {{ s.config.coreVoltage }} mV</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Profile editor -->
+      <div class="card">
+        <div class="nx-card-title">Profile editor</div>
+        <div class="nx-lab-editor">
+          <div class="nx-lab-field">
+            <label>Name</label>
+            <input type="text" pInputText [(ngModel)]="editor.name" [maxlength]="bounds.profileLimits.nameMaxLength" placeholder="e.g. 625 MHz / 1150 mV" />
+          </div>
+          <div class="nx-lab-field">
+            <label>Frequency (MHz)</label>
+            <p-dropdown [options]="frequencyOptions" [(ngModel)]="editor.frequency" styleClass="p-dropdown--small" appendTo="body"></p-dropdown>
+          </div>
+          <div class="nx-lab-field">
+            <label>Core Voltage (mV)</label>
+            <p-dropdown [options]="voltageOptions" [(ngModel)]="editor.coreVoltage" styleClass="p-dropdown--small" appendTo="body"></p-dropdown>
+          </div>
+
+          <div class="nx-lab-field nx-lab-field-wide">
+            <label>Thermal mode</label>
+            <div class="nx-chip-group">
+              <button class="nx-chip" [class.nx-chip-on]="editor.thermalControlMode === 'target'" (click)="editor.thermalControlMode = 'target'">Target Temperature</button>
+              <button class="nx-chip" [class.nx-chip-on]="editor.thermalControlMode === 'curve'" (click)="editor.thermalControlMode = 'curve'">Fan Curve</button>
+              <button class="nx-chip" [class.nx-chip-on]="editor.thermalControlMode === 'manual'" (click)="editor.thermalControlMode = 'manual'">Manual Fan</button>
+            </div>
+          </div>
+
+          <ng-container *ngIf="editor.thermalControlMode === 'target'">
+            <div class="nx-lab-field"><label>Target (°C)</label><input type="number" pInputText [(ngModel)]="editor.temptarget" min="35" max="66" /></div>
+            <div class="nx-lab-field"><label>Min Fan (%)</label><input type="number" pInputText [(ngModel)]="editor.minFanSpeed" min="0" max="99" /></div>
+          </ng-container>
+          <ng-container *ngIf="editor.thermalControlMode === 'manual'">
+            <div class="nx-lab-field"><label>Manual Fan (%)</label><input type="number" pInputText [(ngModel)]="editor.manualFanSpeed" min="0" max="100" /></div>
+          </ng-container>
+          <ng-container *ngIf="editor.thermalControlMode === 'curve'">
+            <div class="nx-lab-field nx-lab-field-wide">
+              <label>Curve template</label>
+              <div class="nx-chip-group">
+                <button class="nx-chip" *ngFor="let t of thermalProfiles" (click)="applyCurveTemplate(t)">{{ t.label }}</button>
+              </div>
+              <small class="nx-dim">{{ fanCurveSummary(editor.fanCurve) }}</small>
+            </div>
+            <div class="nx-lab-field"><label>Min Fan (%)</label><input type="number" pInputText [(ngModel)]="editor.minFanSpeed" min="0" max="99" /></div>
+            <div class="nx-lab-field"><label>Hysteresis (°C)</label><input type="number" pInputText [(ngModel)]="editor.fanCurveHysteresis" min="0" max="8" /></div>
+          </ng-container>
+
+          <div class="nx-lab-field"><label>Warm-up (s)</label><input type="number" pInputText [(ngModel)]="editor.warmupSec" [min]="bounds.duration.warmupSec.min" [max]="bounds.duration.warmupSec.max" /></div>
+          <div class="nx-lab-field"><label>Measurement (s)</label><input type="number" pInputText [(ngModel)]="editor.measureSec" [min]="bounds.duration.measureSec.min" [max]="bounds.duration.measureSec.max" /></div>
+          <div class="nx-lab-field"><label>Cooldown (s)</label><input type="number" pInputText [(ngModel)]="editor.cooldownSec" [min]="bounds.duration.cooldownSec.min" [max]="bounds.duration.cooldownSec.max" /></div>
+          <div class="nx-lab-field nx-lab-field-wide"><label>Notes</label><textarea pInputTextarea [(ngModel)]="editor.notes" [maxlength]="bounds.profileLimits.notesMaxLength" rows="2"></textarea></div>
+        </div>
+
+        <!-- editor feedback -->
+        <ul class="nx-lab-errors" *ngIf="editorErrors().length">
+          <li *ngFor="let e of editorErrors()">{{ e }}</li>
+        </ul>
+        <p class="nx-lab-detail nx-warn-text" *ngIf="editorDuplicate()">This profile duplicates one already in the queue.</p>
+        <p class="nx-lab-detail nx-warn-text" *ngIf="editorOutsideOptions()">Frequency/voltage is outside the device's served option list (expert territory).</p>
+
+        <!-- editor diff -->
+        <div class="nx-lab-diff" *ngIf="editorDiff().length">
+          <div class="nx-subtitle">Change from current</div>
+          <div class="nx-lab-diff-row" *ngFor="let d of editorDiff()">
+            <span>{{ d.label }}</span><b>{{ d.current }} → {{ d.next }}</b>
+          </div>
+        </div>
+
+        <div class="nx-lab-actions">
+          <button pButton type="button" label="Add to queue" icon="pi pi-plus" (click)="addEditorProfile()" [disabled]="!canAddProfile()"></button>
+          <small class="nx-dim">{{ profiles.length }} / {{ bounds.profileLimits.maxProfiles }} profiles</small>
+        </div>
+      </div>
+
+      <!-- Profile queue + plan -->
+      <div class="card" *ngIf="profiles.length">
+        <div class="nx-card-title">Execution plan</div>
+        <div class="nx-lab-queue">
+          <div class="nx-lab-qitem" *ngFor="let p of profiles; let i = index; trackBy: trackById">
+            <div class="nx-lab-qorder">{{ i + 1 }}</div>
+            <div class="nx-lab-qbody">
+              <b>{{ p.name }}</b>
+              <small>{{ p.frequency }} MHz · {{ p.coreVoltage }} mV · {{ p.thermalControlMode | titlecase }}</small>
+              <small class="nx-dim">warm-up {{ fmtDuration(p.warmupSec) }} · measure {{ fmtDuration(p.measureSec) }} · cooldown {{ fmtDuration(p.cooldownSec) }}</small>
+              <div class="nx-lab-qdiff" *ngIf="profileDiffFor(p).length">
+                <span *ngFor="let d of profileDiffFor(p)">{{ d.label }}: {{ d.current }}→{{ d.next }}</span>
+              </div>
+            </div>
+            <div class="nx-lab-qctl">
+              <button class="nx-icon-btn" (click)="moveProfile(p.id, -1)" [disabled]="i === 0" title="Move up"><i class="pi pi-arrow-up"></i></button>
+              <button class="nx-icon-btn" (click)="moveProfile(p.id, 1)" [disabled]="i === profiles.length - 1" title="Move down"><i class="pi pi-arrow-down"></i></button>
+              <button class="nx-icon-btn nx-icon-danger" (click)="removeProfile(p.id)" title="Remove"><i class="pi pi-trash"></i></button>
+            </div>
+          </div>
+        </div>
+        <div class="nx-lab-plansum">
+          <span><label>Profiles</label><b>{{ profiles.length }}</b></span>
+          <span><label>Est. total</label><b>{{ fmtDuration(totalPlanSeconds()) }}</b></span>
+          <span><label>Planned restarts</label><b>{{ plannedRestarts() }}</b></span>
+        </div>
+      </div>
+
+      <!-- Stop thresholds -->
+      <div class="card">
+        <div class="nx-card-title">Stop thresholds</div>
+        <p class="nx-page-desc" style="margin:0 0 0.8rem">Conservative operator guards that sit under the firmware's own hard protection (never replaced). You may tighten them, but not raise them beyond the safe ceilings.</p>
+        <div class="nx-lab-thresholds">
+          <div class="nx-lab-field"><label>ASIC stop (°C) — max {{ bounds.stop.asicC.max }}</label><input type="number" pInputText [ngModel]="thresholds.asicC" (ngModelChange)="setAsicStop($event)" [min]="bounds.stop.asicC.min" [max]="bounds.stop.asicC.max" /></div>
+          <div class="nx-lab-field"><label>VRM stop (°C) — max {{ bounds.stop.vrmC.max }}</label><input type="number" pInputText [ngModel]="thresholds.vrmC" (ngModelChange)="setVrmStop($event)" [min]="bounds.stop.vrmC.min" [max]="bounds.stop.vrmC.max" /></div>
+          <div class="nx-lab-field"><label>ASIC error stop (%)</label><input type="number" pInputText [ngModel]="thresholds.errorPct" (ngModelChange)="setThresholds({ errorPct: $event })" [min]="bounds.tunable.errorPct.min" [max]="bounds.tunable.errorPct.max" /></div>
+          <div class="nx-lab-field"><label>Reject stop (%)</label><input type="number" pInputText [ngModel]="thresholds.rejectPct" (ngModelChange)="setThresholds({ rejectPct: $event })" [min]="bounds.tunable.rejectPct.min" [max]="bounds.tunable.rejectPct.max" /></div>
+          <div class="nx-lab-field"><label>Debounce samples</label><input type="number" pInputText [ngModel]="thresholds.debounceSamples" (ngModelChange)="setThresholds({ debounceSamples: $event })" [min]="bounds.tunable.debounceSamples.min" [max]="bounds.tunable.debounceSamples.max" /></div>
+          <div class="nx-lab-field nx-lab-check-inline">
+            <p-checkbox [ngModel]="thresholds.fanSaturationStop" (ngModelChange)="setThresholds({ fanSaturationStop: $event })" [binary]="true" inputId="fansat"></p-checkbox>
+            <label for="fansat">Stop on sustained fan saturation</label>
+          </div>
+        </div>
+        <p class="nx-lab-detail nx-dim">Emergency override and an invalid sensor always abort immediately; the other conditions require {{ thresholds.debounceSamples }} consecutive samples.</p>
+      </div>
+
+      <!-- Review -->
+      <div class="card nx-lab-review">
+        <div>
+          <b>Ready to review the plan?</b>
+          <small class="nx-dim">Preflight must pass and at least one profile must be queued.</small>
+        </div>
+        <button pButton type="button" label="Run preflight &amp; review" icon="pi pi-flag" (click)="reviewSession()" [disabled]="!canReview"></button>
+      </div>
+    </ng-container>
+
+    <!-- ---------- ACTIVE: running session ---------- -->
+    <div class="card nx-lab-active" *ngIf="isActiveState()">
+      <div class="nx-lab-active-head">
+        <div>
+          <div class="nx-card-title nx-cyan">Live session</div>
+          <div class="nx-lab-phase">
+            <span class="nx-pill nx-pill-ok">{{ stateLabel(snapshot.state) }}</span>
+            <span class="nx-dim" *ngIf="currentProfile() as p">Profile {{ snapshot.profileIndex + 1 }} / {{ profiles.length }} — {{ p.name }}</span>
+          </div>
+          <p class="nx-lab-detail">{{ stateExplanation(snapshot.state) }}</p>
+        </div>
+        <div class="nx-lab-countdown" *ngIf="countdownSeconds() !== null">
+          <label>{{ snapshot.state | titlecase }} remaining</label>
+          <b>{{ fmtDuration(countdownSeconds() || 0) }}</b>
+        </div>
+        <button pButton type="button" class="p-button-secondary" label="Abort" icon="pi pi-times" (click)="requestAbort()"></button>
+      </div>
+
+      <!-- telemetry freshness / reconnect banner -->
+      <div class="nx-lab-fresh-banner" *ngIf="!freshness.online" >
+        <i class="pi pi-exclamation-triangle"></i>
+        <span>Telemetry stale ({{ telemetryAgeText() }} old). Reconnecting — aborting in {{ reconnectGraceSeconds() }} s if no fresh sample arrives.</span>
+      </div>
+
+      <!-- live telemetry tiles -->
+      <div class="nx-statrow nx-lab-live" *ngIf="latestInfo as li">
+        <div class="nx-stat"><label>Hashrate</label><span>{{ (li.hashRate || 0) | number:'1.0-0' }} GH/s</span></div>
+        <div class="nx-stat"><label>Power</label><span>{{ (li.power || 0) | number:'1.1-1' }} W</span></div>
+        <div class="nx-stat"><label>ASIC Temp</label><span>{{ (li.temp || 0) | number:'1.0-0' }} °C</span></div>
+        <div class="nx-stat"><label>VRM Temp</label><span>{{ (li.vrTemp || 0) | number:'1.0-0' }} °C</span></div>
+        <div class="nx-stat"><label>Fan</label><span>{{ (li.fanspeed || 0) | number:'1.0-0' }} %</span></div>
+        <div class="nx-stat"><label>ASIC Error</label><span>{{ (li.errorPercentage || 0) | number:'1.1-1' }} %</span></div>
+      </div>
+
+      <!-- active thresholds -->
+      <div class="nx-lab-active-thr">
+        <span>Stop limits:</span>
+        <span class="nx-pill nx-pill-warn">ASIC ≥ {{ thresholds.asicC }} °C</span>
+        <span class="nx-pill nx-pill-warn">VRM ≥ {{ thresholds.vrmC }} °C</span>
+        <span class="nx-pill nx-pill-warn">Error &gt; {{ thresholds.errorPct }} %</span>
+        <span class="nx-pill nx-pill-warn">Reject &gt; {{ thresholds.rejectPct }} %</span>
+      </div>
+
+      <!-- charts -->
+      <div class="nx-lab-charts">
+        <div class="nx-lab-chart">
+          <label>Hashrate (GH/s)</label>
+          <svg [attr.viewBox]="'0 0 ' + chartW + ' ' + chartH" preserveAspectRatio="none">
+            <ng-container *ngIf="chartDomain('hashRate') as dom">
+              <polyline class="nx-lab-line-warm" [attr.points]="chartPoints('hashRate','warmup',dom)"></polyline>
+              <polyline class="nx-lab-line" [attr.points]="chartPoints('hashRate','measure',dom)"></polyline>
+            </ng-container>
+          </svg>
+        </div>
+        <div class="nx-lab-chart">
+          <label>ASIC Temp (°C) — stop line at {{ thresholds.asicC }}</label>
+          <svg [attr.viewBox]="'0 0 ' + chartW + ' ' + chartH" preserveAspectRatio="none">
+            <ng-container *ngIf="chartDomain('asicTemp', [thresholds.asicC]) as dom">
+              <line class="nx-lab-threshold" *ngIf="thresholdY(thresholds.asicC, dom) as ty" x1="0" [attr.y1]="ty" [attr.x2]="chartW" [attr.y2]="ty"></line>
+              <polyline class="nx-lab-line-warm" [attr.points]="chartPoints('asicTemp','warmup',dom)"></polyline>
+              <polyline class="nx-lab-line nx-lab-line-amber" [attr.points]="chartPoints('asicTemp','measure',dom)"></polyline>
+            </ng-container>
+          </svg>
+        </div>
+      </div>
+      <p class="nx-lab-detail nx-dim">Warm-up samples are shown dimmed and are excluded from the profile averages.</p>
+    </div>
+
+    <!-- ---------- TERMINAL: results ---------- -->
+    <ng-container *ngIf="isTerminalState() && (results.length || snapshot.state !== 'idle')">
+      <div class="card">
+        <div class="nx-lab-results-head">
+          <div class="nx-card-title">Results</div>
+          <button pButton type="button" class="p-button-secondary" label="New session" icon="pi pi-refresh" (click)="resetSession()"></button>
+        </div>
+        <p class="nx-lab-detail" [ngClass]="snapshot.state === 'complete' ? 'nx-ok-text' : 'nx-warn-text'">
+          Session {{ stateLabel(snapshot.state) | lowercase }}.
+          Restore result: <b>{{ snapshot.restoreResult || '—' }}</b>.
+          <span *ngIf="snapshot.state === 'failed' && snapshot.restoreResult === 'failed'">
+            <button class="nx-chip nx-chip-on" (click)="retryRestore()">Retry restore</button>
+          </span>
+        </p>
+
+        <div class="nx-lab-result-grid" *ngIf="results.length; else noResults">
+          <div class="nx-lab-result" *ngFor="let r of results; trackBy: trackByIndex">
+            <div class="nx-lab-result-head">
+              <b>{{ r.profileName }}</b>
+              <span class="nx-lab-badge" *ngFor="let b of r.badges" [ngClass]="'nx-lab-badge-' + b.severity">{{ b.label }}</span>
+            </div>
+            <div class="nx-lab-metrics">
+              <span><label>Avg HR</label><b>{{ r.avgHashrate === null ? '—' : (r.avgHashrate | number:'1.0-0') }} GH/s</b></span>
+              <span><label>Median HR</label><b>{{ r.medianHashrate === null ? '—' : (r.medianHashrate | number:'1.0-0') }}</b></span>
+              <span><label>Variability</label><b>{{ r.hashrateVariabilityPct === null ? '—' : (r.hashrateVariabilityPct | number:'1.1-1') + ' %' }}</b></span>
+              <span><label>Avg Power</label><b>{{ r.avgPower === null ? '—' : (r.avgPower | number:'1.1-1') + ' W' }}</b></span>
+              <span><label>Efficiency</label><b>{{ r.avgEfficiency === null ? '—' : (r.avgEfficiency | number:'1.1-1') + ' J/TH' }}</b></span>
+              <span><label>Peak ASIC</label><b>{{ r.peakAsicTemp === null ? '—' : (r.peakAsicTemp | number:'1.0-0') + ' °C' }}</b></span>
+              <span><label>Avg ASIC</label><b>{{ r.avgAsicTemp === null ? '—' : (r.avgAsicTemp | number:'1.0-0') + ' °C' }}</b></span>
+              <span><label>Peak VRM</label><b>{{ r.peakVrmTemp === null ? '—' : (r.peakVrmTemp | number:'1.0-0') + ' °C' }}</b></span>
+              <span><label>Avg Fan</label><b>{{ r.avgAppliedFan === null ? '—' : (r.avgAppliedFan | number:'1.0-0') + ' %' }}</b></span>
+              <span><label>Reject rate</label><b>{{ r.rejectRatePct === null ? '— (low sample)' : (r.rejectRatePct | number:'1.2-2') + ' %' }}</b></span>
+              <span><label>Pool latency</label><b>{{ r.poolLatencyAvg === null ? '—' : (r.poolLatencyAvg | number:'1.0-0') + ' ms' }}</b></span>
+              <span><label>Coverage</label><b>{{ r.validSamples }}/{{ r.expectedSamples }} samples</b></span>
+            </div>
+            <p class="nx-lab-statement">{{ completionStatement(r) }}</p>
+            <div class="nx-lab-result-actions">
+              <button pButton type="button" label="Promote this profile" icon="pi pi-upload" (click)="openPromote(r)" [disabled]="!isPromotable(r)"></button>
+              <small class="nx-dim" *ngIf="!isPromotable(r)">Only a completed run can be promoted.</small>
+            </div>
+          </div>
+        </div>
+        <ng-template #noResults><p class="nx-lab-detail nx-dim">No profile produced a scoreable result in this session.</p></ng-template>
+
+        <!-- timeline -->
+        <div class="nx-subtitle">Session timeline</div>
+        <div class="nx-lab-timeline">
+          <div class="nx-lab-tl" *ngFor="let t of timeline(); trackBy: trackByIndex">
+            <span class="nx-lab-tl-state">{{ stateLabel(t.state) }}</span>
+            <span class="nx-lab-tl-note nx-dim">{{ t.note }}</span>
+          </div>
+        </div>
+      </div>
+    </ng-container>
+  </ng-container>
+
+  <!-- ===================== HISTORY ===================== -->
+  <div class="card" *ngIf="history.length">
+    <div class="nx-lab-results-head">
+      <div class="nx-card-title">Session history</div>
+      <span class="nx-dim" *ngIf="privacyHidden$ | async">Privacy mode on — identifiers removed from exports</span>
+    </div>
+    <div class="nx-lab-history">
+      <div class="nx-lab-hitem" *ngFor="let h of history; trackBy: trackById">
+        <div class="nx-lab-hbody">
+          <b>{{ h.startedAt | date:'medium' }}</b>
+          <small class="nx-dim">{{ h.device.targetDevice }} / board {{ h.device.targetBoard }} · {{ h.profiles.length }} profile(s) · {{ stateLabel(h.finalState) }}</small>
+        </div>
+        <div class="nx-lab-hctl">
+          <button class="nx-chip" (click)="viewHistory(h)">View</button>
+          <button class="nx-chip" (click)="exportSession(h, 'json')">JSON</button>
+          <button class="nx-chip" (click)="exportSession(h, 'csv')">CSV</button>
+          <button class="nx-chip" (click)="exportSession(h, 'md')">Report</button>
+          <button class="nx-chip nx-icon-danger" (click)="deleteHistory(h.id)">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="nx-lab-hdetail" *ngIf="selectedHistory as h">
+      <div class="nx-subtitle">{{ h.id }} — {{ h.startedAt | date:'medium' }}</div>
+      <div class="nx-lab-result-grid">
+        <div class="nx-lab-result" *ngFor="let r of h.results; trackBy: trackByIndex">
+          <div class="nx-lab-result-head">
+            <b>{{ r.profileName }}</b>
+            <span class="nx-lab-badge" *ngFor="let b of r.badges" [ngClass]="'nx-lab-badge-' + b.severity">{{ b.label }}</span>
+          </div>
+          <div class="nx-lab-metrics">
+            <span><label>Avg HR</label><b>{{ r.avgHashrate === null ? '—' : (r.avgHashrate | number:'1.0-0') }} GH/s</b></span>
+            <span><label>Efficiency</label><b>{{ r.avgEfficiency === null ? '—' : (r.avgEfficiency | number:'1.1-1') + ' J/TH' }}</b></span>
+            <span><label>Peak ASIC</label><b>{{ r.peakAsicTemp === null ? '—' : (r.peakAsicTemp | number:'1.0-0') + ' °C' }}</b></span>
+          </div>
+        </div>
+      </div>
+      <button class="nx-chip" (click)="closeHistory()">Close</button>
+    </div>
+  </div>
+
+  <!-- ===================== CONFIRM DIALOG ===================== -->
+  <p-dialog header="Start Stability Session" [(visible)]="showConfirm" [modal]="true" [style]="{ width: '640px', maxWidth: '94vw' }" [dismissableMask]="false">
+    <div class="nx-lab-confirm" *ngIf="baseline as b">
+      <p class="nx-lab-detail">Review the plan. When you start, settings <b>will change</b>, the miner <b>may restart</b>,
+        and mining <b>may be interrupted briefly</b>. The session <b>can abort automatically</b> if a stop condition is met.
+        Firmware thermal protection <b>remains active</b>. Your <b>original profile is restored</b> at the end unless you later promote a result.</p>
+
+      <div class="nx-subtitle">Original profile</div>
+      <p class="nx-lab-detail">{{ b.frequency }} MHz · {{ b.coreVoltage }} mV · {{ b.thermalControlMode | titlecase }}</p>
+
+      <div class="nx-subtitle">Ordered profiles ({{ profiles.length }}) — est. {{ fmtDuration(totalPlanSeconds()) }}, {{ plannedRestarts() }} planned restarts</div>
+      <p class="nx-lab-detail nx-dim">Restart count is computed from the real field diff: every field these profiles write ({{ restartAuditRows.length }} audited) applies live on this firmware, so no restart is planned.</p>
+      <div class="nx-lab-confirm-list">
+        <div class="nx-lab-confirm-p" *ngFor="let p of profiles; let i = index">
+          <b>{{ i + 1 }}. {{ p.name }}</b>
+          <small>warm-up {{ fmtDuration(p.warmupSec) }} · measure {{ fmtDuration(p.measureSec) }} · cooldown {{ fmtDuration(p.cooldownSec) }}</small>
+          <small class="nx-dim" *ngIf="profileDiffFor(p).length">Changes: <span *ngFor="let d of profileDiffFor(p); let last = last">{{ d.label }} {{ d.current }}→{{ d.next }}{{ last ? '' : ', ' }}</span></small>
+          <small class="nx-dim" *ngIf="!profileDiffFor(p).length">No change from current configuration (control reference)</small>
+        </div>
+      </div>
+
+      <div class="nx-subtitle">Stop thresholds</div>
+      <p class="nx-lab-detail">ASIC ≥ {{ thresholds.asicC }} °C · VRM ≥ {{ thresholds.vrmC }} °C · error &gt; {{ thresholds.errorPct }} % · reject &gt; {{ thresholds.rejectPct }} % · debounce {{ thresholds.debounceSamples }} samples. Emergency &amp; invalid-sensor abort immediately.</p>
+
+      <div class="nx-lab-acks">
+        <label><p-checkbox [(ngModel)]="acks.settings" [binary]="true"></p-checkbox> I understand the device settings will change.</label>
+        <label><p-checkbox [(ngModel)]="acks.restart" [binary]="true"></p-checkbox> I understand the miner may restart and mining may pause briefly.</label>
+        <label><p-checkbox [(ngModel)]="acks.interrupt" [binary]="true"></p-checkbox> I understand the test can abort automatically on a stop condition.</label>
+        <label><p-checkbox [(ngModel)]="acks.protection" [binary]="true"></p-checkbox> I understand firmware thermal protection remains active and is not replaced.</label>
+        <label><p-checkbox [(ngModel)]="acks.restore" [binary]="true"></p-checkbox> I understand my original profile is restored unless I promote a result.</label>
+      </div>
+    </div>
+    <ng-template pTemplate="footer">
+      <button pButton type="button" class="p-button-secondary" label="Cancel" (click)="cancelConfirm()"></button>
+      <button pButton type="button" label="START STABILITY SESSION" icon="pi pi-play" (click)="startSession()" [disabled]="!allAcked"></button>
+    </ng-template>
+  </p-dialog>
+
+  <!-- ===================== ABORT DIALOG ===================== -->
+  <p-dialog header="Abort session" [(visible)]="showAbort" [modal]="true" [style]="{ width: '460px', maxWidth: '94vw' }">
+    <p class="nx-lab-detail">Aborting stops the current profile immediately and restores your original configuration.
+      The results collected so far are kept and marked as aborted.</p>
+    <ng-template pTemplate="footer">
+      <button pButton type="button" class="p-button-secondary" label="Keep running" (click)="cancelAbort()"></button>
+      <button pButton type="button" label="Abort &amp; restore" icon="pi pi-times" (click)="confirmAbort()"></button>
+    </ng-template>
+  </p-dialog>
+
+  <!-- ===================== PROMOTE DIALOG ===================== -->
+  <p-dialog header="Promote profile" [(visible)]="showPromote" [modal]="true" [style]="{ width: '560px', maxWidth: '94vw' }">
+    <div *ngIf="promoteTarget as r">
+      <p class="nx-lab-detail">Apply <b>{{ r.profileName }}</b> as the device configuration through the normal tuning path.
+        This is evidence from one session — <b>not a permanent stability guarantee</b>. You can change it again any time on the Tuning &amp; Thermal page.</p>
+      <div class="nx-subtitle">Change vs original</div>
+      <div class="nx-lab-diff-row" *ngFor="let d of promoteComparison()"><span>{{ d.label }}</span><b>{{ d.current }} → {{ d.next }}</b></div>
+      <div class="nx-subtitle">Session evidence</div>
+      <p class="nx-lab-detail">{{ completionStatement(r) }}</p>
+    </div>
+    <ng-template pTemplate="footer">
+      <button pButton type="button" class="p-button-secondary" label="Cancel" (click)="cancelPromote()"></button>
+      <button pButton type="button" label="Promote &amp; apply" icon="pi pi-upload" (click)="confirmPromote()"></button>
+    </ng-template>
+  </p-dialog>
+</div>

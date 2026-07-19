@@ -1,0 +1,232 @@
+/* ============================================================
+   NeuralAxe Stability Lab — global stylesheet (imported from
+   styles.scss; kept out of component styles because of the
+   4 KB anyComponentStyle budget). Everything is namespaced with
+   .nx-lab- and reuses the shared --nx-* tokens from the Command
+   Deck stylesheet. Semantic colours stay fixed (accent-independent).
+   ============================================================ */
+
+.nx-lab { display: flex; flex-direction: column; gap: 1rem; }
+
+.nx-lab-interrupt {
+  display: flex; align-items: flex-start; gap: 0.6rem; flex-wrap: wrap;
+}
+.nx-lab-interrupt i { color: var(--nx-amber); margin-top: 0.15rem; }
+.nx-lab-interrupt .nx-chip { margin-left: auto; }
+
+/* ---------- top status row ---------- */
+
+.nx-lab-top {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.nx-lab-card { margin: 0; }
+.nx-lab-ok { border-color: rgba(47, 230, 160, 0.28); }
+.nx-lab-block { border-color: rgba(230, 178, 60, 0.35); }
+
+.nx-lab-devclass { display: flex; align-items: center; gap: 0.5rem; font-size: 0.95rem; margin-bottom: 0.5rem; }
+.nx-lab-devclass i { font-size: 1.1rem; }
+
+.nx-lab-detail { font-size: 0.8rem; line-height: 1.5; color: var(--nx-text); margin: 0 0 0.4rem; }
+.nx-lab-detail.nx-dim { color: var(--nx-text-dim); }
+
+.nx-lab-reasons { margin: 0.4rem 0 0; padding-left: 1.1rem; }
+.nx-lab-reasons li { font-size: 0.76rem; color: var(--nx-amber); line-height: 1.5; }
+
+.nx-lab-state { margin-bottom: 0.6rem; }
+
+.nx-lab-fresh { display: flex; align-items: center; gap: 0.4rem; font-size: 0.72rem; margin-top: 0.4rem; }
+.nx-lab-fresh i { font-size: 0.6rem; }
+
+.nx-lab-fresh-banner {
+  display: flex; align-items: center; gap: 0.5rem; margin: 0.8rem 0 0;
+  border: 1px solid rgba(230, 178, 60, 0.4); border-radius: 8px;
+  background: rgba(230, 178, 60, 0.1); color: var(--nx-amber);
+  padding: 0.55rem 0.75rem; font-size: 0.78rem;
+}
+
+/* ---------- preflight checks ---------- */
+
+.nx-lab-checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.5rem; }
+
+.nx-lab-check {
+  display: flex; gap: 0.6rem; align-items: flex-start;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--nx-line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.nx-lab-check i { font-size: 1rem; margin-top: 0.1rem; }
+.nx-lab-check b { display: block; font-size: 0.8rem; color: var(--nx-text); }
+.nx-lab-check small { display: block; font-size: 0.72rem; color: var(--nx-text-dim); line-height: 1.45; }
+.nx-lab-pass i { color: var(--nx-sem-ok); }
+.nx-lab-fail { border-color: rgba(230, 178, 60, 0.4); }
+.nx-lab-fail i { color: var(--nx-sem-warn); }
+.nx-lab-na { opacity: 0.55; }
+.nx-lab-na i { color: var(--nx-sem-neutral); }
+
+/* ---------- starters ---------- */
+
+.nx-lab-starters { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.6rem; }
+
+.nx-lab-starter {
+  text-align: left; cursor: pointer;
+  border: 1px solid var(--nx-line-bright);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 0.7rem 0.8rem;
+  color: var(--nx-text);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.nx-lab-starter:hover:not(:disabled) { border-color: var(--nx-cyan); background: var(--nx-cyan-dim); }
+.nx-lab-starter:disabled { opacity: 0.5; cursor: not-allowed; }
+.nx-lab-starter b { display: block; font-size: 0.86rem; }
+.nx-lab-starter small { display: block; font-size: 0.72rem; color: var(--nx-text-dim); margin: 0.2rem 0 0.4rem; line-height: 1.4; }
+.nx-lab-starter-cfg { font-size: 0.72rem; color: var(--nx-cyan); font-weight: 600; }
+
+/* ---------- editor ---------- */
+
+.nx-lab-editor { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.7rem 0.9rem; }
+.nx-lab-field { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
+.nx-lab-field-wide { grid-column: 1 / -1; }
+.nx-lab-field > label { font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--nx-text-dim); }
+.nx-lab-field input, .nx-lab-field textarea, .nx-lab-field .p-dropdown { width: 100%; }
+.nx-lab-field input[type="number"], .nx-lab-field input[type="text"] {
+  background: rgba(0, 0, 0, 0.25); border: 1px solid var(--nx-line-bright);
+  border-radius: 6px; color: var(--nx-text); padding: 0.4rem 0.6rem; font-size: 0.85rem;
+}
+.nx-lab-field .nx-chip-group { gap: 0.35rem; }
+.nx-lab-check-inline { flex-direction: row; align-items: center; gap: 0.5rem; }
+.nx-lab-check-inline label { font-size: 0.78rem; color: var(--nx-text); text-transform: none; letter-spacing: 0; }
+
+.nx-lab-errors { margin: 0.8rem 0 0; padding-left: 1.1rem; }
+.nx-lab-errors li { font-size: 0.76rem; color: var(--nx-amber); line-height: 1.5; }
+
+.nx-lab-diff { margin-top: 0.9rem; }
+.nx-lab-diff-row, .nx-lab-qdiff span {
+  display: flex; justify-content: space-between; gap: 1rem;
+  font-size: 0.76rem; padding: 0.2rem 0; border-bottom: 1px dashed var(--nx-line);
+}
+.nx-lab-diff-row span { color: var(--nx-text-dim); }
+.nx-lab-diff-row b { color: var(--nx-text); }
+
+.nx-lab-actions { display: flex; align-items: center; gap: 1rem; margin-top: 1rem; }
+
+/* ---------- queue ---------- */
+
+.nx-lab-queue { display: flex; flex-direction: column; gap: 0.5rem; }
+.nx-lab-qitem {
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) auto; gap: 0.7rem; align-items: center;
+  border: 1px solid var(--nx-line); border-radius: 8px; background: rgba(0, 0, 0, 0.2); padding: 0.6rem 0.7rem;
+}
+.nx-lab-qorder {
+  width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--nx-cyan-dim); color: var(--nx-cyan); font-weight: 800; font-size: 0.9rem;
+}
+.nx-lab-qbody { min-width: 0; }
+.nx-lab-qbody b { display: block; font-size: 0.86rem; color: var(--nx-text); }
+.nx-lab-qbody small { display: block; font-size: 0.72rem; color: var(--nx-text-dim); }
+.nx-lab-qdiff { display: flex; flex-wrap: wrap; gap: 0.2rem 0.8rem; margin-top: 0.25rem; }
+.nx-lab-qdiff span { border-bottom: 0; color: var(--nx-cyan); font-size: 0.68rem; }
+.nx-lab-qctl { display: flex; gap: 0.3rem; }
+
+.nx-icon-btn {
+  background: none; border: 1px solid var(--nx-line); border-radius: 6px; cursor: pointer;
+  width: 28px; height: 28px; color: var(--nx-text-dim);
+}
+.nx-icon-btn:hover:not(:disabled) { color: var(--nx-cyan); border-color: var(--nx-cyan); }
+.nx-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.nx-icon-danger:hover:not(:disabled) { color: var(--nx-red); border-color: var(--nx-red); }
+
+.nx-lab-plansum { display: flex; gap: 1.6rem; margin-top: 1rem; flex-wrap: wrap; }
+.nx-lab-plansum label { display: block; font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--nx-text-dim); }
+.nx-lab-plansum b { font-size: 1.05rem; color: var(--nx-text); }
+
+/* ---------- thresholds ---------- */
+
+.nx-lab-thresholds { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.7rem 0.9rem; }
+
+/* ---------- review ---------- */
+
+.nx-lab-review { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.nx-lab-review b { display: block; color: var(--nx-text); }
+.nx-lab-review small { display: block; }
+
+/* ---------- active session ---------- */
+
+.nx-lab-active { border-color: rgba(53, 195, 230, 0.3); }
+.nx-lab-active-head { display: flex; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.nx-lab-active-head > div:first-child { flex: 1; min-width: 200px; }
+.nx-lab-phase { display: flex; align-items: center; gap: 0.6rem; margin: 0.4rem 0; flex-wrap: wrap; }
+.nx-lab-countdown { text-align: right; }
+.nx-lab-countdown label { display: block; font-size: 0.58rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--nx-text-dim); }
+.nx-lab-countdown b { font-size: 1.6rem; color: var(--nx-cyan); font-weight: 800; }
+
+.nx-lab-live { margin-top: 1rem; }
+.nx-lab-active-thr { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: 1rem 0; }
+.nx-lab-active-thr span:first-child { font-size: 0.7rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--nx-text-dim); }
+
+.nx-lab-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+.nx-lab-chart { border: 1px solid var(--nx-line); border-radius: 8px; background: rgba(0, 0, 0, 0.25); padding: 0.6rem 0.7rem; }
+.nx-lab-chart label { display: block; font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--nx-text-dim); margin-bottom: 0.4rem; }
+.nx-lab-chart svg { width: 100%; height: 90px; display: block; }
+.nx-lab-line { fill: none; stroke: var(--nx-green); stroke-width: 1.5; }
+.nx-lab-line-amber { stroke: var(--nx-amber); }
+.nx-lab-line-warm { fill: none; stroke: var(--nx-sem-neutral); stroke-width: 1.2; stroke-dasharray: 3 3; }
+.nx-lab-threshold { stroke: var(--nx-red); stroke-width: 1; stroke-dasharray: 4 3; opacity: 0.7; }
+
+/* ---------- results ---------- */
+
+.nx-lab-results-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+.nx-lab-result-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin: 0.8rem 0 1.2rem; }
+.nx-lab-result { border: 1px solid var(--nx-line-bright); border-radius: 10px; background: rgba(0, 0, 0, 0.22); padding: 0.9rem 1rem; }
+.nx-lab-result-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.7rem; }
+.nx-lab-result-head b { font-size: 1rem; color: var(--nx-text); }
+
+.nx-lab-badge {
+  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 0.12rem 0.5rem; border-radius: 999px; border: 1px solid;
+}
+.nx-lab-badge-ok { color: var(--nx-green); border-color: rgba(47, 230, 160, 0.4); background: var(--nx-green-dim); }
+.nx-lab-badge-info { color: var(--nx-cyan); border-color: rgba(53, 195, 230, 0.4); background: var(--nx-cyan-dim); }
+.nx-lab-badge-warn { color: var(--nx-amber); border-color: rgba(230, 178, 60, 0.4); background: rgba(230, 178, 60, 0.12); }
+.nx-lab-badge-danger { color: var(--nx-red); border-color: rgba(239, 83, 80, 0.45); background: rgba(239, 83, 80, 0.12); }
+
+.nx-lab-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 0.5rem 0.8rem; }
+.nx-lab-metrics label { display: block; font-size: 0.56rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--nx-text-dim); }
+.nx-lab-metrics b { font-size: 0.9rem; color: var(--nx-text); }
+
+.nx-lab-statement { font-size: 0.76rem; line-height: 1.5; color: var(--nx-text-dim); margin: 0.8rem 0; border-top: 1px solid var(--nx-line); padding-top: 0.7rem; }
+.nx-lab-result-actions { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; }
+
+.nx-lab-timeline { display: flex; flex-direction: column; gap: 0.25rem; }
+.nx-lab-tl { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 0.8rem; font-size: 0.74rem; padding: 0.15rem 0; }
+.nx-lab-tl-state { color: var(--nx-cyan); font-weight: 600; }
+
+/* ---------- history ---------- */
+
+.nx-lab-history { display: flex; flex-direction: column; gap: 0.5rem; }
+.nx-lab-hitem { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; border: 1px solid var(--nx-line); border-radius: 8px; background: rgba(0, 0, 0, 0.2); padding: 0.55rem 0.7rem; }
+.nx-lab-hbody b { display: block; font-size: 0.82rem; color: var(--nx-text); }
+.nx-lab-hctl { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+.nx-lab-hdetail { margin-top: 1rem; border-top: 1px solid var(--nx-line); padding-top: 1rem; }
+
+/* ---------- confirm dialog ---------- */
+
+.nx-lab-confirm-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.nx-lab-confirm-p { border: 1px solid var(--nx-line); border-radius: 7px; padding: 0.5rem 0.7rem; background: rgba(0, 0, 0, 0.2); }
+.nx-lab-confirm-p b { display: block; font-size: 0.82rem; color: var(--nx-text); }
+.nx-lab-confirm-p small { display: block; font-size: 0.72rem; color: var(--nx-text-dim); }
+.nx-lab-acks { display: flex; flex-direction: column; gap: 0.55rem; margin-top: 1rem; }
+.nx-lab-acks label { display: flex; align-items: flex-start; gap: 0.55rem; font-size: 0.8rem; color: var(--nx-text); line-height: 1.4; cursor: pointer; }
+
+/* ---------- responsive ---------- */
+
+@media (max-width: 700px) {
+  .nx-lab-active-head { flex-direction: column; }
+  .nx-lab-countdown { text-align: left; }
+  .nx-lab-tl { grid-template-columns: 1fr; gap: 0.1rem; }
+  .nx-lab-charts { grid-template-columns: 1fr; }
+}

@@ -14,7 +14,9 @@ import { DesignComponent } from './components/design/design.component';
 import { PoolComponent } from './components/pool/pool.component';
 import { AppLayoutComponent } from './layout/app.layout.component';
 import { ApModeGuard } from './guards/ap-mode.guard';
+import { StabilityLabGuard } from './guards/stability-lab.guard';
 import { CommandDeckComponent } from './components/command-deck/command-deck.component';
+import { StabilityLabComponent } from './components/stability-lab/stability-lab.component';
 
 const TITLE_PREFIX = 'NeuralAxe OS';
 
@@ -69,6 +71,12 @@ const routes: Routes = [
         path: 'settings',
         component: SettingsComponent,
         title: `${TITLE_PREFIX} Tuning & Thermal`,
+      },
+      {
+        path: 'stability-lab',
+        component: StabilityLabComponent,
+        title: `${TITLE_PREFIX} Stability Lab`,
+        canDeactivate: [StabilityLabGuard],
       },
       {
         path: 'swarm',

@@ -464,6 +464,17 @@
             </div>
         </section>
 
+        <!-- STABILITY LAB GLANCE (2K): only while active or with completed sessions -->
+        <section class="nx-panel" *ngIf="labGlance as lab">
+            <div class="nx-panel-title nx-cyan">Stability Lab</div>
+            <div class="flex align-items-center justify-content-between">
+                <span *ngIf="lab.active" class="nx-live"><span class="nx-live-dot"></span> Session running</span>
+                <span *ngIf="!lab.active" class="nx-dim">{{ lab.sessions }} recorded session{{ lab.sessions === 1 ? '' : 's' }}</span>
+                <a routerLink="/stability-lab" class="text-sm">Open Lab →</a>
+            </div>
+            <small class="nx-dim" *ngIf="!lab.active && lab.lastState">Last: {{ lab.lastState }}</small>
+        </section>
+
         <!-- SYSTEM STATUS -->
         <section class="nx-panel">
             <div class="nx-panel-title nx-cyan">System Status</div>
