@@ -456,19 +456,56 @@ export interface StarterProfileSpec {
   config: TuningConfig;
 }
 
-const PRESET_TO_STARTER: { [id in TuningPreset['id']]: { key: StarterProfileSpec['key']; label: string; description: string } } = {
-  eco: { key: 'conservative', label: 'Conservative', description: 'Lowest served frequency/voltage — same thermal setup as now.' },
-  balanced: { key: 'balanced', label: 'Balanced', description: 'The board default frequency/voltage — same thermal setup as now.' },
-  performance: { key: 'performance', label: 'Performance', description: 'Highest served frequency/voltage — same thermal setup as now.' },
+/** Starter build output: usable specs plus honest notes for omitted candidates. */
+export interface StarterBuildResult {
+  specs: StarterProfileSpec[];
+  /** Explanations for meaningful starters that were deliberately omitted. */
+  notes: string[];
+}
+
+const PRESET_TO_STARTER: { [id in TuningPreset['id']]: { key: StarterProfileSpec['key']; label: string } } = {
+  eco: { key: 'conservative', label: 'Conservative' },
+  balanced: { key: 'balanced', label: 'Balanced' },
+  performance: { key: 'performance', label: 'Performance' },
 };
 
 /**
- * Build starter profile specs. "Current Configuration" is the exact captured
- * baseline. Conservative/Balanced/Performance vary ONLY frequency/voltage,
- * derived from the device-served option lists (buildTuningPresets — existing
- * honest derivation), and keep the current thermal setup unchanged. Nothing is
- * invented and no aggressive preset is fabricated: options that collapse into
- * the current pair are dropped.
+ * A short, honest description of what a starter actually changes versus the
+ * baseline — the real freq/voltage diff, never a marketing label. A same-setup
+ * candidate (no change) is described as such rather than pretending otherwise.
+ */
+export function describeStarterDiff(baseline: TuningConfig, config: TuningConfig): string {
+  const parts: string[] = [];
+  const fd = config.frequency - baseline.frequency;
+  const vd = config.coreVoltage - baseline.coreVoltage;
+  if (fd > 0) parts.push(`raises frequency ${baseline.frequency}→${config.frequency} MHz`);
+  else if (fd < 0) parts.push(`lowers frequency ${baseline.frequency}→${config.frequency} MHz`);
+  if (vd > 0) parts.push(`raises voltage ${baseline.coreVoltage}→${config.coreVoltage} mV`);
+  else if (vd < 0) parts.push(`lowers voltage ${baseline.coreVoltage}→${config.coreVoltage} mV`);
+  if (!parts.length) return 'No change from the current configuration.';
+  const sentence = `${parts.join(', ')} — same thermal setup.`;
+  return sentence.charAt(0).toUpperCase() + sentence.slice(1);
+}
+
+/**
+ * Build starter profile specs HONESTLY. "Current Configuration" is the exact
+ * captured baseline. Conservative/Balanced/Performance vary ONLY frequency and
+ * voltage, derived from the device-served option lists (buildTuningPresets), and
+ * keep the current thermal setup. On top of that honest-derivation base, three
+ * hard rules apply so no misleading starter is ever offered:
+ *
+ *  1. A candidate whose ONLY meaningful change is a higher voltage at the SAME
+ *     frequency is never offered — that adds heat and power with no extra
+ *     hashrate and is not a real "performance" gain. (This is exactly the
+ *     625 MHz / 1150 mV → 625 MHz / 1250 mV case the real pilot exposed.)
+ *  2. A Performance starter is offered only when it genuinely RAISES the
+ *     frequency; when the baseline is already at the highest served frequency,
+ *     Performance is omitted with an explanation rather than silently dropped.
+ *  3. Duplicates (of Current or of each other) are collapsed.
+ *
+ * No voltage/frequency pair is invented; a raised voltage only ever appears
+ * bundled with a genuinely higher frequency it supports (repository-served
+ * option truth). Returns the usable specs plus notes explaining any omission.
  */
 export function buildStarterProfiles(
   baseline: TuningConfig | null | undefined,
@@ -476,40 +513,88 @@ export function buildStarterProfiles(
   voltageOptions: number[] | undefined,
   defaultFrequency: number | undefined,
   defaultVoltage: number | undefined,
-): StarterProfileSpec[] {
+): StarterBuildResult {
   if (!baseline) {
-    return [];
+    return { specs: [], notes: [] };
   }
+  const currentConfig: TuningConfig = { ...baseline, fanCurve: baseline.fanCurve ? [...baseline.fanCurve] : undefined };
   const specs: StarterProfileSpec[] = [{
     key: 'current',
     label: 'Current Configuration',
     description: 'Exactly what the device runs right now — the control reference.',
-    config: { ...baseline, fanCurve: baseline.fanCurve ? [...baseline.fanCurve] : undefined },
+    config: currentConfig,
   }];
+  const notes: string[] = [];
+  const seen = new Set<string>([profileSignature(currentConfig)]);
 
   const presets = buildTuningPresets(frequencyOptions, voltageOptions, defaultFrequency, defaultVoltage);
   for (const preset of presets) {
     const meta = PRESET_TO_STARTER[preset.id];
-    // Same thermal configuration as the baseline; only freq/voltage vary.
-    specs.push({
-      key: meta.key,
-      label: meta.label,
-      description: meta.description,
-      config: {
-        ...baseline,
-        frequency: preset.frequency,
-        coreVoltage: preset.coreVoltage,
-        fanCurve: baseline.fanCurve ? [...baseline.fanCurve] : undefined,
-      },
-    });
+    const config: TuningConfig = {
+      ...baseline,
+      frequency: preset.frequency,
+      coreVoltage: preset.coreVoltage,
+      fanCurve: baseline.fanCurve ? [...baseline.fanCurve] : undefined,
+    };
+    const sig = profileSignature(config);
+    const fd = preset.frequency - baseline.frequency;
+    const vd = preset.coreVoltage - baseline.coreVoltage;
+
+    // Rule 3: drop duplicates (of Current or an earlier starter) silently.
+    if (seen.has(sig)) {
+      continue;
+    }
+    // Rule 1: never offer same-frequency / higher-voltage as any starter.
+    if (fd === 0 && vd > 0) {
+      notes.push(`${meta.label} starter omitted — it would only raise voltage ${baseline.coreVoltage}→${preset.coreVoltage} mV at the same ${baseline.frequency} MHz (more heat and power, no extra hashrate).`);
+      continue;
+    }
+    // Rule 2: Performance must genuinely raise the frequency.
+    if (meta.key === 'performance' && fd <= 0) {
+      notes.push(`Performance starter omitted — ${baseline.frequency} MHz is already at or above the highest served frequency, so there is no honest higher-frequency option.`);
+      continue;
+    }
+
+    seen.add(sig);
+    specs.push({ key: meta.key, label: meta.label, description: describeStarterDiff(baseline, config), config });
   }
 
-  // Drop any starter (other than Current) whose settings equal Current's.
-  const currentSig = profileSignature(specs[0].config);
-  return specs.filter((s, i) => i === 0 || profileSignature(s.config) !== currentSig);
+  return { specs, notes };
 }
 
 /** Total estimated session seconds for an ordered profile queue. */
 export function totalSessionSeconds(profiles: Array<Pick<StabilityProfile, 'warmupSec' | 'measureSec' | 'cooldownSec'>>): number {
   return profiles.reduce((sum, p) => sum + (num(p.warmupSec) ?? 0) + (num(p.measureSec) ?? 0) + (num(p.cooldownSec) ?? 0), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Maximum session-duration contract (Phase 2K.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Slack multiplier over the planned duration to absorb restarts, reconnect
+ * grace and modest browser throttling before the hard cap trips.
+ */
+export const MAX_SESSION_SLACK = 2;
+/** Fixed head-room added on top of the slack multiple (ms). */
+export const MAX_SESSION_MARGIN_MS = 10 * 60 * 1000; // 10 min
+/** Absolute ceiling — a session may never run longer than this, whatever the plan. */
+export const MAX_SESSION_ABSOLUTE_MS = 6 * 60 * 60 * 1000; // 6 h
+
+/**
+ * The bounded maximum session DURATION (a monotonic runtime cap — NOT a
+ * wall-clock timestamp). A running session whose MONOTONIC elapsed time exceeds
+ * this (e.g. because the browser was throttled/hung so phase deadlines arrived
+ * far late) is aborted and the original configuration restored — the tested
+ * profile is never left active indefinitely. Because the cap is compared against
+ * the monotonic clock, a system wall-clock change (forward or backward) can never
+ * trip it early or extend it. Derived from the planned duration (× slack +
+ * margin), then clamped to an absolute ceiling.
+ */
+export function maxSessionDurationMs(
+  profiles: Array<Pick<StabilityProfile, 'warmupSec' | 'measureSec' | 'cooldownSec'>>,
+): number {
+  const plannedMs = totalSessionSeconds(profiles) * 1000;
+  const bounded = plannedMs * MAX_SESSION_SLACK + MAX_SESSION_MARGIN_MS;
+  return Math.min(MAX_SESSION_ABSOLUTE_MS, Math.max(MAX_SESSION_MARGIN_MS, bounded));
 }

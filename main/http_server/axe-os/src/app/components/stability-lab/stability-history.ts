@@ -54,6 +54,54 @@ export interface StabilitySessionRecord {
   finalState: LabState;
   reason: string | null;
   restoreResult: RestoreResult | null;
+  /** Configured sample cadence (ms) for the session (Phase 2K.1). */
+  sampleCadenceMs?: number;
+  /** Bounded maximum session-DURATION contract (ms) — a monotonic runtime cap. */
+  maxSessionDurationMs?: number;
+  /** Whether restore-original was verified to have succeeded. */
+  restoreVerified?: boolean;
+}
+
+/**
+ * Fill in the Phase 2K.1 evidence fields a result/record may lack, so a session
+ * stored by Phase 2K still loads and renders safely (defensive migration — never
+ * fabricates evidence, just supplies neutral defaults for absent fields).
+ */
+export function normalizeResult(r: ProfileResult): ProfileResult {
+  return {
+    ...r,
+    statusReason: typeof (r as any).statusReason === 'string' ? r.statusReason : legacyStatusReason(r),
+    cadenceMs: typeof (r as any).cadenceMs === 'number' ? r.cadenceMs : 5000,
+    medianIntervalMs: typeof (r as any).medianIntervalMs === 'number' ? r.medianIntervalMs : null,
+    maxGapMs: typeof (r as any).maxGapMs === 'number' ? r.maxGapMs : 0,
+    totalGapMs: typeof (r as any).totalGapMs === 'number' ? r.totalGapMs : 0,
+    visInterruptions: typeof (r as any).visInterruptions === 'number' ? r.visInterruptions : 0,
+    totalHiddenMs: typeof (r as any).totalHiddenMs === 'number' ? r.totalHiddenMs : 0,
+    longestHiddenMs: typeof (r as any).longestHiddenMs === 'number' ? r.longestHiddenMs : 0,
+    hiddenDuringWarmup: (r as any).hiddenDuringWarmup === true,
+    hiddenDuringMeasure: (r as any).hiddenDuringMeasure === true,
+  };
+}
+
+function legacyStatusReason(r: ProfileResult): string {
+  const cov = typeof r.coveragePct === 'number' ? `${Math.round(r.coveragePct)}%` : '—';
+  switch (r.status) {
+    case 'completed': return `Completed (coverage ${cov}).`;
+    case 'partial': return `Partial (coverage ${cov}).`;
+    case 'aborted': return `Aborted — ${r.abortReason ?? 'stop condition'}.`;
+    case 'failed': return `Failed — ${r.abortReason ?? 'run failed'}.`;
+    default: return `Insufficient — ${r.validSamples} valid samples.`;
+  }
+}
+
+/** Defensively normalise a stored session so legacy records load safely. */
+export function normalizeRecord(record: StabilitySessionRecord): StabilitySessionRecord {
+  return {
+    ...record,
+    results: Array.isArray(record.results) ? record.results.map(normalizeResult) : [],
+    sampleCadenceMs: typeof record.sampleCadenceMs === 'number' ? record.sampleCadenceMs : 5000,
+    restoreVerified: typeof record.restoreVerified === 'boolean' ? record.restoreVerified : record.restoreResult === 'ok',
+  };
 }
 
 /** Keys that must NEVER appear anywhere in a stored session. */
@@ -116,6 +164,9 @@ export function buildSessionRecord(input: {
   finalState: LabState;
   reason: string | null;
   restoreResult: RestoreResult | null;
+  sampleCadenceMs?: number;
+  maxSessionDurationMs?: number;
+  restoreVerified?: boolean;
 }): StabilitySessionRecord {
   return {
     id: input.id,
@@ -145,6 +196,9 @@ export function buildSessionRecord(input: {
     finalState: input.finalState,
     reason: input.reason,
     restoreResult: input.restoreResult,
+    sampleCadenceMs: typeof input.sampleCadenceMs === 'number' ? input.sampleCadenceMs : 5000,
+    maxSessionDurationMs: typeof input.maxSessionDurationMs === 'number' ? input.maxSessionDurationMs : undefined,
+    restoreVerified: typeof input.restoreVerified === 'boolean' ? input.restoreVerified : input.restoreResult === 'ok',
   };
 }
 
@@ -180,21 +234,30 @@ function csvCell(value: unknown): string {
 
 const round = (v: number | null, d = 1): string => (v === null || !isFinite(v) ? '' : v.toFixed(d));
 
-/** One summary row per profile result. */
+const secOrBlank = (ms: number | null | undefined): string =>
+  typeof ms === 'number' && isFinite(ms) ? String(Math.round(ms / 1000)) : '';
+
+/** One summary row per profile result, including Phase 2K.1 coverage evidence. */
 export function exportCsv(record: StabilitySessionRecord): string {
+  const rec = normalizeRecord(record);
   const header = [
-    'profile', 'status', 'avgHashrate_GHs', 'medianHashrate_GHs', 'variability_pct',
+    'profile', 'status', 'statusReason', 'avgHashrate_GHs', 'medianHashrate_GHs', 'variability_pct',
     'avgPower_W', 'avgEfficiency_JTH', 'peakAsic_C', 'avgAsic_C', 'peakVrm_C',
     'avgAppliedFan_pct', 'avgErrorRate_pct', 'acceptedDelta', 'rejectedDelta', 'rejectRate_pct',
-    'poolLatencyAvg_ms', 'validSamples', 'coverage_pct', 'measuredSeconds', 'abortReason',
+    'poolLatencyAvg_ms', 'validSamples', 'expectedSamples', 'coverage_pct', 'cadence_s',
+    'medianInterval_s', 'maxGap_s', 'totalGap_s', 'visInterruptions', 'totalHidden_s', 'longestHidden_s',
+    'hiddenDuringMeasure', 'measuredSeconds', 'abortReason',
   ];
-  const rows = record.results.map(r => [
-    csvCell(r.profileName), csvCell(r.status),
+  const rows = rec.results.map(r => [
+    csvCell(r.profileName), csvCell(r.status), csvCell(r.statusReason),
     round(r.avgHashrate), round(r.medianHashrate), round(r.hashrateVariabilityPct, 2),
     round(r.avgPower), round(r.avgEfficiency), round(r.peakAsicTemp), round(r.avgAsicTemp), round(r.peakVrmTemp),
     round(r.avgAppliedFan), round(r.avgErrorRate, 2),
     csvCell(r.acceptedShareDelta ?? ''), csvCell(r.rejectedShareDelta ?? ''), round(r.rejectRatePct, 2),
-    round(r.poolLatencyAvg), csvCell(r.validSamples), round(r.coveragePct),
+    round(r.poolLatencyAvg), csvCell(r.validSamples), csvCell(r.expectedSamples), round(r.coveragePct),
+    secOrBlank(r.cadenceMs), secOrBlank(r.medianIntervalMs), secOrBlank(r.maxGapMs), secOrBlank(r.totalGapMs),
+    csvCell(r.visInterruptions), secOrBlank(r.totalHiddenMs), secOrBlank(r.longestHiddenMs),
+    csvCell(r.hiddenDuringMeasure ? 'yes' : 'no'),
     csvCell(Math.round(r.measuredMeasureMs / 1000)), csvCell(r.abortReason ?? ''),
   ].join(','));
   return [header.join(','), ...rows].join('\n');
@@ -210,9 +273,14 @@ function configLine(config: TuningConfig): string {
   return parts.join(', ');
 }
 
+const msToMin = (ms: number | null | undefined): string =>
+  typeof ms === 'number' && isFinite(ms) ? `${Math.round(ms / 60000)} min` : '—';
+const msToSec = (ms: number | null | undefined): string =>
+  typeof ms === 'number' && isFinite(ms) ? `${Math.round(ms / 1000)} s` : '—';
+
 /** Human-readable Markdown report. */
 export function exportMarkdown(record: StabilitySessionRecord, privacy: boolean): string {
-  const rec = sanitizeForExport(record, privacy);
+  const rec = sanitizeForExport(normalizeRecord(record), privacy);
   const d = rec.device;
   const lines: string[] = [];
   lines.push('# NeuralAxe Stability Lab session report', '');
@@ -223,7 +291,8 @@ export function exportMarkdown(record: StabilitySessionRecord, privacy: boolean)
   lines.push(`- **Firmware:** ${d.firmware ?? '—'}`);
   if (!privacy && rec.hostname) lines.push(`- **Hostname:** ${rec.hostname}`);
   lines.push(`- **Final state:** ${rec.finalState}${rec.reason ? ` (${rec.reason})` : ''}`);
-  lines.push(`- **Restore result:** ${rec.restoreResult ?? '—'}`, '');
+  lines.push(`- **Restore result:** ${rec.restoreResult ?? '—'} (verified: ${rec.restoreVerified ? 'yes' : 'no'})`);
+  lines.push(`- **Sample cadence:** ${msToSec(rec.sampleCadenceMs)} · **Max session-duration contract:** ${msToMin(rec.maxSessionDurationMs)} (monotonic)`, '');
 
   lines.push('## Original configuration', '', `- ${configLine(rec.original)}`, '');
 
@@ -242,7 +311,16 @@ export function exportMarkdown(record: StabilitySessionRecord, privacy: boolean)
   lines.push('| Profile | Status | Avg HR (GH/s) | Var % | Avg W | J/TH | Peak ASIC °C | Coverage | Valid samples |');
   lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   rec.results.forEach(r => {
-    lines.push(`| ${r.profileName} | ${r.status} | ${round(r.avgHashrate)} | ${round(r.hashrateVariabilityPct, 1)} | ${round(r.avgPower)} | ${round(r.avgEfficiency)} | ${round(r.peakAsicTemp)} | ${round(r.coveragePct)}% | ${r.validSamples}/${r.expectedSamples} |`);
+    lines.push(`| ${r.profileName} | ${r.status} | ${round(r.avgHashrate)} | ${round(r.hashrateVariabilityPct, 1)} | ${round(r.avgPower)} | ${round(r.avgEfficiency)} | ${round(r.peakAsicTemp)} | ${round(r.coveragePct)}% | ${r.validSamples} valid · target ${r.expectedSamples} |`);
+  });
+  lines.push('');
+
+  lines.push('## Coverage & visibility evidence', '');
+  rec.results.forEach(r => {
+    lines.push(`- **${r.profileName}** — ${r.statusReason}`);
+    lines.push(`  - Coverage ${round(r.coveragePct)}% · ${r.validSamples} valid samples · target ${r.expectedSamples} · cadence ${msToSec(r.cadenceMs)}`);
+    lines.push(`  - Median sample interval ${msToSec(r.medianIntervalMs)} · max gap ${msToSec(r.maxGapMs)} · total gap ${msToSec(r.totalGapMs)}`);
+    lines.push(`  - Page hidden ${r.visInterruptions} time(s) · ${msToSec(r.totalHiddenMs)} total (longest ${msToSec(r.longestHiddenMs)}) · during measurement: ${r.hiddenDuringMeasure ? 'yes' : 'no'}`);
   });
   lines.push('');
 
@@ -275,7 +353,8 @@ export class StabilityHistoryStore {
 
   list(): StabilitySessionRecord[] {
     const raw = this.storage.getObject(HISTORY_KEY);
-    return Array.isArray(raw) ? raw : [];
+    // Defensively migrate legacy (Phase 2K) records so they render safely.
+    return Array.isArray(raw) ? raw.map(normalizeRecord) : [];
   }
 
   save(record: StabilitySessionRecord): StabilitySessionRecord[] {

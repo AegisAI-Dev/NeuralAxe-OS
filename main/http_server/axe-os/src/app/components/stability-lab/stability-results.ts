@@ -11,12 +11,19 @@
  */
 
 import { LabSample } from './stability-telemetry';
-import { accumulateShareDeltas, countGaps, expectedSampleCount } from './stability-telemetry';
+import { accumulateShareDeltas } from './stability-telemetry';
+import { computeCoverage, DEFAULT_CADENCE_MS, coveragePctText } from './stability-coverage';
+import { VisibilityStats } from './stability-visibility';
 
 /** Minimum valid measurement samples for a run to be scoreable. */
 export const MIN_VALID_SAMPLES = 3;
-/** Below this coverage a full-window run is reported as Partial, not Completed. */
-export const PARTIAL_COVERAGE = 0.6;
+/**
+ * Minimum telemetry coverage for a full-window run to be Completed rather than
+ * Partial. Phase 2K.1 raises this to a conservative 90 % (Phase 2K used 60 %):
+ * a run that only captured 8.3 % of its intended evidence must be reported as
+ * Partial with an explicit reason, never silently Completed.
+ */
+export const MIN_COVERAGE = 0.9;
 /** Fan duty at/above which a sample counts toward saturation duration. */
 const FAN_SATURATION_PCT = 95;
 const REJECT_MIN_TOTAL = 100;
@@ -32,6 +39,12 @@ export interface ProfileRun {
   measureSamples: LabSample[];
   requestedMeasureMs: number;
   measuredMeasureMs: number;
+  /** Configured sample cadence (ms); defaults to the standard cadence. */
+  cadenceMs?: number;
+  /** Session-relative time (ms) at which the measurement window began. */
+  measureStartTMs?: number;
+  /** Visibility evidence captured over the measurement window. */
+  visibility?: VisibilityStats;
   restartOccurred: boolean;
   /** True when a share counter reset (reboot) was seen during measurement. */
   countersReset: boolean;
@@ -54,6 +67,8 @@ export interface ProfileResult {
   profileId: string;
   profileName: string;
   status: RunStatus;
+  /** Exact human reason for the status (never a bare "Partial"). */
+  statusReason: string;
   thermalControlMode: string;
   requestedMeasureMs: number;
   measuredMeasureMs: number;
@@ -61,6 +76,17 @@ export interface ProfileResult {
   missingSamples: number;
   expectedSamples: number;
   coveragePct: number | null;
+  /** Configured cadence (ms) and observed spacing/gap evidence. */
+  cadenceMs: number;
+  medianIntervalMs: number | null;
+  maxGapMs: number;
+  totalGapMs: number;
+  /** Visibility evidence over the measurement window. */
+  visInterruptions: number;
+  totalHiddenMs: number;
+  longestHiddenMs: number;
+  hiddenDuringWarmup: boolean;
+  hiddenDuringMeasure: boolean;
   restartOccurred: boolean;
   countersReset: boolean;
   abortReason: string | null;
@@ -133,10 +159,25 @@ function maxOf(xs: number[]): number | null {
  */
 export function computeProfileResult(run: ProfileRun): ProfileResult {
   const samples = run.measureSamples;
-  const validSamples = samples.filter(s => !s.gap).length;
-  const missingSamples = countGaps(samples);
-  const expected = expectedSampleCount(run.requestedMeasureMs);
-  const coveragePct = expected > 0 ? Math.min(100, (validSamples / expected) * 100) : null;
+  const cadenceMs = typeof run.cadenceMs === 'number' && run.cadenceMs > 0 ? run.cadenceMs : DEFAULT_CADENCE_MS;
+  const validMeasure = samples.filter(s => !s.gap);
+  const measureStartTMs = typeof run.measureStartTMs === 'number' ? run.measureStartTMs : 0;
+
+  // Coverage is measured over window-relative sample times — no valid sample is
+  // ever discarded to force an exact ratio.
+  const cov = computeCoverage({
+    sampleTimesMs: validMeasure.map(s => s.tMs - measureStartTMs),
+    windowMs: run.requestedMeasureMs,
+    cadenceMs,
+  });
+  const validSamples = cov.validSamples;
+  const missingSamples = cov.missingSamples;
+  const expected = cov.expectedTarget;
+  const coveragePct = expected > 0 ? cov.coveragePct : null;
+  const vis: VisibilityStats = run.visibility ?? {
+    currentlyHidden: false, interruptions: 0, totalHiddenMs: 0, longestHiddenMs: 0,
+    hiddenDuringWarmup: false, hiddenDuringMeasure: false,
+  };
 
   const hashrates = pick(samples, s => s.hashRate);
   const powers = pick(samples, s => s.power);
@@ -170,12 +211,13 @@ export function computeProfileResult(run: ProfileRun): ProfileResult {
     }
   }
 
-  const status = resolveStatus(run, validSamples, coveragePct);
+  const { status, reason } = resolveStatus(run, validSamples, coveragePct, expected, vis);
 
   const result: ProfileResult = {
     profileId: run.profileId,
     profileName: run.profileName,
     status,
+    statusReason: reason,
     thermalControlMode: run.thermalControlMode,
     requestedMeasureMs: run.requestedMeasureMs,
     measuredMeasureMs: run.measuredMeasureMs,
@@ -183,6 +225,15 @@ export function computeProfileResult(run: ProfileRun): ProfileResult {
     missingSamples,
     expectedSamples: expected,
     coveragePct,
+    cadenceMs,
+    medianIntervalMs: cov.medianIntervalMs,
+    maxGapMs: cov.maxGapMs,
+    totalGapMs: cov.totalGapMs,
+    visInterruptions: vis.interruptions,
+    totalHiddenMs: vis.totalHiddenMs,
+    longestHiddenMs: vis.longestHiddenMs,
+    hiddenDuringWarmup: vis.hiddenDuringWarmup,
+    hiddenDuringMeasure: vis.hiddenDuringMeasure,
     restartOccurred: run.restartOccurred,
     countersReset: run.countersReset || shares.hadReset,
     abortReason: run.abortReason ?? null,
@@ -211,26 +262,67 @@ export function computeProfileResult(run: ProfileRun): ProfileResult {
   return result;
 }
 
-function resolveStatus(run: ProfileRun, validSamples: number, coveragePct: number | null): RunStatus {
-  if (run.failed) return 'failed';
-  if (run.aborted) return 'aborted';
-  if (validSamples < MIN_VALID_SAMPLES) return 'insufficient';
-  if (!run.ranFullWindow) return 'partial';
-  if (coveragePct !== null && coveragePct < PARTIAL_COVERAGE * 100) return 'partial';
-  return 'completed';
+/** Minutes, rounded, for a human duration phrase (≥ 1). */
+function mins(ms: number): number {
+  return Math.max(1, Math.round(ms / 60000));
+}
+
+/**
+ * Resolve the run status AND the exact reason for it. A Partial is never a bare
+ * badge — it names the dominant cause (coverage, hidden page, or gap), so the
+ * owner always knows WHY a completed wall-clock window did not yield a completed
+ * profile result.
+ */
+function resolveStatus(
+  run: ProfileRun,
+  validSamples: number,
+  coveragePct: number | null,
+  expectedTarget: number,
+  vis: VisibilityStats,
+): { status: RunStatus; reason: string } {
+  if (run.failed) {
+    return { status: 'failed', reason: `Failed — ${run.abortReason ?? 'the run could not complete'}.` };
+  }
+  if (run.aborted) {
+    return { status: 'aborted', reason: `Aborted — ${run.abortReason ?? 'a stop condition triggered'}.` };
+  }
+  if (validSamples < MIN_VALID_SAMPLES) {
+    return { status: 'insufficient', reason: `Insufficient — only ${validSamples} valid sample(s) (need ≥ ${MIN_VALID_SAMPLES}).` };
+  }
+  if (!run.ranFullWindow) {
+    return { status: 'partial', reason: `Partial — the measurement window did not run to completion (${validSamples} valid samples, target ${expectedTarget}).` };
+  }
+  const pct = coveragePctText(coveragePct);
+  if (coveragePct !== null && coveragePct < MIN_COVERAGE * 100) {
+    // The window ran fully but too little evidence was captured. Name the most
+    // likely driver: a hidden page is the usual cause of throttled coverage.
+    let reason = `Partial — telemetry coverage ${pct} (${validSamples} valid samples, target ${expectedTarget}).`;
+    if (vis.hiddenDuringMeasure && vis.totalHiddenMs > 0) {
+      reason += ` Page hidden ~${mins(vis.totalHiddenMs)} min during measurement — keep the Lab page visible for full coverage.`;
+    }
+    return { status: 'partial', reason };
+  }
+  let reason = `Completed the configured measurement window with sufficient telemetry coverage (${pct}, ${validSamples} valid samples, target ${expectedTarget}).`;
+  if (vis.hiddenDuringMeasure && vis.totalHiddenMs > 0) {
+    reason += ` Note: the page was hidden ~${mins(vis.totalHiddenMs)} min but telemetry coverage stayed sufficient.`;
+  }
+  return { status: 'completed', reason };
 }
 
 function statusBadges(result: ProfileResult, run: ProfileRun): ResultBadge[] {
   const badges: ResultBadge[] = [];
+  const pct = coveragePctText(result.coveragePct);
   switch (result.status) {
     case 'completed':
       badges.push({ kind: 'completed', label: 'Completed', severity: 'ok' });
       break;
     case 'partial':
-      badges.push({ kind: 'partial', label: 'Partial', severity: 'warn' });
+      // Never a bare "Partial" — the badge carries the coverage so the reason is
+      // unmistakable even at a glance.
+      badges.push({ kind: 'partial', label: `Partial — coverage ${pct}`, severity: 'warn' });
       break;
     case 'insufficient':
-      badges.push({ kind: 'insufficient', label: 'Insufficient samples', severity: 'warn' });
+      badges.push({ kind: 'insufficient', label: `Insufficient — ${result.validSamples} valid samples`, severity: 'warn' });
       break;
     case 'aborted':
       badges.push({ kind: 'aborted', label: `Aborted: ${run.abortReason ?? 'stop condition'}`, severity: 'danger' });
@@ -238,6 +330,9 @@ function statusBadges(result: ProfileResult, run: ProfileRun): ResultBadge[] {
     case 'failed':
       badges.push({ kind: 'failed', label: `Failed: ${run.abortReason ?? 'run failed'}`, severity: 'danger' });
       break;
+  }
+  if (result.hiddenDuringMeasure) {
+    badges.push({ kind: 'page-hidden', label: 'Page was hidden', severity: 'info' });
   }
   if (result.countersReset) {
     badges.push({ kind: 'counter-reset', label: 'Share counters reset', severity: 'info' });
@@ -249,24 +344,18 @@ function statusBadges(result: ProfileResult, run: ProfileRun): ResultBadge[] {
 }
 
 /**
- * A qualified, honest statement about a completed run. Never claims permanent
- * stability from one window.
+ * A qualified, honest statement about a run. Never claims permanent stability
+ * from one window, and always leads with the exact status reason.
  */
 export function completionStatement(result: ProfileResult): string {
-  if (result.status === 'aborted') {
-    return `Aborted before the window finished: ${result.abortReason ?? 'a stop condition triggered'}.`;
+  if (result.status === 'aborted' || result.status === 'failed' || result.status === 'insufficient') {
+    return result.statusReason;
   }
-  if (result.status === 'failed') {
-    return `The run failed: ${result.abortReason ?? 'see the timeline'}.`;
+  const tail = ' This is evidence from one session, not a lifetime stability guarantee.';
+  if (result.status === 'partial') {
+    return `${result.statusReason} No configured stop condition triggered.${tail}`;
   }
-  if (result.status === 'insufficient') {
-    return 'Too few valid samples to score this run.';
-  }
-  const mins = Math.max(1, Math.round(result.measuredMeasureMs / 60000));
-  const base = result.status === 'partial'
-    ? `Completed a partial ${mins}-minute measurement window.`
-    : `Completed the configured ${mins}-minute measurement window.`;
-  return `${base} No configured stop condition triggered during this session. This is evidence from one session, not a lifetime stability guarantee.`;
+  return `${result.statusReason} No configured stop condition triggered during this session.${tail}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,13 +365,17 @@ export function completionStatement(result: ProfileResult): string {
 const EPS = 1e-9;
 
 /**
- * Award comparative badges among the scoreable results. Each badge names the
- * exact winning metric — highest hashrate, lowest efficiency (J/TH), lowest
- * peak temperature, lowest hashrate variability. Ties share the badge. Only
- * completed/partial results with the relevant metric participate.
+ * Award comparative badges among the results. Each badge names the exact winning
+ * metric — highest hashrate, lowest efficiency (J/TH), lowest peak temperature,
+ * lowest hashrate variability. Ties share the badge.
+ *
+ * Phase 2K.1: ONLY Completed results (which by definition have sufficient
+ * telemetry coverage) may win a comparison badge. A Partial or Aborted result is
+ * never crowned "best" on thin or interrupted evidence — one honest completed
+ * session is evidence, not a permanent guarantee.
  */
 export function applyComparativeBadges(results: ProfileResult[]): ProfileResult[] {
-  const scoreable = results.filter(r => r.status === 'completed' || r.status === 'partial');
+  const scoreable = results.filter(r => r.status === 'completed');
 
   const awardMin = (selector: (r: ProfileResult) => number | null, badge: ResultBadge) => {
     const vals = scoreable.map(selector).filter((v): v is number => v !== null);

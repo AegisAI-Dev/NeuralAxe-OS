@@ -101,6 +101,10 @@
             <span class="nx-lab-starter-cfg">{{ s.config.frequency }} MHz · {{ s.config.coreVoltage }} mV</span>
           </button>
         </div>
+        <!-- Honest omission notes: a starter is omitted with a reason, never silently. -->
+        <ul class="nx-lab-starter-notes" *ngIf="starterNotes.length">
+          <li *ngFor="let n of starterNotes"><i class="pi pi-info-circle"></i> {{ n }}</li>
+        </ul>
       </div>
 
       <!-- Profile editor -->
@@ -249,10 +253,43 @@
         <button pButton type="button" class="p-button-secondary" label="Abort" icon="pi pi-times" (click)="requestAbort()"></button>
       </div>
 
+      <!-- Persistent active-session notice: keep the page open for full coverage. -->
+      <div class="nx-lab-keepopen">
+        <i class="pi pi-eye"></i>
+        <span>Keep this Stability Lab page open. Browser background scheduling can reduce telemetry coverage.</span>
+      </div>
+
+      <!-- Page-visibility status: hidden now, or a summary of past interruptions. -->
+      <div class="nx-lab-hidden-banner" *ngIf="pageHidden">
+        <i class="pi pi-eye-slash"></i>
+        <span>Page not visible — telemetry coverage is being monitored.</span>
+      </div>
+      <div class="nx-lab-vis-summary" *ngIf="!pageHidden && visStats.interruptions > 0">
+        <i class="pi pi-exclamation-triangle"></i>
+        <span>{{ visibilitySummary(visStats) }} Coverage may be reduced — check the coverage panel below.</span>
+      </div>
+
       <!-- telemetry freshness / reconnect banner -->
       <div class="nx-lab-fresh-banner" *ngIf="!freshness.online" >
         <i class="pi pi-exclamation-triangle"></i>
         <span>Telemetry stale ({{ telemetryAgeText() }} old). Reconnecting — aborting in {{ reconnectGraceSeconds() }} s if no fresh sample arrives.</span>
+      </div>
+
+      <!-- Live evidence coverage — independent of the countdown timer. -->
+      <div class="nx-lab-coverage" *ngIf="(snapshot.state === 'warmup' || snapshot.state === 'measuring') && liveCoverage as cov">
+        <div class="nx-lab-coverage-head">
+          <b>{{ snapshot.state === 'warmup' ? 'Warm-up evidence' : 'Measurement evidence' }}</b>
+          <span class="nx-lab-warmup-note" *ngIf="snapshot.state === 'warmup'">Warm-up samples are excluded from the final profile averages.</span>
+        </div>
+        <div class="nx-statrow nx-lab-coverage-grid">
+          <div class="nx-stat"><label>Valid samples</label><span>{{ liveSampleTargetText() }}</span></div>
+          <div class="nx-stat"><label>Coverage</label><span>{{ liveCoverageText() }}</span></div>
+          <div class="nx-stat"><label>Latest sample</label><span>{{ latestSampleAgeText() }} ago</span></div>
+          <div class="nx-stat"><label>Median interval</label><span>{{ medianIntervalText() }}</span></div>
+          <div class="nx-stat"><label>Current gap</label><span>{{ currentGapText() }}</span></div>
+          <div class="nx-stat"><label>Visibility</label><span>{{ pageHidden ? 'Hidden' : 'Visible' }}</span></div>
+          <div class="nx-stat"><label>Hidden total</label><span>{{ hiddenTotalText() }} ({{ visStats.interruptions }}×)</span></div>
+        </div>
       </div>
 
       <!-- live telemetry tiles -->
@@ -332,9 +369,14 @@
               <span><label>Avg Fan</label><b>{{ r.avgAppliedFan === null ? '—' : (r.avgAppliedFan | number:'1.0-0') + ' %' }}</b></span>
               <span><label>Reject rate</label><b>{{ r.rejectRatePct === null ? '— (low sample)' : (r.rejectRatePct | number:'1.2-2') + ' %' }}</b></span>
               <span><label>Pool latency</label><b>{{ r.poolLatencyAvg === null ? '—' : (r.poolLatencyAvg | number:'1.0-0') + ' ms' }}</b></span>
-              <span><label>Coverage</label><b>{{ r.validSamples }}/{{ r.expectedSamples }} samples</b></span>
+              <span><label>Coverage</label><b>{{ coveragePctText(r.coveragePct) }}</b></span>
+              <span><label>Samples</label><b>{{ resultSampleTargetText(r) }}</b></span>
+              <span><label>Median interval</label><b>{{ r.medianIntervalMs === null ? '—' : (r.medianIntervalMs / 1000 | number:'1.1-1') + ' s' }}</b></span>
+              <span><label>Max gap</label><b>{{ (r.maxGapMs / 1000) | number:'1.0-0' }} s</b></span>
+              <span><label>Page hidden</label><b>{{ r.visInterruptions }}× · {{ (r.totalHiddenMs / 1000) | number:'1.0-0' }} s</b></span>
             </div>
-            <p class="nx-lab-statement">{{ completionStatement(r) }}</p>
+            <p class="nx-lab-statement" [ngClass]="r.status === 'partial' || r.status === 'aborted' || r.status === 'failed' ? 'nx-warn-text' : ''">{{ r.statusReason }}</p>
+            <p class="nx-lab-statement nx-dim">{{ completionStatement(r) }}</p>
             <div class="nx-lab-result-actions">
               <button pButton type="button" label="Promote this profile" icon="pi pi-upload" (click)="openPromote(r)" [disabled]="!isPromotable(r)"></button>
               <small class="nx-dim" *ngIf="!isPromotable(r)">Only a completed run can be promoted.</small>
@@ -389,7 +431,11 @@
             <span><label>Avg HR</label><b>{{ r.avgHashrate === null ? '—' : (r.avgHashrate | number:'1.0-0') }} GH/s</b></span>
             <span><label>Efficiency</label><b>{{ r.avgEfficiency === null ? '—' : (r.avgEfficiency | number:'1.1-1') + ' J/TH' }}</b></span>
             <span><label>Peak ASIC</label><b>{{ r.peakAsicTemp === null ? '—' : (r.peakAsicTemp | number:'1.0-0') + ' °C' }}</b></span>
+            <span><label>Coverage</label><b>{{ coveragePctText(r.coveragePct) }}</b></span>
+            <span><label>Samples</label><b>{{ resultSampleTargetText(r) }}</b></span>
+            <span *ngIf="r.visInterruptions"><label>Page hidden</label><b>{{ r.visInterruptions }}× · {{ (r.totalHiddenMs / 1000) | number:'1.0-0' }} s</b></span>
           </div>
+          <p class="nx-lab-statement" [ngClass]="r.status === 'partial' || r.status === 'aborted' || r.status === 'failed' ? 'nx-warn-text' : 'nx-dim'">{{ r.statusReason }}</p>
         </div>
       </div>
       <button class="nx-chip" (click)="closeHistory()">Close</button>

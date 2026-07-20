@@ -23,7 +23,7 @@ import { dirname, resolve, extname, join } from 'node:path';
 const AXE_OS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DIST = join(AXE_OS_DIR, 'dist', 'axe-os');
 const OUT = process.env.NX_SHOT_DIR
-  || 'D:/Companys/Neuralshield/Firmware/NeuralAxe Build Artifacts/stability-lab-v0.1.0-dev-board601/screenshots';
+  || 'D:/Companys/Neuralshield/Firmware/NeuralAxe Build Artifacts/stability-lab-reliability-v0.1.0-dev-board601/screenshots';
 const EDGE = process.env.EDGE_PATH || process.env.CHROME_BIN
   || 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe';
 const PORT = 4319;
@@ -85,14 +85,16 @@ await new Promise(r => server.listen(PORT, r));
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const collected = [];
 
-/** Wire per-scenario request interception. */
-async function intercept(page, { info, offline, versionTxt }) {
+/** Wire per-scenario request interception. `scenario.offline` is read LIVE so a
+ *  running session can be pushed offline mid-flight to show the stale banner. */
+async function intercept(page, scenario) {
+  const { info, versionTxt } = scenario;
   await page.setRequestInterception(true);
   page.on('request', (req) => {
     const url = req.url();
     const json = (body) => req.respond({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
     try {
-      if (url.includes('/api/system/info')) return offline ? req.abort() : json(info);
+      if (url.includes('/api/system/info')) return scenario.offline ? req.abort() : json(info);
       if (url.includes('/api/system/asic')) return json(asicFixture);
       if (url.includes('/version.txt')) return req.respond({ status: 200, contentType: 'text/plain', body: versionTxt ?? info.version });
       if (url.includes('/api/system/statistics')) return json({ currentTimestamp: 0, labels: ['hashrate', 'timestamp'], statistics: [] });
@@ -134,17 +136,31 @@ async function shot(page, name) {
 
 // ---- a seeded, sanitized history record (completed + partial + aborted) ----
 function seededHistory() {
-  const mk = (id, name, status, over = {}) => ({
-    profileId: id, profileName: name, status, thermalControlMode: 'curve',
-    requestedMeasureMs: 1200000, measuredMeasureMs: status === 'partial' ? 300000 : 1200000,
-    validSamples: status === 'partial' ? 60 : 240, missingSamples: 0, expectedSamples: 240,
-    coveragePct: status === 'partial' ? 25 : 100, restartOccurred: false, countersReset: false, abortReason: over.abortReason || null,
-    avgHashrate: over.hr ?? 1290, medianHashrate: over.hr ?? 1288, hashrateVariabilityPct: 1.4,
-    avgPower: over.pw ?? 21.4, avgEfficiency: over.eff ?? 16.6, peakAsicTemp: over.temp ?? 62, avgAsicTemp: 60,
-    peakVrmTemp: 47, avgVrmTemp: 45, avgRequestedFan: 55, avgAppliedFan: 56, fanSaturationMs: 0, avgErrorRate: 0.4,
-    acceptedShareDelta: 420, rejectedShareDelta: 2, rejectRatePct: 0.47, poolLatencyAvg: 34, poolLatencyPeak: 61,
-    badges: over.badges || [{ kind: 'completed', label: 'Completed', severity: 'ok' }],
-  });
+  const mk = (id, name, status, over = {}) => {
+    const validSamples = over.validSamples ?? (status === 'partial' ? 10 : 121);
+    const expectedSamples = over.expectedSamples ?? 120;
+    const coveragePct = over.coveragePct ?? (status === 'partial' ? 8.3 : 100);
+    const statusReason = over.statusReason ?? (status === 'partial'
+      ? `Partial — telemetry coverage ${coveragePct}% (${validSamples} valid samples, target ${expectedSamples}). Page hidden ~9 min during measurement — keep the Lab page visible for full coverage.`
+      : `Completed the configured measurement window with sufficient telemetry coverage (${coveragePct}%, ${validSamples} valid samples, target ${expectedSamples}).`);
+    return {
+      profileId: id, profileName: name, status, statusReason, thermalControlMode: 'curve',
+      requestedMeasureMs: 600000, measuredMeasureMs: 600000,
+      validSamples, missingSamples: Math.max(0, expectedSamples - validSamples), expectedSamples, coveragePct,
+      cadenceMs: 5000, medianIntervalMs: status === 'partial' ? 60000 : 5000,
+      maxGapMs: status === 'partial' ? 60000 : 5000, totalGapMs: status === 'partial' ? 550000 : 0,
+      visInterruptions: over.visInterruptions ?? (status === 'partial' ? 1 : 0),
+      totalHiddenMs: over.totalHiddenMs ?? (status === 'partial' ? 540000 : 0),
+      longestHiddenMs: status === 'partial' ? 540000 : 0,
+      hiddenDuringWarmup: false, hiddenDuringMeasure: status === 'partial',
+      restartOccurred: false, countersReset: false, abortReason: over.abortReason || null,
+      avgHashrate: over.hr ?? 1290, medianHashrate: over.hr ?? 1288, hashrateVariabilityPct: 1.4,
+      avgPower: over.pw ?? 21.4, avgEfficiency: over.eff ?? 16.6, peakAsicTemp: over.temp ?? 62, avgAsicTemp: 60,
+      peakVrmTemp: 47, avgVrmTemp: 45, avgRequestedFan: 55, avgAppliedFan: 56, fanSaturationMs: 0, avgErrorRate: 0.4,
+      acceptedShareDelta: 420, rejectedShareDelta: 2, rejectRatePct: 0.47, poolLatencyAvg: 34, poolLatencyPeak: 61,
+      badges: over.badges || [{ kind: 'completed', label: 'Completed', severity: 'ok' }],
+    };
+  };
   const record = {
     id: 'nx-lab-demo-0001', startedAt: Date.now() - 3900000, finishedAt: Date.now() - 300000,
     device: { productName: 'NeuralAxe OS', productVersion: '0.1.0-dev', targetDevice: 'Gamma', targetBoard: '601', targetAsic: 'BM1370', firmware: 'v2.14.2-31-g1c411d52' },
@@ -154,14 +170,17 @@ function seededHistory() {
       { name: 'Current Configuration', config: { frequency: 625, coreVoltage: 1150, thermalControlMode: 'curve' }, warmupSec: 180, measureSec: 1200, cooldownSec: 0 },
       { name: 'Performance', config: { frequency: 650, coreVoltage: 1200, thermalControlMode: 'curve' }, warmupSec: 180, measureSec: 1200, cooldownSec: 0 },
     ],
-    thresholds: { asicC: 68, vrmC: 100, errorPct: 5, rejectPct: 8, fanSaturationStop: false, fanSaturationPct: 100, debounceSamples: 3 },
+    thresholds: { asicC: 68, vrmC: 70, errorPct: 5, rejectPct: 8, fanSaturationStop: false, fanSaturationPct: 100, debounceSamples: 3 },
     results: [
-      mk('p1', 'Current Configuration', 'completed', { hr: 1290, eff: 16.6, temp: 61, badges: [{ kind: 'completed', label: 'Completed', severity: 'ok' }, { kind: 'lowest-temp', label: 'Lowest temperature', severity: 'ok' }] }),
-      mk('p2', 'Performance', 'completed', { hr: 1355, eff: 17.1, temp: 64, badges: [{ kind: 'completed', label: 'Completed', severity: 'ok' }, { kind: 'highest-hashrate', label: 'Highest hashrate', severity: 'ok' }] }),
-      mk('p3', 'Aggressive', 'partial', { hr: 1360, eff: 17.8, temp: 66, badges: [{ kind: 'partial', label: 'Partial', severity: 'warn' }] }),
+      // Completed at 121 valid / target 120 — the honest boundary presentation.
+      mk('p1', '600 MHz / 1150 mV', 'completed', { hr: 1228, eff: 17.2, temp: 55, validSamples: 121, badges: [{ kind: 'completed', label: 'Completed', severity: 'ok' }, { kind: 'lowest-temp', label: 'Lowest temperature', severity: 'ok' }] }),
+      mk('p2', '625 MHz / 1150 mV', 'completed', { hr: 1274, eff: 17.0, temp: 56, validSamples: 121, badges: [{ kind: 'completed', label: 'Completed', severity: 'ok' }, { kind: 'highest-hashrate', label: 'Highest hashrate', severity: 'ok' }] }),
+      // The real low-coverage background session — 10 valid / target 120 → Partial.
+      mk('p3', '625 MHz (background run)', 'partial', { hr: 1273, eff: 17.0, temp: 55, validSamples: 10, badges: [{ kind: 'partial', label: 'Partial — coverage 8.3%', severity: 'warn' }, { kind: 'page-hidden', label: 'Page was hidden', severity: 'info' }] }),
     ],
     timeline: [{ state: 'idle', at: 0, note: 'Session not started' }, { state: 'complete', at: 1, note: 'Original configuration restored' }],
     finalState: 'complete', reason: null, restoreResult: 'ok',
+    sampleCadenceMs: 5000, maxSessionDurationMs: 3600000, restoreVerified: true,
   };
   return record;
 }
@@ -311,6 +330,53 @@ async function main() {
     // 21/22. mobile active + mobile results
     { const p = await newPage(browser, { info: baseInfo() }, { mobile: true }); await nav(p); await addStarters(p); await shot(p, '21-mobile-queue'); await p.close(); }
     { const p = await newPage(browser, { info: baseInfo(), seed: { NX_STABILITY_SESSIONS: JSON.stringify([seededHistory()]) } }, { mobile: true }); await nav(p); await clickByText(p, '.nx-lab-hitem .nx-chip', /View/); await sleep(500); await shot(p, '22-mobile-result-comparison'); await p.close(); }
+
+    // ===== Phase 2K.1 reliability scenarios =====
+
+    // 25. idle: honest starters at the maximum served frequency (625 MHz baseline →
+    //     no misleading same-frequency/higher-voltage "Performance"; an explicit note).
+    { const p = await newPage(browser, { info: baseInfo() }); await nav(p); await shot(p, '25-honest-starters-max-freq'); await p.close(); }
+
+    // 26. live measurement: the coverage panel + "keep this page open" notice.
+    {
+      const p = await newPage(browser, { info: baseInfo({ sharesRejected: 12, sharesAccepted: 18760 }) });
+      await nav(p); await fillEditorAndQueue(p, { name: 'Coverage run', warmup: 30, measure: 600, cooldown: 0 });
+      await startSession(p);
+      for (let i = 0; i < 12 && !(await p.$('.nx-lab-coverage')); i++) await sleep(4000);
+      // Let several BYTE-IDENTICAL polls arrive — arrival-identity intake counts
+      // each as evidence (the old content-dedup would stay stuck at one sample).
+      await sleep(22000);
+      await shot(p, '26-live-measurement-coverage');
+      // 27. hidden-page warning: override visibilityState and fire visibilitychange.
+      await p.evaluate(() => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+        Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await sleep(900);
+      await shot(p, '27-hidden-page-warning');
+      await p.close();
+    }
+
+    // 28. live telemetry stale / reconnecting banner (session pushed offline mid-run).
+    {
+      const scenario = { info: baseInfo({ sharesRejected: 12, sharesAccepted: 18760 }) };
+      const p = await newPage(browser, scenario);
+      await nav(p); await fillEditorAndQueue(p, { name: 'Stale run', warmup: 30, measure: 600, cooldown: 0 });
+      await startSession(p);
+      for (let i = 0; i < 10 && !(await p.$('.nx-lab-coverage')); i++) await sleep(4000);
+      scenario.offline = true;                    // telemetry stops arriving
+      await sleep(18000);                          // age past the 15 s freshness limit
+      await shot(p, '28-telemetry-stale-reconnecting');
+      await p.close();
+    }
+
+    // 29. history detail: partial (10/120) + completed (121/120) with honest evidence.
+    {
+      const p = await newPage(browser, { info: baseInfo(), seed: { NX_STABILITY_SESSIONS: JSON.stringify([seededHistory()]) } });
+      await nav(p); await clickByText(p, '.nx-lab-hitem .nx-chip', /View/); await sleep(600);
+      await shot(p, '29-history-partial-and-completed-evidence'); await p.close();
+    }
 
   } finally {
     await browser.close();

@@ -5,6 +5,7 @@ import { ToastrService } from 'ngx-toastr';
 
 import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
 import { LiveDataService } from 'src/app/services/live-data.service';
+import { TelemetryArrivalService } from 'src/app/services/telemetry-arrival.service';
 import { SystemApiService } from 'src/app/services/system.service';
 import { WebVersionService } from 'src/app/services/web-version.service';
 import { LocalStorageService } from 'src/app/local-storage.service';
@@ -17,7 +18,7 @@ import {
   TuningConfig, StabilityProfile, StarterProfileSpec, DURATION_BOUNDS, DEFAULT_DURATIONS, PROFILE_LIMITS,
   captureBaseline, validateProfile, isDuplicateProfile, profileDiff, profileToSettings,
   buildStarterProfiles, totalSessionSeconds, nextProfileId, outsideOptionList,
-  RestartAuditRow, restartAudit, profileRestartRequired, sessionRestartCount,
+  RestartAuditRow, restartAudit, profileRestartRequired, sessionRestartCount, maxSessionDurationMs,
 } from './stability-profile';
 import {
   Freshness, FRESHNESS_LIMIT_MS, SESSION_RECONNECT_GRACE_MS, HEARTBEAT_MS,
@@ -31,10 +32,21 @@ import {
   LabSnapshot, LabEventType, TimelineEntry, initialSnapshot, reduce, stateLabel, stateExplanation, isActive, isTerminal,
 } from './stability-machine';
 import {
-  LabSample, buildSample, shareDelta,
+  LabSample, SAMPLE_INTERVAL_MS, buildSample, shareDelta,
 } from './stability-telemetry';
 import {
-  StopThresholds, DebounceState, STOP_TUNABLES, defaultStopThresholds, clampThresholds, zeroDebounce, evaluateSample, StopReason,
+  IntakeState, initialIntake, considerArrival, hasCoreTelemetry,
+} from './stability-intake';
+import {
+  VisibilityAccumulator, VisibilityStats, VisibilityPhase,
+  initialVisibility, applyVisibility, visibilityStats, visibilitySummary,
+} from './stability-visibility';
+import {
+  CoverageStats, computeCoverage, sampleTargetText, coveragePctText,
+} from './stability-coverage';
+import {
+  StopThresholds, DebounceState, STOP_TUNABLES, defaultStopThresholds, clampThresholds, zeroDebounce,
+  evaluateSample, StopReason, migrateThresholds,
 } from './stability-stop';
 import {
   ProfileRun, ProfileResult, computeProfileResult, applyComparativeBadges, completionStatement, isPromotable,
@@ -45,6 +57,8 @@ import {
 
 /** localStorage flag proving a live run was in progress (interruption detection). */
 const ACTIVE_FLAG = 'NX_STABILITY_ACTIVE';
+/** localStorage key for the owner's tuned stop thresholds (migrated on load). */
+const THRESHOLDS_KEY = 'NX_STABILITY_THRESHOLDS';
 
 type EditorModel = {
   name: string;
@@ -78,6 +92,9 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
   public readonly stateExplanation = stateExplanation;
   public readonly completionStatement = completionStatement;
   public readonly isPromotable = isPromotable;
+  public readonly sampleTargetText = sampleTargetText;
+  public readonly coveragePctText = coveragePctText;
+  public readonly visibilitySummary = visibilitySummary;
 
   // ---- live device ----
   public info$: Observable<ISystemInfo>;
@@ -105,6 +122,8 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
   public baseline: TuningConfig | null = null;
   public profiles: StabilityProfile[] = [];
   public starters: StarterProfileSpec[] = [];
+  /** Honest explanations for starters that were deliberately omitted. */
+  public starterNotes: string[] = [];
   public thresholds: StopThresholds = defaultStopThresholds();
   public editor: EditorModel = this.blankEditor();
 
@@ -115,15 +134,36 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
 
   // ---- session runtime ----
   public snapshot: LabSnapshot = initialSnapshot(0);
+  /** Wall-clock session start (Date.now) — record timestamps + max-wall-clock cap. */
   private sessionStartMs = 0;
-  private phaseDeadline = 0;
-  private measureStartMs = 0;
+  /** Monotonic session start (performance.now) — the basis for every sample tMs. */
+  private sessionStartMono = 0;
+  /** Monotonic start of the current phase and its duration (deadline = start+dur). */
+  private phaseStartMono = 0;
+  private phaseDurationMs = 0;
+  /** Session-relative ms at which the current phase began (for sample windowing). */
+  private phaseStartTMs = 0;
+  /** Session-relative ms at which the measurement window began. */
+  private measureStartTMs = 0;
+  /** Monotonic measurement start — for the actual measured duration. */
+  private measureStartMono = 0;
+  /** Bounded maximum session DURATION (ms) — a MONOTONIC runtime cap, not a timestamp. */
+  private maxSessionDurationMs = 0;
   private reconnectStartMono = 0;
   private staleAtRestartMono: number | null = null;
   private debounce: DebounceState = zeroDebounce();
   private startCounters: { a: number | null; r: number | null } = { a: null, r: null };
   private restartOccurredThisProfile = false;
   private countersResetThisProfile = false;
+  /** Event-driven sample intake state (arrival-identity dedup + monotonic cadence). */
+  private intake: IntakeState = initialIntake();
+  /** Identity of the most recent telemetry arrival observed (freshness dedup). */
+  private lastArrivalId: number | null = null;
+  /** Page Visibility accumulator + latest snapshot (monotonic). */
+  private visibility: VisibilityAccumulator = initialVisibility(false, 0);
+  public visStats: VisibilityStats = visibilityStats(this.visibility, 0);
+  /** Live coverage over the current phase (warm-up / measurement). */
+  public liveCoverage: CoverageStats | null = null;
   /** The tuning config the device currently holds (baseline → each applied profile). */
   private currentDeviceConfig: TuningConfig | null = null;
   private warmupSamples: LabSample[] = [];
@@ -149,12 +189,15 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
 
   constructor(
     private liveDataService: LiveDataService,
+    private telemetryArrival: TelemetryArrivalService,
     private systemService: SystemApiService,
     private webVersionService: WebVersionService,
     private toastr: ToastrService,
     private localStorage: LocalStorageService,
     private sensitiveData: SensitiveData,
   ) {
+    // The template renders from the shared info$ (display only); all evidence and
+    // freshness logic keys off the arrival stream so it dedups on identity.
     this.info$ = this.liveDataService.info$;
     this.privacyHidden$ = this.sensitiveData.hidden;
     this.historyStore = new StabilityHistoryStore(this.localStorage);
@@ -170,6 +213,12 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
     }
 
     this.history = this.historyStore.list();
+
+    // Load the owner's saved stop thresholds, migrating an untouched legacy
+    // config (VRM 100 °C) to the conservative board-601 default (70 °C). An
+    // owner-customised config is preserved verbatim (only clamped to safe bounds).
+    const storedThresholds = this.localStorage.getObject(THRESHOLDS_KEY);
+    this.thresholds = migrateThresholds(storedThresholds || null);
 
     this.systemService.getAsicSettings().pipe(first(), takeUntil(this.destroy$)).subscribe(asic => {
       this.frequencyOptions = Array.isArray(asic.frequencyOptions) ? asic.frequencyOptions : [];
@@ -191,13 +240,19 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
       this.recomputePreflight();
     });
 
-    this.info$.pipe(takeUntil(this.destroy$)).subscribe(info => {
+    // Subscribe ONCE to the shared arrival stream. Each callback carries the
+    // source-assigned monotonic `arrivalId`; a replay / re-subscription carries an
+    // id we have already seen (so it never re-stamps freshness or double-counts).
+    this.telemetryArrival.arrivals$.pipe(takeUntil(this.destroy$)).subscribe(({ info, arrivalId }) => {
+      const isNewArrival = this.lastArrivalId === null || arrivalId > this.lastArrivalId;
+      this.lastArrivalId = arrivalId;
       this.latestInfo = info;
-      // Only a genuinely-new sample carrying real telemetry refreshes freshness.
-      // A gap payload (no hashrate AND no valid temperature) never does, and a
-      // bare component re-render never calls this subscription at all.
-      if (this.hasCoreTelemetry(info)) {
-        this.lastFreshMonoMs = this.nowMono();
+      const mono = this.nowMono();
+      // Freshness reflects genuine ARRIVALS, not payload changes: a new arrival
+      // carrying core telemetry re-stamps the receipt time; a replay of a known
+      // arrival and a gap payload never do.
+      if (isNewArrival && hasCoreTelemetry(info)) {
+        this.lastFreshMonoMs = mono;
       }
       this.supported = supportedDevice(info);
       this.pairStatus = derivePairStatus(info.version, info.axeOSVersion, this.installedWebVersion);
@@ -208,6 +263,14 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
         this.resetEditorDefaults();
       }
       this.refreshFreshness();
+      // Event-driven evidence: a running measurement collects a sample when a
+      // GENUINELY NEW telemetry arrival is delivered — not when a throttled timer
+      // fires — and the same arrival drives the deadline/stale supervision so
+      // progress does not depend on a background-throttled heartbeat.
+      if (this.isSamplingState()) {
+        this.ingestArrival(info, arrivalId, mono);
+        if (this.isSamplingState()) this.superviseSession(mono);
+      }
       this.recomputePreflight();
     });
 
@@ -228,27 +291,56 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
     return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
   }
 
-  private hasCoreTelemetry(info: ISystemInfo | null | undefined): boolean {
-    if (!info) return false;
-    const hr = info.hashRate, temp = info.temp;
-    return (typeof hr === 'number' && isFinite(hr)) || (typeof temp === 'number' && isFinite(temp) && temp > 0);
+  /** True when the page is not foreground-visible (Page Visibility API). */
+  private isPageHidden(): boolean {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  }
+
+  /** Public read for the template banner. */
+  public get pageHidden(): boolean {
+    return this.visStats.currentlyHidden;
+  }
+
+  /** States in which a running measurement collects evidence. */
+  private isSamplingState(): boolean {
+    const s = this.snapshot.state;
+    return s === 'warmup' || s === 'measuring' || s === 'cooldown';
   }
 
   private refreshFreshness(): void {
     this.freshness = evaluateFreshness(this.lastFreshMonoMs, this.nowMono(), FRESHNESS_LIMIT_MS);
   }
 
-  /** Single always-on tick: freshness + idle preflight + running-session drive. */
+  /** Single always-on tick: freshness + idle preflight + running-session supervision. */
   private onHeartbeat(): void {
+    const mono = this.nowMono();
     this.refreshFreshness();
     const state = this.snapshot.state;
     if (state === 'idle') {
       this.recomputePreflight();
     } else if (state === 'warmup' || state === 'measuring' || state === 'cooldown') {
-      this.onSessionTick();
+      // The heartbeat supervises deadlines/staleness even when NO telemetry
+      // arrives; it never builds an evidence sample (that is event-driven).
+      this.superviseSession(mono);
     } else if (state === 'reconnecting') {
+      this.visibility = applyVisibility(this.visibility, this.isPageHidden(), mono, 'other');
+      this.visStats = visibilityStats(this.visibility, mono);
       this.onReconnectTick();
     }
+  }
+
+  /** Records a visibility change the instant it happens — never refreshes freshness. */
+  @HostListener('document:visibilitychange')
+  onVisibilityChange(): void {
+    if (!this.isActiveState()) return;
+    const mono = this.nowMono();
+    this.visibility = applyVisibility(this.visibility, this.isPageHidden(), mono, this.currentVisibilityPhase());
+    this.visStats = visibilityStats(this.visibility, mono);
+  }
+
+  private currentVisibilityPhase(): VisibilityPhase {
+    const s = this.snapshot.state;
+    return s === 'warmup' ? 'warmup' : s === 'measuring' ? 'measure' : 'other';
   }
 
   /** Warn on browser refresh/close while a run is active (never silent). */
@@ -299,7 +391,9 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
   }
 
   private rebuildStarters(): void {
-    this.starters = buildStarterProfiles(this.baseline, this.frequencyOptions, this.voltageOptions, this.defaultFrequency, this.defaultVoltage);
+    const built = buildStarterProfiles(this.baseline, this.frequencyOptions, this.voltageOptions, this.defaultFrequency, this.defaultVoltage);
+    this.starters = built.specs;
+    this.starterNotes = built.notes;
   }
 
   public editorConfig(): TuningConfig {
@@ -393,10 +487,13 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
     return totalSessionSeconds(this.profiles);
   }
 
-  // ---- stop threshold editing (clamped) ----
-  public setAsicStop(value: number): void { this.thresholds = { ...this.thresholds, asicC: clampAsicStop(value) }; this.recomputePreflight(); }
-  public setVrmStop(value: number): void { this.thresholds = { ...this.thresholds, vrmC: clampVrmStop(value) }; this.recomputePreflight(); }
-  public setThresholds(partial: Partial<StopThresholds>): void { this.thresholds = clampThresholds({ ...this.thresholds, ...partial }); this.recomputePreflight(); }
+  // ---- stop threshold editing (clamped + persisted) ----
+  public setAsicStop(value: number): void { this.thresholds = { ...this.thresholds, asicC: clampAsicStop(value) }; this.persistThresholds(); this.recomputePreflight(); }
+  public setVrmStop(value: number): void { this.thresholds = { ...this.thresholds, vrmC: clampVrmStop(value) }; this.persistThresholds(); this.recomputePreflight(); }
+  public setThresholds(partial: Partial<StopThresholds>): void { this.thresholds = clampThresholds({ ...this.thresholds, ...partial }); this.persistThresholds(); this.recomputePreflight(); }
+
+  /** Persist the owner's tuned thresholds so they survive across sessions. */
+  private persistThresholds(): void { this.localStorage.setObject(THRESHOLDS_KEY, { ...this.thresholds }); }
 
   // =========================================================================
   // Preflight + confirmation
@@ -472,15 +569,24 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
     if (!this.allAcked || this.snapshot.state !== 'awaiting-confirmation') return;
     this.showConfirm = false;
     this.sessionId = `nx-lab-${Date.now().toString(36)}`;
-    this.sessionStartMs = Date.now();
+    this.sessionStartMs = Date.now();          // wall-clock — human timestamps only
+    this.sessionStartMono = this.nowMono();    // monotonic — all runtime calculations
+    this.lastArrivalId = null;
+    this.maxSessionDurationMs = maxSessionDurationMs(this.profiles);
     this.runs = [];
     this.results = [];
     this.liveSamples = [];
+    this.liveCoverage = null;
     this.activeStop = null;
+    // Start the visibility accumulator from the current page state (honestly
+    // recording a session that begins hidden).
+    this.visibility = initialVisibility(this.isPageHidden(), this.sessionStartMono);
+    this.visStats = visibilityStats(this.visibility, this.sessionStartMono);
     this.currentDeviceConfig = this.baseline; // device currently holds the baseline
     this.snapshot = reduce(this.snapshot, { type: 'CONFIRM', at: Date.now() });
     this.localStorage.setObject(ACTIVE_FLAG, { id: this.sessionId, startedAt: this.sessionStartMs });
-    // The always-on heartbeat drives sampling; no separate polling loop is opened.
+    // Evidence is driven by genuine telemetry arrival; the heartbeat only
+    // supervises deadlines/staleness. No separate polling loop is opened.
     this.applyProfile(0);
   }
 
@@ -498,6 +604,9 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
     this.restartOccurredThisProfile = false;
     this.countersResetThisProfile = false;
     this.activeStop = null;
+    this.liveCoverage = null;
+    // Reset intake so the first genuine telemetry of this profile is accepted.
+    this.intake = initialIntake();
 
     // Real restart decision from the audited field diff (device→profile).
     const target = this.profileConfig(profile);
@@ -528,7 +637,19 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
   }
 
   private beginWarmup(profile: StabilityProfile): void {
-    this.phaseDeadline = Date.now() + profile.warmupSec * 1000;
+    this.startPhase(profile.warmupSec);
+  }
+
+  /**
+   * Open a phase on the MONOTONIC clock. The deadline is start+duration, so a
+   * wall-clock change cannot shorten or extend a phase, and a late supervise
+   * callback simply crosses the deadline once rather than drifting.
+   */
+  private startPhase(seconds: number): void {
+    const mono = this.nowMono();
+    this.phaseStartMono = mono;
+    this.phaseDurationMs = Math.max(0, seconds * 1000);
+    this.phaseStartTMs = Math.max(0, Math.round(mono - this.sessionStartMono));
   }
 
   /** Issue the restart and enter the reconnect wait (freshness-driven). */
@@ -566,69 +687,126 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
     }
   }
 
-  private onSessionTick(): void {
+  /**
+   * Event-driven evidence intake — called for each telemetry ARRIVAL while a
+   * session is sampling. A sample is built and recorded ONLY when the intake
+   * accepts it (a new arrival identity, cadence elapsed); a replay of a known
+   * arrival, a re-render, or a too-soon arrival is ignored. This is what makes
+   * the evidence count reflect real telemetry rather than a throttled timer, and
+   * why byte-identical genuine readings still count.
+   */
+  private ingestArrival(info: ISystemInfo | null, arrivalId: number, mono: number): void {
+    const decision = considerArrival(this.intake, info as any, arrivalId, mono, SAMPLE_INTERVAL_MS);
+    this.intake = decision.state;
+    if (!decision.accept) return;
+
     const state = this.snapshot.state;
-    const now = Date.now();
-    const info = this.latestInfo;
-    const profileIndex = this.snapshot.profileIndex;
-    const profile = this.profiles[profileIndex];
+    const phase = state === 'warmup' ? 'warmup' : state === 'measuring' ? 'measure' : 'cooldown';
+    const sample = buildSample(info as any, {
+      sessionStartMs: this.sessionStartMono, now: mono, phase, profileIndex: this.snapshot.profileIndex,
+    });
+    this.acceptSample(sample, state);
+  }
+
+  /** Record an accepted sample: live view, share tracking, stop evaluation. */
+  private acceptSample(sample: LabSample, state: LabSnapshot['state']): void {
+    this.pushLiveSample(sample);
+
+    // Track counter resets across the run.
+    const delta = shareDelta(this.startCounters.a, this.startCounters.r, sample.sharesAccepted, sample.sharesRejected);
+    if (delta.reset) this.countersResetThisProfile = true;
+    if (this.startCounters.a === null && sample.sharesAccepted !== null) this.startCounters = { a: sample.sharesAccepted, r: sample.sharesRejected };
+
+    if (state === 'warmup') this.warmupSamples.push(sample);
+    else if (state === 'measuring') this.measureSamples.push(sample);
+
+    // Stop-condition evaluation runs on genuine telemetry only (a gap is never
+    // built into a sample here, so a dropout can never fabricate a stop).
+    const evaluation = evaluateSample(sample, this.thresholds, this.debounce);
+    this.debounce = evaluation.debounce;
+    if (evaluation.stop) {
+      this.activeStop = evaluation.stop;
+      this.recordRun(false);
+      this.dispatch('STOP', evaluation.stop.message);
+      this.beginRestore();
+      return;
+    }
+    this.updateLiveCoverage();
+  }
+
+  /**
+   * Supervise a running session on the monotonic clock: record visibility,
+   * enforce the maximum wall-clock cap and the stale-telemetry abort, and cross
+   * ONE phase deadline per call (never skipping multiple states silently). Builds
+   * no evidence — the sample count is event-driven, not timer-driven.
+   */
+  private superviseSession(mono: number): void {
+    const state = this.snapshot.state;
+    if (!(state === 'warmup' || state === 'measuring' || state === 'cooldown')) return;
+    const profile = this.profiles[this.snapshot.profileIndex];
     if (!profile) return;
 
-    if (state === 'warmup' || state === 'measuring' || state === 'cooldown') {
-      // Telemetry aging → reconnect/offline handling. Stale telemetry is never
-      // recorded as a real sample (it becomes a gap), and staying stale beyond
-      // the reconnect grace aborts the run.
-      const fresh = this.freshness.online;
-      if (!fresh && shouldAbortForStaleness(this.freshness.ageMs)) {
-        this.activeStop = null;
-        this.recordRun(false);
-        this.dispatch('STOP', `Device offline — no fresh telemetry for over ${Math.round((FRESHNESS_LIMIT_MS + SESSION_RECONNECT_GRACE_MS) / 1000)} s`);
+    // Visibility snapshot (keeps the phase-affected flags honest while hidden).
+    this.visibility = applyVisibility(this.visibility, this.isPageHidden(), mono, this.currentVisibilityPhase());
+    this.visStats = visibilityStats(this.visibility, mono);
+
+    // Hard maximum-DURATION cap on the MONOTONIC clock — never leave the tested
+    // profile active indefinitely if the browser was throttled so phase callbacks
+    // arrived very late. Using monotonic elapsed (not Date.now) means a system
+    // wall-clock jump — forward or backward — can neither trip this early nor
+    // extend it.
+    if (this.maxSessionDurationMs > 0 && mono - this.sessionStartMono > this.maxSessionDurationMs) {
+      this.activeStop = null;
+      this.recordRun(false);
+      this.dispatch('STOP', `Maximum session time (${Math.round(this.maxSessionDurationMs / 60000)} min) exceeded — restoring original configuration`);
+      this.beginRestore();
+      return;
+    }
+
+    // Telemetry staleness → reconnect/offline handling. Staying stale beyond the
+    // reconnect grace aborts the run (unchanged freshness contract).
+    if (!this.freshness.online && shouldAbortForStaleness(this.freshness.ageMs)) {
+      this.activeStop = null;
+      this.recordRun(false);
+      this.dispatch('STOP', `Device offline — no fresh telemetry for over ${Math.round((FRESHNESS_LIMIT_MS + SESSION_RECONNECT_GRACE_MS) / 1000)} s`);
+      this.beginRestore();
+      return;
+    }
+
+    this.updateLiveCoverage();
+
+    // Phase deadline on the monotonic clock — at most one transition per call.
+    const elapsed = mono - this.phaseStartMono;
+    if (elapsed < this.phaseDurationMs) return;
+
+    if (state === 'warmup') {
+      this.dispatch('WARMUP_DONE');
+      this.measureStartMono = mono;
+      this.startPhase(profile.measureSec);
+      this.measureStartTMs = this.phaseStartTMs;
+    } else if (state === 'measuring') {
+      this.recordRun(false, true);
+      this.dispatch('MEASURE_DONE');
+      this.startPhase(profile.cooldownSec);
+    } else if (state === 'cooldown') {
+      this.dispatch('COOLDOWN_DONE');
+      if (this.snapshot.state === 'applying') {
+        this.applyProfile(this.snapshot.profileIndex);
+      } else {
         this.beginRestore();
-        return;
-      }
-
-      const phase = state === 'warmup' ? 'warmup' : state === 'measuring' ? 'measure' : 'cooldown';
-      // A stale tick yields a gap sample (no telemetry), never the stale values.
-      const sample = buildSample(fresh ? (info as any) : null, { sessionStartMs: this.sessionStartMs, now, phase, profileIndex });
-      this.pushLiveSample(sample);
-
-      // Track counter resets across the run.
-      const delta = shareDelta(this.startCounters.a, this.startCounters.r, sample.sharesAccepted, sample.sharesRejected);
-      if (delta.reset) this.countersResetThisProfile = true;
-      if (this.startCounters.a === null && sample.sharesAccepted !== null) this.startCounters = { a: sample.sharesAccepted, r: sample.sharesRejected };
-
-      if (state === 'warmup') this.warmupSamples.push(sample);
-      else if (state === 'measuring') this.measureSamples.push(sample);
-
-      // Stop-condition evaluation is active throughout the run (gap samples are
-      // skipped inside evaluateSample so a dropout never fabricates a stop).
-      const evaluation = evaluateSample(sample, this.thresholds, this.debounce);
-      this.debounce = evaluation.debounce;
-      if (evaluation.stop) {
-        this.activeStop = evaluation.stop;
-        this.recordRun(false);
-        this.dispatch('STOP', evaluation.stop.message);
-        this.beginRestore();
-        return;
-      }
-
-      if (state === 'warmup' && now >= this.phaseDeadline) {
-        this.dispatch('WARMUP_DONE');
-        this.measureStartMs = now;
-        this.phaseDeadline = now + profile.measureSec * 1000;
-      } else if (state === 'measuring' && now >= this.phaseDeadline) {
-        this.recordRun(false, true);
-        this.dispatch('MEASURE_DONE');
-        this.phaseDeadline = now + profile.cooldownSec * 1000;
-      } else if (state === 'cooldown' && now >= this.phaseDeadline) {
-        this.dispatch('COOLDOWN_DONE');
-        if (this.snapshot.state === 'applying') {
-          this.applyProfile(this.snapshot.profileIndex);
-        } else {
-          this.beginRestore();
-        }
       }
     }
+  }
+
+  /** Recompute live coverage over the current phase's valid samples. */
+  private updateLiveCoverage(): void {
+    const state = this.snapshot.state;
+    const profile = this.currentProfile();
+    if (!profile || !(state === 'warmup' || state === 'measuring')) return;
+    const samples = state === 'warmup' ? this.warmupSamples : this.measureSamples;
+    const windowMs = (state === 'warmup' ? profile.warmupSec : profile.measureSec) * 1000;
+    const times = samples.filter(s => !s.gap).map(s => s.tMs - this.phaseStartTMs);
+    this.liveCoverage = computeCoverage({ sampleTimesMs: times, windowMs, cadenceMs: SAMPLE_INTERVAL_MS });
   }
 
   private pushLiveSample(sample: LabSample): void {
@@ -654,7 +832,10 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
       warmupSamples: this.warmupSamples,
       measureSamples: this.measureSamples,
       requestedMeasureMs: profile.measureSec * 1000,
-      measuredMeasureMs: this.measureStartMs > 0 ? Math.max(0, Date.now() - this.measureStartMs) : 0,
+      measuredMeasureMs: this.measureStartMono > 0 ? Math.max(0, this.nowMono() - this.measureStartMono) : 0,
+      cadenceMs: SAMPLE_INTERVAL_MS,
+      measureStartTMs: this.measureStartTMs,
+      visibility: visibilityStats(this.visibility, this.nowMono()),
       restartOccurred: this.restartOccurredThisProfile,
       countersReset: this.countersResetThisProfile,
       ranFullWindow: completed,
@@ -714,6 +895,9 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
       finalState: this.snapshot.state,
       reason: this.snapshot.reason,
       restoreResult: this.snapshot.restoreResult,
+      sampleCadenceMs: SAMPLE_INTERVAL_MS,
+      maxSessionDurationMs: this.maxSessionDurationMs,
+      restoreVerified: this.snapshot.restoreResult === 'ok',
     });
     this.history = this.historyStore.save(record);
   }
@@ -836,9 +1020,53 @@ export class StabilityLabComponent implements OnInit, OnDestroy {
     return `${(this.freshness.ageMs / 1000).toFixed(0)} s`;
   }
 
+  // ---- live coverage (Stage 7) ----
+
+  /** "121 valid samples · target 120" for the active phase. */
+  public liveSampleTargetText(): string {
+    const c = this.liveCoverage;
+    if (!c) return '—';
+    return sampleTargetText(c.validSamples, c.expectedTarget);
+  }
+
+  public liveCoverageText(): string {
+    return this.liveCoverage ? coveragePctText(this.liveCoverage.coveragePct) : '—';
+  }
+
+  /** Monotonic age of the most recently accepted evidence sample. */
+  public latestSampleAgeMs(): number | null {
+    if (this.intake.lastAcceptedMonoMs === null) return null;
+    return Math.max(0, this.nowMono() - this.intake.lastAcceptedMonoMs);
+  }
+
+  public latestSampleAgeText(): string {
+    const ms = this.latestSampleAgeMs();
+    return ms === null ? '—' : `${(ms / 1000).toFixed(0)} s`;
+  }
+
+  public medianIntervalText(): string {
+    const ms = this.liveCoverage?.medianIntervalMs ?? null;
+    return ms === null ? '—' : `${(ms / 1000).toFixed(1)} s`;
+  }
+
+  /** Current evidence gap = time since the last accepted sample. */
+  public currentGapText(): string {
+    return this.latestSampleAgeText();
+  }
+
+  public hiddenTotalText(): string {
+    return `${Math.round(this.visStats.totalHiddenMs / 1000)} s`;
+  }
+
+  /** "121 valid samples · target 120" for a finished result. */
+  public resultSampleTargetText(r: ProfileResult): string {
+    return sampleTargetText(r.validSamples, r.expectedSamples);
+  }
+
   public countdownSeconds(): number | null {
     if (!(this.snapshot.state === 'warmup' || this.snapshot.state === 'measuring' || this.snapshot.state === 'cooldown')) return null;
-    return Math.max(0, Math.round((this.phaseDeadline - Date.now()) / 1000));
+    // Countdown on the monotonic clock (phase start + duration − now).
+    return Math.max(0, Math.round((this.phaseStartMono + this.phaseDurationMs - this.nowMono()) / 1000));
   }
 
   public currentProfile(): StabilityProfile | null {

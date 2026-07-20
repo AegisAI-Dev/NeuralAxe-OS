@@ -34,6 +34,7 @@ let fixtures: ComponentFixture<StabilityLabComponent>[] = [];
 function build(info$: any, connected$ = of(true)) {
   window.localStorage.removeItem('NX_STABILITY_ACTIVE');
   window.localStorage.removeItem('NX_STABILITY_SESSIONS');
+  window.localStorage.removeItem('NX_STABILITY_THRESHOLDS');
   TestBed.configureTestingModule({
     declarations: [StabilityLabComponent],
     providers: [
@@ -250,12 +251,13 @@ describe('StabilityLabComponent (telemetry freshness)', () => {
 });
 
 describe('StabilityLabComponent (engine run + restore)', () => {
+  const fastProfile = (warmupSec: number, measureSec: number): StabilityProfile => ({
+    id: 'fast', name: 'Fast', frequency: 500, coreVoltage: 1200, thermalControlMode: 'target',
+    temptarget: 60, minFanSpeed: 25, warmupSec, measureSec, cooldownSec: 0,
+  });
+
   function startFast(component: StabilityLabComponent, warmupSec: number, measureSec: number) {
-    const fast: StabilityProfile = {
-      id: 'fast', name: 'Fast', frequency: 500, coreVoltage: 1200, thermalControlMode: 'target',
-      temptarget: 60, minFanSpeed: 25, warmupSec, measureSec, cooldownSec: 0,
-    };
-    component.profiles = [fast];
+    component.profiles = [fastProfile(warmupSec, measureSec)];
     component.recomputePreflight();
     component.reviewSession();
     component.acks = { settings: true, restart: true, interrupt: true, protection: true, restore: true };
@@ -263,14 +265,18 @@ describe('StabilityLabComponent (engine run + restore)', () => {
   }
 
   it('runs a short session end-to-end and restores the original configuration', fakeAsync(() => {
-    const { component, fixture, system } = create();
-    fixtures.pop(); fixtures.push(fixture);
-    const updateSpy = system.updateSystem as jasmine.Spy;
+    const mono = { v: 500_000 };
+    const info$ = new BehaviorSubject(supportedInfo());
+    const ctx = buildWithClock(info$, mono);
+    const { component, fixture } = ctx;
+    const updateSpy = ctx.system.updateSystem as jasmine.Spy;
     startFast(component, 1, 1);
     expect(component.snapshot.state).toBe('warmup'); // applied live, no restart
-    tick(5000); expect(component.snapshot.state).toBe('measuring');
-    tick(5000); // measurement done → cooldown
-    tick(5000); // cooldown (0s) done → restore → complete
+    // Drive the phases on the MONOTONIC clock with genuine telemetry emissions.
+    let hr = 1290;
+    for (let i = 0; i < 10 && component.snapshot.state !== 'complete'; i++) {
+      mono.v += 800; info$.next(supportedInfo({ hashRate: hr++ } as any)); tick(5000);
+    }
     expect(component.snapshot.state).toBe('complete');
     expect(component.snapshot.restoreResult).toBe('ok');
     expect(updateSpy.calls.count()).toBeGreaterThanOrEqual(2);
@@ -282,16 +288,125 @@ describe('StabilityLabComponent (engine run + restore)', () => {
   }));
 
   it('aborts on owner request and restores the original', fakeAsync(() => {
-    const { component, fixture } = create();
-    fixtures.pop(); fixtures.push(fixture);
+    const mono = { v: 700_000 };
+    const info$ = new BehaviorSubject(supportedInfo());
+    const { component, fixture } = buildWithClock(info$, mono);
     startFast(component, 60, 60);
-    tick(5000);
+    mono.v += 800; info$.next(supportedInfo({ hashRate: 1291 } as any)); tick(5000);
     expect(component.isActiveState()).toBeTrue();
     component.requestAbort();
     expect(component.showAbort).toBeTrue();
     component.confirmAbort();
     expect(component.snapshot.state).toBe('aborted');
     expect(component.results[0].status).toBe('aborted');
+    fixture.destroy();
+    discardPeriodicTasks();
+  }));
+
+  it('collects evidence from genuine telemetry, NOT from the heartbeat timer', fakeAsync(() => {
+    const mono = { v: 900_000 };
+    const info$ = new BehaviorSubject(supportedInfo());
+    const { component, fixture } = buildWithClock(info$, mono);
+    startFast(component, 1, 600); // long measurement so we stay in-window
+    // Cross warm-up into measurement with one emission.
+    mono.v += 1200; info$.next(supportedInfo({ hashRate: 1291 } as any)); tick(5000);
+    expect(component.snapshot.state).toBe('measuring');
+    const afterWarmup = (component as any).measureSamples.length;
+    // Heartbeats WITHOUT new telemetry must NOT add measurement evidence.
+    mono.v += 100; tick(5000);
+    mono.v += 100; tick(5000);
+    expect((component as any).measureSamples.length).toBe(afterWarmup);
+    // Genuine new telemetry (spaced past the cadence) DOES add evidence.
+    mono.v += 6000; info$.next(supportedInfo({ hashRate: 1292 } as any)); tick(5000);
+    mono.v += 6000; info$.next(supportedInfo({ hashRate: 1293 } as any)); tick(5000);
+    expect((component as any).measureSamples.length).toBeGreaterThan(afterWarmup);
+    // Abort to restore cleanly.
+    component.confirmAbort();
+    fixture.destroy();
+    discardPeriodicTasks();
+  }));
+
+  it('a full measurement window with sparse coverage is Partial with an explicit reason', fakeAsync(() => {
+    const mono = { v: 1_500_000 };
+    const info$ = new BehaviorSubject(supportedInfo());
+    const { component, fixture } = buildWithClock(info$, mono);
+    startFast(component, 1, 600); // 600 s window → target 120 samples
+    mono.v += 1200; info$.next(supportedInfo({ hashRate: 1291 } as any)); tick(5000); // → measuring
+    expect(component.snapshot.state).toBe('measuring');
+    // Emit genuine samples only every ~40 s across the whole 600 s window — like a
+    // throttled background tab. That stays inside the 45 s reconnect grace (never
+    // aborts) but yields ~15 samples against a target of 120 → low coverage.
+    let hr = 1290;
+    for (let i = 0; i < 20 && component.isActiveState(); i++) {
+      mono.v += 40_000; info$.next(supportedInfo({ hashRate: hr++ } as any)); tick(5000);
+    }
+    const result = component.results[0];
+    expect(result).toBeTruthy();
+    expect(result.status).toBe('partial');
+    expect(result.statusReason.toLowerCase()).toContain('coverage');
+    expect(result.validSamples).toBeLessThan(result.expectedSamples);
+    expect(result.expectedSamples).toBe(120);
+    fixture.destroy();
+    discardPeriodicTasks();
+  }));
+
+  it('counts byte-identical genuine arrivals as separate evidence (arrival-identity, not content)', fakeAsync(() => {
+    const mono = { v: 3_000_000 };
+    const info$ = new BehaviorSubject(supportedInfo());
+    const { component, fixture } = buildWithClock(info$, mono);
+    startFast(component, 1, 600);
+    mono.v += 1200; info$.next(supportedInfo({ hashRate: 1291 } as any)); tick(5000); // → measuring
+    expect(component.snapshot.state).toBe('measuring');
+    const start = (component as any).measureSamples.length;
+    // Emit the SAME payload three times, 5 s apart. Content is identical; each is a
+    // genuinely new arrival → three new evidence samples.
+    const identical = supportedInfo({ hashRate: 1290, temp: 60, power: 21 } as any);
+    mono.v += 6000; info$.next({ ...identical }); tick(5000);
+    mono.v += 6000; info$.next({ ...identical }); tick(5000);
+    mono.v += 6000; info$.next({ ...identical }); tick(5000);
+    expect((component as any).measureSamples.length).toBe(start + 3);
+    component.confirmAbort();
+    fixture.destroy();
+    discardPeriodicTasks();
+  }));
+
+  it('aborts at the MONOTONIC max-duration deadline; a wall-clock jump neither trips nor extends it', fakeAsync(() => {
+    const mono = { v: 5_000_000 };
+    const info$ = new BehaviorSubject(supportedInfo());
+    const { component, fixture } = buildWithClock(info$, mono);
+    startFast(component, 30, 60); // cap = (90)s×2 + 600s = 780_000 ms (monotonic)
+    // Freeze the wall clock at a wildly jumped value — the cap must ignore it.
+    const jumped = spyOn(Date, 'now').and.returnValue(4_102_444_800_000); // year ~2100
+    mono.v += 700_000; info$.next(supportedInfo({ hashRate: 1291 } as any)); tick(5000);
+    expect(component.isActiveState()).toBeTrue(); // monotonic 700k < 780k → still running
+    // Jump the wall clock far backwards — still must not early-abort.
+    jumped.and.returnValue(1_000_000_000_000); // year ~2001
+    mono.v += 50_000; info$.next(supportedInfo({ hashRate: 1292 } as any)); tick(5000);
+    expect(component.isActiveState()).toBeTrue(); // monotonic 750k < 780k
+    // Cross the monotonic deadline → abort + restore, regardless of Date.now.
+    mono.v += 50_000; info$.next(supportedInfo({ hashRate: 1293 } as any)); tick(5000);
+    expect(component.snapshot.state).toBe('aborted');
+    expect(component.snapshot.reason).toContain('Maximum session time');
+    fixture.destroy();
+    discardPeriodicTasks();
+  }));
+
+  it('stores wall-clock (Date.now) start/finish timestamps in history, not the monotonic clock', fakeAsync(() => {
+    const mono = { v: 9_000_000 };            // monotonic clock is deliberately small
+    const info$ = new BehaviorSubject(supportedInfo());
+    const { component, fixture } = buildWithClock(info$, mono);
+    const wallBefore = Date.now();            // the wall clock the record must use
+    startFast(component, 1, 1);
+    let hr = 1290;
+    for (let i = 0; i < 10 && component.snapshot.state !== 'complete'; i++) {
+      mono.v += 800; info$.next(supportedInfo({ hashRate: hr++ } as any)); tick(5000);
+    }
+    expect(component.history.length).toBe(1);
+    const rec = component.history[0];
+    // Timestamps track Date.now, NOT the ~9,000,000 ms monotonic session clock.
+    expect(rec.startedAt).toBeGreaterThanOrEqual(wallBefore);
+    expect(rec.startedAt).not.toBe(9_000_000);
+    expect(rec.finishedAt).toBeGreaterThanOrEqual(rec.startedAt);
     fixture.destroy();
     discardPeriodicTasks();
   }));
@@ -347,4 +462,45 @@ describe('StabilityLabComponent (engine run + restore)', () => {
     fixture.destroy();
     discardPeriodicTasks();
   }));
+});
+
+describe('StabilityLabComponent (conservative defaults + honest starters)', () => {
+  /** Build, set a stored thresholds value, then run ngOnInit (which migrates). */
+  function buildWithStoredThresholds(stored: object) {
+    const ctx = build(of(supportedInfo()));
+    window.localStorage.setItem('NX_STABILITY_THRESHOLDS', JSON.stringify(stored));
+    ctx.fixture.detectChanges();
+    fixtures.push(ctx.fixture);
+    return ctx;
+  }
+
+  it('applies the conservative board-601 VRM 70 default when nothing is stored', () => {
+    const { component } = create();
+    expect(component.thresholds.vrmC).toBe(70);
+    expect(component.thresholds.asicC).toBe(68);
+  });
+
+  it('migrates an untouched legacy threshold config (VRM 100 → 70) on load', () => {
+    const { component } = buildWithStoredThresholds({
+      asicC: 68, vrmC: 100, errorPct: 5, rejectPct: 8, fanSaturationStop: false, fanSaturationPct: 100, debounceSamples: 3,
+    });
+    expect(component.thresholds.vrmC).toBe(70);
+  });
+
+  it('preserves an owner-customised threshold config on load (deliberate VRM 100 kept)', () => {
+    const { component } = buildWithStoredThresholds({
+      asicC: 62, vrmC: 100, errorPct: 5, rejectPct: 8, fanSaturationStop: false, fanSaturationPct: 100, debounceSamples: 3,
+    });
+    expect(component.thresholds.asicC).toBe(62);
+    expect(component.thresholds.vrmC).toBe(100);
+  });
+
+  it('omits a misleading same-frequency/higher-voltage Performance starter, with a note', () => {
+    // Baseline already at the highest served frequency (575); Performance would be
+    // 575 MHz at a higher voltage — no honest hashrate gain, so it is omitted.
+    const { component } = create(supportedInfo({ frequency: 575, coreVoltage: 1200 } as any));
+    expect(component.starters.some(s => s.key === 'performance')).toBeFalse();
+    expect(component.starterNotes.length).toBeGreaterThan(0);
+    expect(component.starterNotes.join(' ')).toContain('Performance');
+  });
 });

@@ -68,6 +68,60 @@ export function clampThresholds(input: Partial<StopThresholds>): StopThresholds 
   };
 }
 
+// ---------------------------------------------------------------------------
+// Conservative-default migration (Phase 2K.1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The Phase 2K default threshold set — the ONLY legacy shape that migrates. Its
+ * VRM stop was 100 °C (a hair under the firmware hard limit), which Phase 2K.1
+ * replaces with a conservative 70 °C board-601 operator default. Everything else
+ * is unchanged, so migration is a targeted, transparent bump — never a silent
+ * rewrite of an owner-customised threshold.
+ */
+export const LEGACY_DEFAULT_THRESHOLDS: Readonly<StopThresholds> = {
+  asicC: 68,
+  vrmC: 100,
+  errorPct: 5,
+  rejectPct: 8,
+  fanSaturationStop: false,
+  fanSaturationPct: 100,
+  debounceSamples: 3,
+} as const;
+
+/**
+ * True when a stored config is EXACTLY the legacy default set — i.e. the owner
+ * never touched any threshold. Only such an untouched config is migrated; the
+ * moment any field differs (including a deliberate VRM value), the whole config
+ * is treated as owner-customised and preserved verbatim (still clamped to safe
+ * bounds).
+ */
+export function isLegacyUntouched(stored: Partial<StopThresholds> | null | undefined): boolean {
+  if (!stored) return false;
+  const l = LEGACY_DEFAULT_THRESHOLDS;
+  return stored.asicC === l.asicC
+    && stored.vrmC === l.vrmC
+    && stored.errorPct === l.errorPct
+    && stored.rejectPct === l.rejectPct
+    && stored.fanSaturationStop === l.fanSaturationStop
+    && stored.fanSaturationPct === l.fanSaturationPct
+    && stored.debounceSamples === l.debounceSamples;
+}
+
+/**
+ * Migrate a stored (possibly legacy) threshold config to the current model:
+ *  - nothing stored → the current conservative defaults;
+ *  - an untouched legacy default set → the current conservative defaults
+ *    (this is the ONLY case where a stored VRM 100 °C becomes 70 °C);
+ *  - any owner-customised config → preserved verbatim, merely clamped to the
+ *    safe UI bounds (a deliberate VRM 100 °C is kept, never silently lowered).
+ */
+export function migrateThresholds(stored: Partial<StopThresholds> | null | undefined): StopThresholds {
+  if (!stored) return defaultStopThresholds();
+  if (isLegacyUntouched(stored)) return defaultStopThresholds();
+  return clampThresholds(stored);
+}
+
 export interface DebounceState {
   asic: number;
   vrm: number;

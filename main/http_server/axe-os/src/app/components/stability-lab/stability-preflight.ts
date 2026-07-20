@@ -142,10 +142,18 @@ export function supportedDevice(info: DeviceIdentity | null | undefined): Suppor
  * the owner may TIGHTEN them but never raise them beyond the safe UI ceilings —
  * these mirror the fixed semantic danger lines (ASIC 70 °C, VRM 105 °C) and stay
  * a margin under the firmware's own hard protection, which is never replaced.
+ *
+ * Phase 2K.1: the board-601 VRM operator-session default is 70 °C — a
+ * conservative margin above the observed operating VRM temperature (~55 °C peak
+ * in the real pilot), not the previous 100 °C which was only a hair under the
+ * firmware hard limit and therefore not an appropriate operator default. This is
+ * the OPERATOR-SESSION stop only; firmware hard thermal protection is unchanged.
+ * The previous default (100 °C) is preserved in stability-stop.ts as the
+ * migration source so an untouched legacy config moves to 70 °C safely.
  */
 export const STOP_THRESHOLD_BOUNDS = {
   asicC: { min: 55, max: 70, default: 68 },
-  vrmC: { min: 70, max: 105, default: 100 },
+  vrmC: { min: 70, max: 105, default: 70 },
 } as const;
 
 export function clampAsicStop(value: unknown): number {

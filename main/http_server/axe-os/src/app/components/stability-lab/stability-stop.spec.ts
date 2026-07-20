@@ -6,6 +6,9 @@ import {
   zeroDebounce,
   evaluateSample,
   DebounceState,
+  LEGACY_DEFAULT_THRESHOLDS,
+  isLegacyUntouched,
+  migrateThresholds,
 } from './stability-stop';
 import { LabSample } from './stability-telemetry';
 
@@ -57,6 +60,16 @@ describe('threshold clamping (tighten-only, never beyond safe bounds)', () => {
     expect(t.debounceSamples).toBe(STOP_TUNABLES.debounceSamples.default);
   });
 
+  it('applies the conservative board-601 board defaults (ASIC 68, VRM 70)', () => {
+    const t = defaultStopThresholds();
+    expect(t.asicC).toBe(68);
+    expect(t.vrmC).toBe(70);   // conservative operator default (was 100 in Phase 2K)
+    expect(t.errorPct).toBe(5);
+    expect(t.rejectPct).toBe(8);
+    expect(t.debounceSamples).toBe(3);
+    expect(t.fanSaturationStop).toBeFalse();
+  });
+
   it('clamps an attempt to raise thresholds beyond the safe ceilings', () => {
     const t = clampThresholds({ asicC: 95, vrmC: 130, errorPct: 99, rejectPct: 99, debounceSamples: 100 });
     expect(t.asicC).toBe(70);   // ASIC ceiling
@@ -70,6 +83,43 @@ describe('threshold clamping (tighten-only, never beyond safe bounds)', () => {
     const t = clampThresholds({ asicC: 60, errorPct: 2 });
     expect(t.asicC).toBe(60);
     expect(t.errorPct).toBe(2);
+  });
+});
+
+describe('conservative-default migration (Phase 2K.1)', () => {
+  it('nothing stored migrates to the current conservative defaults', () => {
+    expect(migrateThresholds(null)).toEqual(defaultStopThresholds());
+    expect(migrateThresholds(undefined)).toEqual(defaultStopThresholds());
+  });
+
+  it('an untouched legacy default set (VRM 100) migrates to the new VRM 70 default', () => {
+    expect(isLegacyUntouched(LEGACY_DEFAULT_THRESHOLDS)).toBeTrue();
+    const migrated = migrateThresholds({ ...LEGACY_DEFAULT_THRESHOLDS });
+    expect(migrated.vrmC).toBe(70);
+    expect(migrated).toEqual(defaultStopThresholds());
+  });
+
+  it('does NOT silently rewrite an owner-customised config (a deliberate VRM 100 is kept)', () => {
+    // Owner tightened the ASIC stop AND kept VRM at 100 — this is a customised
+    // config, not the untouched legacy set, so it must be preserved verbatim.
+    const custom = { ...LEGACY_DEFAULT_THRESHOLDS, asicC: 62, vrmC: 100 };
+    expect(isLegacyUntouched(custom)).toBeFalse();
+    const migrated = migrateThresholds(custom);
+    expect(migrated.asicC).toBe(62);
+    expect(migrated.vrmC).toBe(100); // deliberate value kept, not lowered to 70
+  });
+
+  it('an owner config that differs only by a tightened ASIC stop is preserved', () => {
+    const custom = { ...LEGACY_DEFAULT_THRESHOLDS, asicC: 60 };
+    expect(isLegacyUntouched(custom)).toBeFalse();
+    expect(migrateThresholds(custom).vrmC).toBe(100); // not the legacy set → VRM kept
+  });
+
+  it('still clamps a customised config into the safe bounds', () => {
+    const custom = { ...LEGACY_DEFAULT_THRESHOLDS, asicC: 90, vrmC: 130 };
+    const migrated = migrateThresholds(custom);
+    expect(migrated.asicC).toBe(70);
+    expect(migrated.vrmC).toBe(105);
   });
 });
 

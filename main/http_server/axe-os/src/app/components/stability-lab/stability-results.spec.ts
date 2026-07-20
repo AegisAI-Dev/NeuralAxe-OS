@@ -31,10 +31,19 @@ function makeRun(over: Partial<ProfileRun> = {}): ProfileRun {
     measureSamples: measure,
     requestedMeasureMs: 4 * SAMPLE_INTERVAL_MS,
     measuredMeasureMs: 4 * SAMPLE_INTERVAL_MS,
+    cadenceMs: SAMPLE_INTERVAL_MS,
+    measureStartTMs: 0,
     restartOccurred: false, countersReset: false,
     ranFullWindow: true, aborted: false, failed: false,
     ...over,
   };
+}
+
+/** A run whose window matches its valid-sample count → full (100 %) coverage. */
+function fullCoverageRun(over: Partial<ProfileRun> = {}): ProfileRun {
+  const measure = over.measureSamples ?? [s(), s(), s()];
+  const valid = measure.filter(x => !x.gap).length;
+  return makeRun({ requestedMeasureMs: valid * SAMPLE_INTERVAL_MS, ...over });
 }
 
 describe('computeProfileResult (aggregates)', () => {
@@ -125,8 +134,10 @@ describe('completionStatement', () => {
 
 describe('applyComparativeBadges (transparent, no opaque score)', () => {
   it('awards named comparative badges across completed results', () => {
-    const fast = computeProfileResult(makeRun({ profileId: 'a', profileName: 'Fast', measureSamples: [s({ hashRate: 1400, power: 25 }), s({ hashRate: 1400, power: 25 }), s({ hashRate: 1400, power: 25 })] }));
-    const eff = computeProfileResult(makeRun({ profileId: 'b', profileName: 'Eco', measureSamples: [s({ hashRate: 1000, power: 15, asicTemp: 55 }), s({ hashRate: 1000, power: 15, asicTemp: 55 }), s({ hashRate: 1000, power: 15, asicTemp: 55 })] }));
+    const fast = computeProfileResult(fullCoverageRun({ profileId: 'a', profileName: 'Fast', measureSamples: [s({ hashRate: 1400, power: 25 }), s({ hashRate: 1400, power: 25 }), s({ hashRate: 1400, power: 25 })] }));
+    const eff = computeProfileResult(fullCoverageRun({ profileId: 'b', profileName: 'Eco', measureSamples: [s({ hashRate: 1000, power: 15, asicTemp: 55 }), s({ hashRate: 1000, power: 15, asicTemp: 55 }), s({ hashRate: 1000, power: 15, asicTemp: 55 })] }));
+    expect(fast.status).toBe('completed');
+    expect(eff.status).toBe('completed');
     const results: ProfileResult[] = applyComparativeBadges([fast, eff]);
     expect(results[0].badges.some(b => b.kind === 'highest-hashrate')).toBeTrue();
     expect(results[1].badges.some(b => b.kind === 'lowest-efficiency')).toBeTrue();
@@ -138,6 +149,72 @@ describe('applyComparativeBadges (transparent, no opaque score)', () => {
     const bad = computeProfileResult(makeRun({ profileId: 'b', profileName: 'Bad', aborted: true, abortReason: 'x' }));
     applyComparativeBadges([good, bad]);
     expect(bad.badges.some(b => b.kind.startsWith('highest') || b.kind.startsWith('lowest'))).toBeFalse();
+  });
+
+  it('does not award comparative badges to a Partial (low-coverage) result', () => {
+    // Two completed results (so badges are awarded among them) plus a Partial that
+    // has the HIGHEST hashrate but thin coverage.
+    const good = computeProfileResult(fullCoverageRun({ profileId: 'a', profileName: 'Good', measureSamples: [s({ hashRate: 1400 }), s({ hashRate: 1400 }), s({ hashRate: 1400 })] }));
+    const good2 = computeProfileResult(fullCoverageRun({ profileId: 'c', profileName: 'Good2', measureSamples: [s({ hashRate: 1300 }), s({ hashRate: 1300 }), s({ hashRate: 1300 })] }));
+    // Same high-hashrate samples but a 12-slot window → 25 % coverage → Partial.
+    const partial = computeProfileResult(makeRun({ profileId: 'b', profileName: 'Sparse', measureSamples: [s({ hashRate: 1500 }), s({ hashRate: 1500 }), s({ hashRate: 1500 })], requestedMeasureMs: 12 * SAMPLE_INTERVAL_MS }));
+    expect(partial.status).toBe('partial');
+    applyComparativeBadges([good, good2, partial]);
+    // The higher-hashrate but Partial profile must NOT win the hashrate badge…
+    expect(partial.badges.some(b => b.kind === 'highest-hashrate')).toBeFalse();
+    // …a completed result wins it instead.
+    expect(good.badges.some(b => b.kind === 'highest-hashrate')).toBeTrue();
+  });
+});
+
+describe('coverage gate → Partial with an explicit reason (Phase 2K.1)', () => {
+  it('a full-window run below 90 % coverage is Partial and names the coverage', () => {
+    // 10 valid samples but a 120-slot (600 s) window → 8.3 % coverage.
+    const ten = Array.from({ length: 10 }, (_, i) => s({ hashRate: 1270 + i }));
+    const result = computeProfileResult(makeRun({
+      measureSamples: ten, requestedMeasureMs: 120 * SAMPLE_INTERVAL_MS, measureStartTMs: 0, ranFullWindow: true,
+    }));
+    expect(result.status).toBe('partial');
+    expect(result.validSamples).toBe(10);
+    expect(result.expectedSamples).toBe(120);
+    expect(result.statusReason).toContain('8.3%');
+    expect(result.statusReason.toLowerCase()).toContain('coverage');
+    // The badge is never a bare "Partial".
+    const partialBadge = result.badges.find(b => b.kind === 'partial')!;
+    expect(partialBadge.label).toContain('coverage');
+  });
+
+  it('a full-window run at/above 90 % coverage is Completed', () => {
+    const many = Array.from({ length: 115 }, () => s({ hashRate: 1290 }));
+    const result = computeProfileResult(makeRun({
+      measureSamples: many, requestedMeasureMs: 120 * SAMPLE_INTERVAL_MS, measureStartTMs: 0, ranFullWindow: true,
+    }));
+    expect(result.status).toBe('completed'); // 115/120 = 95.8 %
+    expect(result.coveragePct).toBeGreaterThanOrEqual(90);
+  });
+
+  it('never discards valid samples to force an exact ratio (121 vs target 120)', () => {
+    const oneTwentyOne = Array.from({ length: 121 }, () => s({ hashRate: 1290 }));
+    const result = computeProfileResult(makeRun({
+      measureSamples: oneTwentyOne, requestedMeasureMs: 120 * SAMPLE_INTERVAL_MS, measureStartTMs: 0, ranFullWindow: true,
+    }));
+    expect(result.validSamples).toBe(121);       // kept, not trimmed to 120
+    expect(result.expectedSamples).toBe(120);
+    expect(result.coveragePct).toBe(100);         // capped
+    expect(result.status).toBe('completed');
+  });
+
+  it('records visibility evidence and mentions a hidden page in a partial reason', () => {
+    const ten = Array.from({ length: 10 }, () => s({ hashRate: 1280 }));
+    const result = computeProfileResult(makeRun({
+      measureSamples: ten, requestedMeasureMs: 120 * SAMPLE_INTERVAL_MS, ranFullWindow: true,
+      visibility: { currentlyHidden: false, interruptions: 1, totalHiddenMs: 540000, longestHiddenMs: 540000, hiddenDuringWarmup: false, hiddenDuringMeasure: true },
+    }));
+    expect(result.status).toBe('partial');
+    expect(result.hiddenDuringMeasure).toBeTrue();
+    expect(result.visInterruptions).toBe(1);
+    expect(result.statusReason.toLowerCase()).toContain('hidden');
+    expect(result.badges.some(b => b.kind === 'page-hidden')).toBeTrue();
   });
 });
 

@@ -17,6 +17,9 @@ import {
   fieldRequiresRestart,
   profileRestartRequired,
   sessionRestartCount,
+  maxSessionDurationMs,
+  MAX_SESSION_MARGIN_MS,
+  MAX_SESSION_ABSOLUTE_MS,
 } from './stability-profile';
 
 const targetBaseline: TuningConfig = {
@@ -226,9 +229,9 @@ describe('profileToSettings', () => {
   });
 });
 
-describe('buildStarterProfiles', () => {
+describe('buildStarterProfiles (honest)', () => {
   it('always includes Current and derives the rest only from served options', () => {
-    const specs = buildStarterProfiles(targetBaseline, [400, 485, 575], [1100, 1200, 1300], 485, 1200);
+    const { specs } = buildStarterProfiles(targetBaseline, [400, 485, 575], [1100, 1200, 1300], 485, 1200);
     expect(specs[0].key).toBe('current');
     const keys = specs.map(s => s.key);
     expect(keys).toContain('conservative');
@@ -239,16 +242,89 @@ describe('buildStarterProfiles', () => {
     expect(conservative.config.temptarget).toBe(60);
     expect(conservative.config.frequency).toBe(400);
     expect(conservative.config.coreVoltage).toBe(1100);
+    // Description states the actual diff, not a marketing label.
+    expect(conservative.description.toLowerCase()).toContain('lowers frequency 485→400');
   });
 
   it('returns only Current when option lists are unavailable (no invented tuning)', () => {
-    const specs = buildStarterProfiles(targetBaseline, undefined, undefined, undefined, undefined);
+    const { specs, notes } = buildStarterProfiles(targetBaseline, undefined, undefined, undefined, undefined);
     expect(specs.length).toBe(1);
     expect(specs[0].key).toBe('current');
+    expect(notes).toEqual([]);
   });
 
   it('returns nothing without a baseline', () => {
-    expect(buildStarterProfiles(null, [400, 500], [1100, 1200], 485, 1200)).toEqual([]);
+    expect(buildStarterProfiles(null, [400, 500], [1100, 1200], 485, 1200)).toEqual({ specs: [], notes: [] });
+  });
+
+  it('Fixture E — baseline already at the highest frequency yields NO Performance starter, with a reason', () => {
+    // Real-pilot shape: baseline 625/1150, options top out at 625 MHz but voltage
+    // goes to 1250. The old code produced a misleading "Performance 625/1250".
+    const atMaxFreq: TuningConfig = { frequency: 625, coreVoltage: 1150, thermalControlMode: 'target', temptarget: 60, minFanSpeed: 25 };
+    const { specs, notes } = buildStarterProfiles(atMaxFreq, [575, 600, 625], [1150, 1200, 1250], 600, 1200);
+    const perf = specs.find(s => s.key === 'performance');
+    expect(perf).toBeUndefined();
+    // Every offered starter that changes anything must NOT be same-freq/higher-voltage.
+    for (const s of specs.filter(x => x.key !== 'current')) {
+      const sameFreqHigherV = s.config.frequency === atMaxFreq.frequency && s.config.coreVoltage > atMaxFreq.coreVoltage;
+      expect(sameFreqHigherV).toBeFalse();
+    }
+    expect(notes.some(n => /Performance starter omitted/i.test(n))).toBeTrue();
+  });
+
+  it('offers no higher-frequency starter when only one frequency is served', () => {
+    // A single served frequency means every non-current candidate would be
+    // same-frequency; buildTuningPresets yields nothing, so only Current remains.
+    const baseline: TuningConfig = { frequency: 600, coreVoltage: 1150, thermalControlMode: 'target', temptarget: 60, minFanSpeed: 25 };
+    const { specs } = buildStarterProfiles(baseline, [600], [1150, 1200, 1250], 600, 1200);
+    expect(specs.map(s => s.key)).toEqual(['current']);
+    // No offered starter raises voltage at the same frequency.
+    for (const spec of specs.filter(s => s.key !== 'current')) {
+      expect(spec.config.frequency === baseline.frequency && spec.config.coreVoltage > baseline.coreVoltage).toBeFalse();
+    }
+  });
+
+  it('offers Performance only when it genuinely raises frequency (and may bundle the voltage that supports it)', () => {
+    const baseline: TuningConfig = { frequency: 500, coreVoltage: 1150, thermalControlMode: 'target', temptarget: 60, minFanSpeed: 25 };
+    const { specs } = buildStarterProfiles(baseline, [450, 500, 575], [1100, 1150, 1250], 500, 1150);
+    const perf = specs.find(s => s.key === 'performance');
+    expect(perf).toBeDefined();
+    expect(perf!.config.frequency).toBeGreaterThan(baseline.frequency); // real frequency gain
+    expect(perf!.description.toLowerCase()).toContain('raises frequency 500→575');
+  });
+
+  it('collapses a starter that duplicates the current configuration', () => {
+    // Baseline equals the balanced default → Balanced collapses into Current.
+    const baseline: TuningConfig = { frequency: 500, coreVoltage: 1200, thermalControlMode: 'target', temptarget: 60, minFanSpeed: 25 };
+    const { specs } = buildStarterProfiles(baseline, [400, 500, 575], [1100, 1200, 1300], 500, 1200);
+    expect(specs.filter(s => s.key === 'balanced').length).toBe(0);
+    // No duplicate configs among the offered specs.
+    const sigs = specs.map(s => `${s.config.frequency}/${s.config.coreVoltage}`);
+    expect(new Set(sigs).size).toBe(sigs.length);
+  });
+});
+
+describe('maxSessionDurationMs (monotonic runtime cap)', () => {
+  const prof = (warmupSec: number, measureSec: number, cooldownSec = 0): StabilityProfile => ({
+    id: 'p', name: 'P', frequency: 500, coreVoltage: 1200, thermalControlMode: 'target',
+    temptarget: 60, minFanSpeed: 25, warmupSec, measureSec, cooldownSec,
+  });
+
+  it('is planned×2 + margin, with a 10-minute floor', () => {
+    // 180 + 1200 + 0 = 1380 s → 1380000×2 + 600000 = 3,360,000 ms.
+    expect(maxSessionDurationMs([prof(180, 1200)])).toBe(3_360_000);
+    // A tiny plan still gets at least the 10-minute margin floor.
+    expect(maxSessionDurationMs([prof(30, 60)])).toBeGreaterThanOrEqual(MAX_SESSION_MARGIN_MS);
+  });
+
+  it('is clamped to the 6-hour absolute ceiling', () => {
+    expect(maxSessionDurationMs([prof(900, 3600), prof(900, 3600), prof(900, 3600)])).toBe(MAX_SESSION_ABSOLUTE_MS);
+  });
+
+  it('is a pure duration in ms, independent of any wall clock', () => {
+    const before = maxSessionDurationMs([prof(180, 1200)]);
+    const after = maxSessionDurationMs([prof(180, 1200)]);
+    expect(before).toBe(after); // deterministic — no Date.now involved
   });
 });
 

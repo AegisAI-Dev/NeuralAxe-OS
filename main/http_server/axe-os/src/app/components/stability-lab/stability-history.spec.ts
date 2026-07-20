@@ -14,6 +14,8 @@ import {
   exportMarkdown,
   StabilityHistoryStore,
   ObjectStore,
+  normalizeRecord,
+  normalizeResult,
 } from './stability-history';
 import { TuningConfig } from './stability-profile';
 import { computeProfileResult, ProfileRun } from './stability-results';
@@ -143,6 +145,77 @@ describe('export formats', () => {
     expect(md).toContain('## Limitations');
     expect(md).toContain(REPORT_DISCLAIMER);
     expect(md).toContain('board 601');
+  });
+});
+
+describe('Phase 2K.1 evidence + legacy migration', () => {
+  it('CSV export includes the coverage/visibility evidence columns', () => {
+    const header = exportCsv(makeRecord()).split('\n')[0];
+    for (const col of ['statusReason', 'expectedSamples', 'coverage_pct', 'cadence_s', 'medianInterval_s', 'maxGap_s', 'totalGap_s', 'visInterruptions', 'totalHidden_s', 'hiddenDuringMeasure']) {
+      expect(header).toContain(col);
+    }
+  });
+
+  it('Markdown export includes a coverage & visibility evidence section and the wall-clock contract', () => {
+    const md = exportMarkdown(makeRecord(), false);
+    expect(md).toContain('## Coverage & visibility evidence');
+    expect(md).toContain('Max session-duration contract');
+    expect(md).toContain('valid samples · target');
+  });
+
+  it('records the sample cadence, max wall-clock and restore-verified fields', () => {
+    const rec = buildSessionRecord({
+      id: 's', startedAt: 1, finishedAt: 2, device: {}, original,
+      profiles: [storedProfile], thresholds: defaultStopThresholds(), results: [sampleResult()],
+      timeline: initialSnapshot(1).timeline, finalState: 'complete', reason: null, restoreResult: 'ok',
+      sampleCadenceMs: 5000, maxSessionDurationMs: 1_800_000, restoreVerified: true,
+    });
+    expect(rec.sampleCadenceMs).toBe(5000);
+    expect(rec.maxSessionDurationMs).toBe(1_800_000);
+    expect(rec.restoreVerified).toBeTrue();
+  });
+
+  it('normalizeResult fills Phase 2K.1 fields absent from a legacy (Phase 2K) result', () => {
+    const legacy: any = {
+      profileId: 'p', profileName: 'Legacy', status: 'completed', thermalControlMode: 'target',
+      requestedMeasureMs: 600000, measuredMeasureMs: 600000, validSamples: 100, missingSamples: 20,
+      expectedSamples: 120, coveragePct: 83, restartOccurred: false, countersReset: false, abortReason: null,
+      avgHashrate: 1273, medianHashrate: 1273, hashrateVariabilityPct: 1, avgPower: 21, avgEfficiency: 17,
+      peakAsicTemp: 55, avgAsicTemp: 54, peakVrmTemp: 48, avgVrmTemp: 47, avgRequestedFan: 60, avgAppliedFan: 62,
+      fanSaturationMs: 0, avgErrorRate: 0.4, acceptedShareDelta: 10, rejectedShareDelta: 0, rejectRatePct: null,
+      poolLatencyAvg: 40, poolLatencyPeak: 45, badges: [],
+    };
+    const n = normalizeResult(legacy);
+    expect(typeof n.statusReason).toBe('string');
+    expect(n.cadenceMs).toBe(5000);
+    expect(n.medianIntervalMs).toBeNull();
+    expect(n.maxGapMs).toBe(0);
+    expect(n.visInterruptions).toBe(0);
+    expect(n.hiddenDuringMeasure).toBeFalse();
+  });
+
+  it('a legacy stored session loads safely through the store (defensive migration)', () => {
+    const legacyRecord: any = {
+      id: 'legacy', startedAt: 1, finishedAt: 2, device: { targetBoard: '601' }, original,
+      profiles: [storedProfile], thresholds: defaultStopThresholds(),
+      results: [{ profileId: 'p', profileName: 'Old', status: 'completed', validSamples: 100, expectedSamples: 120, coveragePct: 83, badges: [], abortReason: null }],
+      timeline: [], finalState: 'complete', reason: null, restoreResult: 'ok',
+      // no sampleCadenceMs / restoreVerified — legacy record.
+    };
+    const backing: ObjectStore & { data: any } = (() => {
+      const data: any = { [HISTORY_KEY]: [legacyRecord] };
+      return { data, getObject: (k: string) => data[k] ?? null, setObject: (k: string, v: any) => { data[k] = v; } };
+    })();
+    const store = new StabilityHistoryStore(backing);
+    const list = store.list();
+    expect(list.length).toBe(1);
+    expect(list[0].restoreVerified).toBeTrue();      // derived from restoreResult 'ok'
+    expect(list[0].sampleCadenceMs).toBe(5000);
+    expect(typeof list[0].results[0].statusReason).toBe('string');
+    expect(list[0].results[0].cadenceMs).toBe(5000);
+    // Exports of a migrated legacy record do not throw.
+    expect(() => exportMarkdown(list[0], false)).not.toThrow();
+    expect(() => exportCsv(list[0])).not.toThrow();
   });
 });
 

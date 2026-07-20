@@ -222,6 +222,42 @@
 .nx-lab-acks { display: flex; flex-direction: column; gap: 0.55rem; margin-top: 1rem; }
 .nx-lab-acks label { display: flex; align-items: flex-start; gap: 0.55rem; font-size: 0.8rem; color: var(--nx-text); line-height: 1.4; cursor: pointer; }
 
+.nx-lab-statement + .nx-lab-statement { border-top: 0; padding-top: 0; margin-top: -0.3rem; }
+
+/* ---------- starter omission notes ---------- */
+
+.nx-lab-starter-notes { list-style: none; margin: 0.7rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.nx-lab-starter-notes li { font-size: 0.74rem; line-height: 1.45; color: var(--nx-text-dim); display: flex; gap: 0.45rem; align-items: flex-start; }
+.nx-lab-starter-notes i { color: var(--nx-cyan); margin-top: 0.12rem; }
+
+/* ---------- active-session notices (Stage 7) ---------- */
+
+/* Fixed cyan — accent-independent, always the "keep the page open" reminder. */
+.nx-lab-keepopen {
+  display: flex; align-items: center; gap: 0.5rem; margin: 0.8rem 0 0;
+  border: 1px solid rgba(53, 195, 230, 0.4); border-radius: 8px;
+  background: var(--nx-cyan-dim); color: var(--nx-cyan);
+  padding: 0.55rem 0.75rem; font-size: 0.78rem;
+}
+.nx-lab-hidden-banner,
+.nx-lab-vis-summary {
+  display: flex; align-items: center; gap: 0.5rem; margin: 0.6rem 0 0;
+  border: 1px solid rgba(230, 178, 60, 0.45); border-radius: 8px;
+  background: rgba(230, 178, 60, 0.12); color: var(--nx-amber);
+  padding: 0.55rem 0.75rem; font-size: 0.78rem;
+}
+
+/* ---------- live coverage panel ---------- */
+
+.nx-lab-coverage {
+  margin-top: 0.9rem; border: 1px solid var(--nx-line); border-radius: 10px;
+  background: rgba(0, 0, 0, 0.22); padding: 0.7rem 0.85rem;
+}
+.nx-lab-coverage-head { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+.nx-lab-coverage-head b { font-size: 0.86rem; color: var(--nx-text); }
+.nx-lab-warmup-note { font-size: 0.72rem; color: var(--nx-amber); }
+.nx-lab-coverage-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 700px) {
@@ -229,4 +265,5 @@
   .nx-lab-countdown { text-align: left; }
   .nx-lab-tl { grid-template-columns: 1fr; gap: 0.1rem; }
   .nx-lab-charts { grid-template-columns: 1fr; }
+  .nx-lab-coverage-grid { grid-template-columns: repeat(2, 1fr); }
 }
