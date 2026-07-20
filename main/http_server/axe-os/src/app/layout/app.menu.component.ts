@@ -36,6 +36,7 @@ export class AppMenuComponent implements OnInit {
         label: 'Mining',
         items: [
           { label: 'Scoreboard', icon: 'pi pi-fw pi-trophy', routerLink: ['scoreboard'] },
+          { label: 'Block Intelligence', icon: 'pi pi-fw pi-box', routerLink: ['bitcoin'] },
           { label: 'Fleet', icon: 'pi pi-fw pi-sitemap', routerLink: ['swarm'] },
         ],
       },

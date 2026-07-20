@@ -1,0 +1,274 @@
+<div class="nx-bi">
+
+  <!-- ===================== Header / source + freshness ===================== -->
+  <header class="nx-bi-head">
+    <div class="nx-bi-title">
+      <i class="pi pi-box" aria-hidden="true"></i>
+      <div>
+        <h1>Bitcoin Block Intelligence</h1>
+        <p class="nx-bi-sub">Recent public network blocks, pool attribution and configured-pool matching — network context, not local mining proof.</p>
+      </div>
+    </div>
+    <div class="nx-bi-head-right">
+      <span class="nx-pill" [ngClass]="pillClass(freshnessSeverity)" role="status" [attr.aria-label]="'Provider status: ' + freshnessText">
+        <span class="nx-dot" aria-hidden="true"></span>{{ freshnessText }}
+      </span>
+      <span class="nx-bi-provider" *ngIf="provider">via {{ provider }}</span>
+      <button type="button" class="nx-btn" (click)="refresh()" [disabled]="status === 'loading'"
+              aria-label="Refresh block data now">
+        <i class="pi" [ngClass]="status === 'loading' ? 'pi-spin pi-spinner' : 'pi-refresh'" aria-hidden="true"></i>
+        <span>Refresh</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ===================== Privacy panel (persistent) ===================== -->
+  <section class="nx-bi-privacy" aria-label="Privacy">
+    <i class="pi pi-shield" aria-hidden="true"></i>
+    <p>
+      NeuralAxe requests <b>public Bitcoin block data only</b>. Pool matching occurs locally.
+      Wallet, worker and device telemetry are not sent to the block-data provider.
+    </p>
+  </section>
+
+  <!-- ===================== Replaced-tip notice (Stage 15) ===================== -->
+  <section class="nx-bi-banner nx-warn" *ngIf="tipReplaced" role="status">
+    <i class="pi pi-sync" aria-hidden="true"></i>
+    <span>Recent block data changed after a provider refresh — the tip was replaced and deduplicated. Not necessarily a chain reorganization.</span>
+  </section>
+
+  <!-- ===================== In-app events (Stage 13) ===================== -->
+  <section class="nx-bi-events" *ngIf="events.length" aria-label="Recent block events">
+    <div class="nx-bi-event" *ngFor="let ev of events; trackBy: trackByEvent" [ngClass]="'sev-' + ev.severity">
+      <i class="pi pi-bell" aria-hidden="true"></i>
+      <span>{{ ev.message }}</span>
+    </div>
+  </section>
+
+  <!-- ===================== Loading skeleton ===================== -->
+  <section class="nx-bi-skeleton" *ngIf="status === 'loading' && !rows.length" aria-live="polite" aria-busy="true">
+    <div class="nx-skel-row" *ngFor="let s of [1,2,3,4,5]"></div>
+    <span class="nx-dim">Loading recent block data…</span>
+  </section>
+
+  <!-- ===================== Provider unavailable ===================== -->
+  <section class="nx-bi-banner nx-warn" *ngIf="status === 'unavailable' && !rows.length" role="status">
+    <i class="pi pi-exclamation-circle" aria-hidden="true"></i>
+    <div>
+      <b>Block-data provider unavailable</b>
+      <p class="nx-dim">No cached data is available yet. This does not affect mining — it only limits network block context.
+        <ng-container *ngIf="nextRetryText">Retrying {{ nextRetryText }}.</ng-container>
+      </p>
+    </div>
+  </section>
+
+  <ng-container *ngIf="summary.hasData">
+
+    <!-- ===================== Top summary + metrics + session ===================== -->
+    <section class="nx-bi-summary" aria-label="Network summary">
+      <div class="nx-bi-stat">
+        <span class="nx-bi-stat-k">Latest block</span>
+        <span class="nx-bi-stat-v">{{ summary.latestHeight }}</span>
+        <span class="nx-bi-stat-s">{{ summary.latestAgeText }} old</span>
+      </div>
+      <div class="nx-bi-stat">
+        <span class="nx-bi-stat-k">Avg interval <small>(recent window)</small></span>
+        <span class="nx-bi-stat-v">{{ summary.avgIntervalText }}</span>
+        <span class="nx-bi-stat-s">median {{ summary.medianIntervalText }}</span>
+      </div>
+      <div class="nx-bi-stat">
+        <span class="nx-bi-stat-k">Interval range</span>
+        <span class="nx-bi-stat-v nx-bi-stat-v-sm">{{ summary.shortestText }} – {{ summary.longestText }}</span>
+        <span class="nx-bi-stat-s">{{ summary.perHourText }} observed</span>
+      </div>
+      <div class="nx-bi-stat">
+        <span class="nx-bi-stat-k">Active-pool blocks</span>
+        <span class="nx-bi-stat-v" [class.nx-accent-ok]="summary.activeCount > 0">{{ summary.activeCount }}</span>
+        <span class="nx-bi-stat-s">of {{ summary.blockCount }} in window</span>
+      </div>
+      <div class="nx-bi-stat">
+        <span class="nx-bi-stat-k">Fallback-pool blocks</span>
+        <span class="nx-bi-stat-v" [class.nx-accent-info]="summary.fallbackCount > 0">{{ summary.fallbackCount }}</span>
+        <span class="nx-bi-stat-s">{{ summary.unknownCount }} unknown</span>
+      </div>
+      <div class="nx-bi-stat">
+        <span class="nx-bi-stat-k">Network blocks this session</span>
+        <span class="nx-bi-stat-v">{{ sessionBlocksObserved }}</span>
+        <span class="nx-bi-stat-s">observed over {{ sessionElapsedText }}</span>
+      </div>
+    </section>
+    <p class="nx-bi-note nx-dim">
+      These are recent-window observations from the currently loaded blocks — not a prediction of future cadence.
+      “Network blocks this session” counts blocks the whole network produced while this page was open; it does not imply this device participated in any of them.
+    </p>
+
+    <!-- ===================== Recent-block timeline ===================== -->
+    <section class="nx-bi-block" aria-label="Recent block timeline">
+      <h2 class="nx-bi-h2">Recent blocks</h2>
+      <div class="nx-tl" role="list">
+        <div class="nx-tl-card" *ngFor="let row of rows; trackBy: trackByHash"
+             role="listitem button" tabindex="0"
+             [class.is-tip]="row.isTip" [class.is-new]="row.highlightNew"
+             [class.match-active]="row.matchKind === 'active' || row.matchKind === 'both'"
+             [class.match-fallback]="row.matchKind === 'fallback'"
+             (click)="openDetail(row)" (keydown)="onRowKeydown($event, row)"
+             [attr.aria-label]="'Block ' + row.height + ', ' + row.ageText + ' old, ' + row.poolLabel + ', ' + row.confidenceText">
+          <div class="nx-tl-top">
+            <span class="nx-tl-h">#{{ row.height }}</span>
+            <span class="nx-tl-age">{{ row.ageText }}</span>
+          </div>
+          <div class="nx-tl-pool" [title]="row.poolLabel">{{ row.poolLabel }}</div>
+          <div class="nx-tl-badges">
+            <span class="nx-pill nx-pill-sm" [ngClass]="pillClass(row.confidenceSeverity)">{{ row.confidenceText }}</span>
+            <span class="nx-pill nx-pill-sm" *ngIf="row.matchNotable" [ngClass]="matchPillClass(row.matchKind)">{{ row.matchLabel }}</span>
+          </div>
+          <div class="nx-tl-foot nx-dim">
+            <span *ngIf="row.txText !== '—'">{{ row.txText }} tx</span>
+            <span *ngIf="row.feesText !== '—'">{{ row.feesText }} fees</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== Block table ===================== -->
+    <section class="nx-bi-block" aria-label="Block table">
+      <h2 class="nx-bi-h2">Block table</h2>
+      <div class="nx-table-scroll">
+        <table class="nx-table">
+          <thead>
+            <tr>
+              <th scope="col">Height</th>
+              <th scope="col">Age</th>
+              <th scope="col">Pool</th>
+              <th scope="col">Confidence</th>
+              <th scope="col">Configured pool</th>
+              <th scope="col" class="nx-num">Fees</th>
+              <th scope="col" class="nx-num">Tx</th>
+              <th scope="col" class="nx-num">Size</th>
+              <th scope="col"><span class="nx-sr">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let row of rows; trackBy: trackByHash" [class.is-tip]="row.isTip" [class.is-new]="row.highlightNew">
+              <td><span class="nx-mono">{{ row.height }}</span> <span class="nx-tip-tag" *ngIf="row.isTip">tip</span></td>
+              <td [title]="row.utcText">{{ row.ageText }}</td>
+              <td>
+                <span class="nx-cell-pool">{{ row.poolLabel }}</span>
+                <small class="nx-dim" *ngIf="row.providerLabel && row.providerLabel !== row.poolLabel"> · {{ row.providerLabel }}</small>
+              </td>
+              <td><span class="nx-pill nx-pill-sm" [ngClass]="pillClass(row.confidenceSeverity)">{{ row.confidenceText }}</span></td>
+              <td>
+                <span class="nx-pill nx-pill-sm" *ngIf="row.matchNotable" [ngClass]="matchPillClass(row.matchKind)">{{ row.matchLabel }}</span>
+                <span class="nx-dim" *ngIf="!row.matchNotable">{{ row.matchLabel }}</span>
+              </td>
+              <td class="nx-num">{{ row.feesText }}</td>
+              <td class="nx-num">{{ row.txText }}</td>
+              <td class="nx-num">{{ row.sizeText }}</td>
+              <td><button type="button" class="nx-link-btn" (click)="openDetail(row)" [attr.aria-label]="'Inspect block ' + row.height">Details</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </ng-container>
+
+  <!-- ===================== Source status ===================== -->
+  <section class="nx-bi-source" aria-label="Source status">
+    <h2 class="nx-bi-h2">Source</h2>
+    <div class="nx-kv">
+      <div><span class="nx-k">Provider</span><span class="nx-v">{{ provider || primaryProvider.label }}</span></div>
+      <div><span class="nx-k">Status</span><span class="nx-v">{{ freshnessText }}</span></div>
+      <div><span class="nx-k">Last successful refresh</span><span class="nx-v">{{ lastSuccessText }}</span></div>
+      <div><span class="nx-k">Data age</span><span class="nx-v">{{ dataAgeText }}</span></div>
+      <div *ngIf="nextRetryText"><span class="nx-k">Next retry</span><span class="nx-v">{{ nextRetryText }}</span></div>
+      <div *ngIf="lastError"><span class="nx-k">Last error</span><span class="nx-v nx-warn-text">{{ lastError.kind }} — {{ lastError.message }}</span></div>
+      <div><span class="nx-k">Local-node provider</span><span class="nx-v nx-dim">reserved for future use</span></div>
+    </div>
+  </section>
+
+  <!-- ===================== Attribution / confidence explanation ===================== -->
+  <section class="nx-bi-explain" aria-label="Attribution model">
+    <h2 class="nx-bi-h2">How attribution works</h2>
+    <ul class="nx-legend">
+      <li><span class="nx-pill nx-pill-sm nx-pill-ok">Provider-reported</span> the block-data provider attributes this block to a pool — public evidence, not proof.</li>
+      <li><span class="nx-pill nx-pill-sm nx-pill-ok">Strong coinbase match</span> the coinbase tag clearly names a known pool.</li>
+      <li><span class="nx-pill nx-pill-sm nx-pill-info">Probable</span> a likely pool from alias/domain evidence, or downgraded conflicting provider vs coinbase evidence.</li>
+      <li><span class="nx-pill nx-pill-sm nx-pill-neutral">Unknown pool</span> a coinbase is present but no pool could be identified.</li>
+      <li><span class="nx-pill nx-pill-sm nx-pill-neutral">Unattributed</span> no coinbase/evidence was available from the provider.</li>
+    </ul>
+    <p class="nx-bi-note nx-dim">
+      Public providers report evidence, not proof, so the strongest state shown here is “Provider-reported”. “Confirmed” is reserved for a
+      future authoritative source (an explicit pool, Stratum or node provenance contract) and is never shown for public-provider data.
+    </p>
+    <p class="nx-bi-disclaimer">
+      <i class="pi pi-info-circle" aria-hidden="true"></i>
+      Pool attribution is based on public block and coinbase evidence. It does not prove that this individual NeuralAxe device found the block.
+    </p>
+  </section>
+
+  <!-- ===================== Block detail drawer ===================== -->
+  <p-sidebar [(visible)]="drawerOpen" position="right" styleClass="nx-bi-drawer" [dismissible]="true" [showCloseIcon]="true"
+             (onHide)="closeDetail()" [ariaLabel]="'Block detail'">
+    <ng-template pTemplate="header">
+      <span class="nx-drawer-title">Block detail</span>
+    </ng-template>
+
+    <div class="nx-drawer-body" *ngIf="selectedRow as row">
+      <div class="nx-drawer-hero">
+        <span class="nx-drawer-height">#{{ row.height }}</span>
+        <span class="nx-tip-tag" *ngIf="row.isTip">tip</span>
+      </div>
+
+      <div class="nx-drawer-hash">
+        <code class="nx-mono nx-break">{{ row.hash }}</code>
+        <button type="button" class="nx-copy-btn" (click)="copyHash(row.hash)" aria-label="Copy block hash">
+          <i class="pi pi-copy" aria-hidden="true"></i>
+        </button>
+      </div>
+
+      <div *ngIf="detailLoading" class="nx-dim nx-drawer-loading" aria-busy="true">
+        <i class="pi pi-spin pi-spinner" aria-hidden="true"></i> Loading block detail…
+      </div>
+
+      <ng-container *ngIf="selectedDetail as detail">
+        <div class="nx-drawer-grid">
+          <div><span class="nx-k">Height</span><span class="nx-v">{{ detail.height }}</span></div>
+          <div><span class="nx-k">Time (UTC)</span><span class="nx-v">{{ detailUtc(detail) }}</span></div>
+          <div><span class="nx-k">Age</span><span class="nx-v">{{ detailAge(detail) }}</span></div>
+          <div><span class="nx-k">Transactions</span><span class="nx-v">{{ detailTx(detail) }}</span></div>
+          <div><span class="nx-k">Size</span><span class="nx-v">{{ detailSize(detail) }}</span></div>
+          <div><span class="nx-k">Weight</span><span class="nx-v">{{ detailWeight(detail) }}</span></div>
+          <div><span class="nx-k">Subsidy</span><span class="nx-v">{{ detailSubsidy(detail) }}</span></div>
+          <div><span class="nx-k">Total fees</span><span class="nx-v">{{ detailFees(detail) }} <small class="nx-dim">({{ detailFeesSats(detail) }})</small></span></div>
+          <div><span class="nx-k">Effective reward</span><span class="nx-v">{{ detailReward(detail) }}</span></div>
+        </div>
+
+        <div class="nx-drawer-attr">
+          <h3>Pool attribution</h3>
+          <div class="nx-attr-line">
+            <span class="nx-cell-pool">{{ detail.attribution.poolName || (detail.attribution.confidence === 'unattributed' ? 'Unattributed' : 'Unknown pool') }}</span>
+            <span class="nx-pill nx-pill-sm" [ngClass]="pillClass(row.confidenceSeverity)">{{ detailConfidenceText(detail) }}</span>
+          </div>
+          <div class="nx-attr-kv">
+            <div *ngIf="detail.attribution.providerLabel"><span class="nx-k">Provider label</span><span class="nx-v">{{ detail.attribution.providerLabel }}</span></div>
+            <div><span class="nx-k">Method</span><span class="nx-v">{{ detail.attribution.method }}</span></div>
+            <div *ngIf="detail.attribution.evidence.coinbaseTagAscii"><span class="nx-k">Coinbase tag</span><span class="nx-v nx-mono nx-break">{{ detail.attribution.evidence.coinbaseTagAscii }}</span></div>
+            <div><span class="nx-k">Source</span><span class="nx-v">{{ detail.attribution.source }}</span></div>
+            <div><span class="nx-k">Configured pool</span><span class="nx-v">{{ detailMatchLabel(detail) }}</span></div>
+          </div>
+          <p class="nx-attr-reason nx-dim">{{ detail.attribution.evidence.reason }}</p>
+        </div>
+
+        <p class="nx-bi-disclaimer nx-drawer-disclaimer">
+          <i class="pi pi-info-circle" aria-hidden="true"></i>
+          Attribution is public-evidence heuristic. It does not prove this NeuralAxe device found the block.
+        </p>
+      </ng-container>
+
+      <div *ngIf="!detailLoading && !selectedDetail" class="nx-dim">
+        Detail is unavailable for this block right now.
+      </div>
+    </div>
+  </p-sidebar>
+
+</div>

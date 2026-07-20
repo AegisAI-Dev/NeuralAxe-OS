@@ -502,6 +502,9 @@
 
 .nx-pill-ok { color: var(--nx-green); border-color: rgba(47, 230, 160, 0.4); background: var(--nx-green-dim); }
 .nx-pill-warn { color: var(--nx-amber); border-color: rgba(230, 178, 60, 0.4); background: rgba(230, 178, 60, 0.12); }
+.nx-pill-info { color: var(--nx-cyan); border-color: rgba(53, 195, 230, 0.4); background: var(--nx-cyan-dim); }
+.nx-pill-neutral { color: var(--nx-text-dim); border-color: var(--nx-line-bright); background: rgba(94, 127, 147, 0.1); }
+.nx-pill-sm { font-size: 0.56rem; padding: 0.08rem 0.45rem; letter-spacing: 0.06em; }
 
 /* ---------- block signal ---------- */
 

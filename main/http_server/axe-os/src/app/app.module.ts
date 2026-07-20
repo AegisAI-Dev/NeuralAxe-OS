@@ -19,6 +19,7 @@ import { NetworkEditComponent } from './components/network-edit/network.edit.com
 import { HomeComponent } from './components/home/home.component';
 import { CommandDeckComponent } from './components/command-deck/command-deck.component';
 import { StabilityLabComponent } from './components/stability-lab/stability-lab.component';
+import { BlockIntelligenceComponent } from './components/block-intelligence/block-intelligence.component';
 import { ModalComponent } from './components/modal/modal.component';
 import { TooltipIconComponent } from './components/tooltip-icon/tooltip-icon.component';
 import { TooltipTextIconComponent } from './components/tooltip-text-icon/tooltip-text-icon.component';
@@ -55,6 +56,7 @@ const components = [
   HomeComponent,
   CommandDeckComponent,
   StabilityLabComponent,
+  BlockIntelligenceComponent,
   ModalComponent,
   TooltipIconComponent,
   TooltipTextIconComponent,

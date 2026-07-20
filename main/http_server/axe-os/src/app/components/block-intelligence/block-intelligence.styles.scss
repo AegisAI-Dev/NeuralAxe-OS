@@ -1,0 +1,241 @@
+/**
+ * Bitcoin Block Intelligence workspace styling (Phase 2L).
+ *
+ * Global partial (imported once from styles.scss), matching the established
+ * NeuralAxe pattern for large feature styles (see stability-lab / fleet). Every
+ * rule is scoped under `.nx-bi` so the workspace never collides with the shared
+ * design-system classes. Semantic colors are FIXED (--nx-sem-* / --nx-green /
+ * --nx-cyan / --nx-amber), never derived from the user accent, so a red accent
+ * never turns healthy attribution red. Wide content scrolls within its own
+ * container — the page body never scrolls horizontally.
+ */
+
+.nx-bi {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  max-width: 100%;
+  color: var(--nx-text);
+
+  /* ---------- header ---------- */
+  .nx-bi-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+  .nx-bi-title {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    min-width: 0;
+
+    > i { font-size: 1.5rem; color: var(--nx-green); margin-top: 0.15rem; }
+    h1 { font-size: 1.25rem; margin: 0; color: var(--nx-text); font-weight: 700; }
+  }
+  .nx-bi-sub { margin: 0.2rem 0 0; color: var(--nx-text-dim); font-size: 0.8rem; max-width: 60ch; }
+  .nx-bi-head-right { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  .nx-bi-provider { color: var(--nx-text-dim); font-size: 0.72rem; }
+
+  .nx-btn {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    background: var(--nx-panel-2); color: var(--nx-text);
+    border: 1px solid var(--nx-line-bright); border-radius: 8px;
+    padding: 0.4rem 0.8rem; font-size: 0.78rem; cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+
+    &:hover:not(:disabled) { border-color: var(--nx-cyan); }
+    &:focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 2px; }
+    &:disabled { opacity: 0.5; cursor: default; }
+  }
+
+  .nx-pill .nx-dot {
+    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor; margin-right: 0.4rem; vertical-align: middle;
+  }
+
+  /* ---------- privacy panel ---------- */
+  .nx-bi-privacy {
+    display: flex; gap: 0.6rem; align-items: center;
+    background: var(--nx-panel); border: 1px solid var(--nx-line);
+    border-left: 3px solid var(--nx-green); border-radius: 8px; padding: 0.6rem 0.8rem;
+
+    i { color: var(--nx-green); font-size: 1rem; }
+    p { margin: 0; font-size: 0.78rem; color: var(--nx-text); }
+    b { color: var(--nx-green); }
+  }
+
+  /* ---------- banners / events ---------- */
+  .nx-bi-banner {
+    display: flex; gap: 0.6rem; align-items: center;
+    border-radius: 8px; padding: 0.6rem 0.8rem; font-size: 0.8rem;
+    background: var(--nx-panel); border: 1px solid var(--nx-line);
+
+    &.nx-warn { border-left: 3px solid var(--nx-amber); i { color: var(--nx-amber); } }
+    p { margin: 0.15rem 0 0; }
+  }
+  .nx-bi-events { display: flex; flex-direction: column; gap: 0.35rem; }
+  .nx-bi-event {
+    display: flex; gap: 0.5rem; align-items: center;
+    background: var(--nx-panel); border: 1px solid var(--nx-line); border-radius: 6px;
+    padding: 0.4rem 0.7rem; font-size: 0.76rem;
+
+    i { font-size: 0.8rem; }
+    &.sev-ok { border-left: 3px solid var(--nx-green); i { color: var(--nx-green); } }
+    &.sev-info { border-left: 3px solid var(--nx-cyan); i { color: var(--nx-cyan); } }
+    &.sev-neutral { border-left: 3px solid var(--nx-text-dim); i { color: var(--nx-text-dim); } }
+  }
+
+  /* ---------- skeleton ---------- */
+  .nx-bi-skeleton { display: flex; flex-direction: column; gap: 0.5rem; }
+  .nx-skel-row {
+    height: 2.4rem; border-radius: 6px;
+    background: linear-gradient(90deg, var(--nx-panel) 0%, var(--nx-panel-2) 50%, var(--nx-panel) 100%);
+    background-size: 200% 100%; animation: nx-bi-shimmer 1.4s infinite linear;
+  }
+
+  /* ---------- summary ---------- */
+  .nx-bi-summary {
+    display: grid; gap: 0.75rem;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  }
+  .nx-bi-stat {
+    background: linear-gradient(180deg, var(--nx-panel-2) 0%, var(--nx-panel) 100%);
+    border: 1px solid var(--nx-line); border-radius: 10px; padding: 0.7rem 0.85rem;
+    display: flex; flex-direction: column; gap: 0.15rem;
+  }
+  .nx-bi-stat-k { color: var(--nx-text-dim); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em; small { text-transform: none; letter-spacing: 0; } }
+  .nx-bi-stat-v { color: var(--nx-text); font-size: 1.35rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .nx-bi-stat-v-sm { font-size: 0.95rem; }
+  .nx-bi-stat-s { color: var(--nx-text-dim); font-size: 0.68rem; }
+  .nx-accent-ok { color: var(--nx-green); }
+  .nx-accent-info { color: var(--nx-cyan); }
+  .nx-bi-note { font-size: 0.72rem; margin: 0; max-width: 90ch; }
+
+  /* ---------- sections ---------- */
+  .nx-bi-h2 { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--nx-green); margin: 0 0 0.6rem; font-weight: 700; }
+  .nx-bi-block, .nx-bi-source, .nx-bi-explain { background: var(--nx-panel); border: 1px solid var(--nx-line); border-radius: 12px; padding: 0.9rem; }
+
+  /* ---------- timeline ---------- */
+  .nx-tl {
+    display: flex; gap: 0.6rem; overflow-x: auto; overflow-y: hidden;
+    padding-bottom: 0.4rem; scroll-snap-type: x proximity;
+  }
+  .nx-tl-card {
+    scroll-snap-align: start; flex: 0 0 auto; width: 150px;
+    background: var(--nx-panel-2); border: 1px solid var(--nx-line-bright); border-radius: 10px;
+    padding: 0.6rem; display: flex; flex-direction: column; gap: 0.35rem; cursor: pointer;
+    transition: border-color 0.15s, transform 0.15s;
+
+    &:hover { border-color: var(--nx-cyan); }
+    &:focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 2px; }
+    &.is-tip { border-color: var(--nx-green); box-shadow: 0 0 0 1px var(--nx-green-dim); }
+    &.match-active { border-left: 3px solid var(--nx-green); }
+    &.match-fallback { border-left: 3px solid var(--nx-cyan); }
+    &.is-new { animation: nx-bi-newpulse 1.6s ease-out 2; }
+  }
+  .nx-tl-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .nx-tl-h { font-weight: 700; color: var(--nx-text); font-size: 0.9rem; font-variant-numeric: tabular-nums; }
+  .nx-tl-age { color: var(--nx-text-dim); font-size: 0.68rem; }
+  .nx-tl-pool { color: var(--nx-text); font-size: 0.76rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nx-tl-badges { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+  .nx-tl-foot { display: flex; gap: 0.5rem; font-size: 0.64rem; }
+
+  /* ---------- table ---------- */
+  .nx-table-scroll { overflow-x: auto; }
+  .nx-table {
+    width: 100%; border-collapse: collapse; font-size: 0.78rem; min-width: 640px;
+
+    th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--nx-line); white-space: nowrap; }
+    th { color: var(--nx-text-dim); font-weight: 600; font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.05em; }
+    tbody tr:hover { background: rgba(53, 195, 230, 0.05); }
+    tbody tr.is-tip td:first-child { box-shadow: inset 3px 0 0 var(--nx-green); }
+    tbody tr.is-new { background: rgba(47, 230, 160, 0.06); }
+    .nx-num { text-align: right; font-variant-numeric: tabular-nums; }
+  }
+  .nx-cell-pool { color: var(--nx-text); }
+  .nx-tip-tag {
+    display: inline-block; font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--nx-green); border: 1px solid rgba(47, 230, 160, 0.4); border-radius: 4px; padding: 0 0.3rem; margin-left: 0.3rem;
+  }
+  .nx-link-btn {
+    background: none; border: 0; color: var(--nx-cyan); cursor: pointer; font-size: 0.76rem; padding: 0;
+    &:hover { text-decoration: underline; }
+    &:focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 2px; }
+  }
+
+  /* ---------- source + explain ---------- */
+  .nx-kv { display: grid; gap: 0.4rem 1.2rem; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+  .nx-kv > div { display: flex; justify-content: space-between; gap: 0.6rem; border-bottom: 1px dashed var(--nx-line); padding-bottom: 0.25rem; }
+  .nx-k { color: var(--nx-text-dim); font-size: 0.72rem; }
+  .nx-v { color: var(--nx-text); font-size: 0.76rem; text-align: right; }
+  .nx-warn-text { color: var(--nx-amber); }
+  .nx-dim { color: var(--nx-text-dim); }
+  .nx-mono { font-family: 'Courier New', monospace; font-variant-numeric: tabular-nums; }
+
+  .nx-legend { list-style: none; margin: 0 0 0.6rem; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.76rem; color: var(--nx-text-dim); }
+  .nx-legend li { display: flex; gap: 0.5rem; align-items: baseline; }
+  .nx-bi-disclaimer {
+    display: flex; gap: 0.5rem; align-items: flex-start; margin: 0;
+    font-size: 0.74rem; color: var(--nx-text); background: var(--nx-cyan-dim);
+    border: 1px solid rgba(53, 195, 230, 0.3); border-radius: 8px; padding: 0.55rem 0.7rem;
+    i { color: var(--nx-cyan); margin-top: 0.1rem; }
+  }
+}
+
+/* ---------- detail drawer (p-sidebar content; styleClass nx-bi-drawer) ---------- */
+.nx-bi-drawer {
+  .nx-drawer-title { font-weight: 700; color: var(--nx-text); }
+  .nx-drawer-body { display: flex; flex-direction: column; gap: 1rem; }
+  .nx-drawer-hero { display: flex; align-items: center; gap: 0.5rem; }
+  .nx-drawer-height { font-size: 1.6rem; font-weight: 700; color: var(--nx-green); font-variant-numeric: tabular-nums; }
+  .nx-tip-tag {
+    display: inline-block; font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--nx-green); border: 1px solid rgba(47, 230, 160, 0.4); border-radius: 4px; padding: 0 0.3rem;
+  }
+  .nx-drawer-hash { display: flex; gap: 0.5rem; align-items: center; background: var(--nx-panel-2); border: 1px solid var(--nx-line); border-radius: 8px; padding: 0.5rem 0.6rem; }
+  .nx-copy-btn { background: none; border: 0; color: var(--nx-cyan); cursor: pointer; &:focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 2px; } }
+  .nx-drawer-grid, .nx-attr-kv { display: grid; gap: 0.4rem 1.2rem; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); }
+  .nx-drawer-grid > div, .nx-attr-kv > div { display: flex; justify-content: space-between; gap: 0.6rem; border-bottom: 1px dashed var(--nx-line); padding-bottom: 0.25rem; }
+  .nx-k { color: var(--nx-text-dim); font-size: 0.72rem; }
+  .nx-v { color: var(--nx-text); font-size: 0.76rem; text-align: right; }
+  .nx-drawer-attr h3 { font-size: 0.78rem; color: var(--nx-green); margin: 0 0 0.5rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .nx-attr-line { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.6rem; }
+  .nx-attr-reason { font-size: 0.74rem; margin: 0.5rem 0 0; }
+  .nx-drawer-loading { display: flex; gap: 0.4rem; align-items: center; }
+  .nx-cell-pool { color: var(--nx-text); }
+  .nx-mono { font-family: 'Courier New', monospace; }
+  .nx-break { word-break: break-all; }
+  .nx-dim { color: var(--nx-text-dim); }
+  .nx-bi-disclaimer {
+    display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.4rem 0 0;
+    font-size: 0.74rem; color: var(--nx-text); background: var(--nx-cyan-dim);
+    border: 1px solid rgba(53, 195, 230, 0.3); border-radius: 8px; padding: 0.55rem 0.7rem;
+    i { color: var(--nx-cyan); margin-top: 0.1rem; }
+  }
+}
+
+/* ---------- shared utility (workspace-scoped) ---------- */
+.nx-bi .nx-break { word-break: break-all; }
+.nx-bi .nx-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+@keyframes nx-bi-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes nx-bi-newpulse {
+  0% { box-shadow: 0 0 0 0 rgba(47, 230, 160, 0.5); }
+  100% { box-shadow: 0 0 0 8px rgba(47, 230, 160, 0); }
+}
+
+/* ---------- responsive ---------- */
+@media (max-width: 600px) {
+  .nx-bi .nx-bi-head { flex-direction: column; }
+  .nx-bi .nx-bi-stat-v { font-size: 1.15rem; }
+  .nx-bi .nx-tl-card { width: 132px; }
+}
+
+/* ---------- reduced motion ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .nx-bi .nx-skel-row,
+  .nx-bi .nx-tl-card.is-new { animation: none; }
+  .nx-bi .nx-tl-card { transition: none; }
+}

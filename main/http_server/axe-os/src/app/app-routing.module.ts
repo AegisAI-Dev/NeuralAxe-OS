@@ -17,6 +17,7 @@ import { ApModeGuard } from './guards/ap-mode.guard';
 import { StabilityLabGuard } from './guards/stability-lab.guard';
 import { CommandDeckComponent } from './components/command-deck/command-deck.component';
 import { StabilityLabComponent } from './components/stability-lab/stability-lab.component';
+import { BlockIntelligenceComponent } from './components/block-intelligence/block-intelligence.component';
 
 const TITLE_PREFIX = 'NeuralAxe OS';
 
@@ -87,6 +88,11 @@ const routes: Routes = [
         path: 'scoreboard',
         component: ScoreboardComponent,
         title: `${TITLE_PREFIX} Scoreboard`,
+      },
+      {
+        path: 'bitcoin',
+        component: BlockIntelligenceComponent,
+        title: `${TITLE_PREFIX} Bitcoin Block Intelligence`,
       },
       {
         path: 'design',

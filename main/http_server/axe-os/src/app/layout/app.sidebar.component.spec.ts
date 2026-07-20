@@ -93,12 +93,12 @@ describe('AppSidebarComponent (Neural Command Rail, Phase 2J)', () => {
   });
 
   describe('command rail structure', () => {
-    it('renders the six product sections and all thirteen route links', () => {
+    it('renders the six product sections and all fourteen route links', () => {
       const roots = fixture.nativeElement.querySelectorAll('.layout-menuitem-root-text');
       expect(roots.length).toBe(6);
       const leafLinks = Array.from(fixture.nativeElement.querySelectorAll('.layout-menu a'))
         .filter((a: any) => a.getAttribute('href') !== null);
-      expect(leafLinks.length).toBe(13); // + Stability Lab (Phase 2K)
+      expect(leafLinks.length).toBe(14); // + Block Intelligence (Phase 2L)
     });
 
     it('renders every navigation label in full (2J.1 readability)', () => {

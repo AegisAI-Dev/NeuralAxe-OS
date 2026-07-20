@@ -475,6 +475,44 @@
             <small class="nx-dim" *ngIf="!lab.active && lab.lastState">Last: {{ lab.lastState }}</small>
         </section>
 
+        <!-- BLOCK INTELLIGENCE GLANCE (2L): compact network context; links to workspace.
+             Never duplicates the full block table and never implies THIS device found a block. -->
+        <section class="nx-panel">
+            <div class="nx-panel-title nx-cyan">Block Intelligence</div>
+            <div class="flex align-items-center justify-content-between mb-2">
+                <span class="nx-pill nx-pill-sm" [ngClass]="blockPillClass(blockFreshnessSeverity())">{{ blockGlance.freshnessText }}</span>
+                <small class="nx-dim" *ngIf="blockGlance.provider">via {{ blockGlance.provider }}</small>
+            </div>
+            <ng-container *ngIf="blockGlance.hasData; else biNoData">
+                <div class="nx-statrow nx-statrow-tight">
+                    <div class="nx-stat">
+                        <label>Latest block</label>
+                        <span>{{ blockGlance.height }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Age</label>
+                        <span>{{ fmtAge(blockGlance.ageMs) }}</span>
+                    </div>
+                    <div class="nx-stat">
+                        <label>Avg interval</label>
+                        <span>{{ fmtInterval(blockGlance.avgIntervalMs) }}</span>
+                    </div>
+                </div>
+                <div class="flex align-items-center gap-2 mt-2 flex-wrap">
+                    <b>{{ blockGlance.poolLabel }}</b>
+                    <span class="nx-pill nx-pill-sm" [ngClass]="blockPillClass(blockConfidenceSeverity())">{{ blockGlance.confidenceText }}</span>
+                    <span class="nx-pill nx-pill-sm" *ngIf="blockGlance.matchLabel" [ngClass]="blockMatchPillClass()">{{ blockGlance.matchLabel }}</span>
+                </div>
+            </ng-container>
+            <ng-template #biNoData>
+                <span class="nx-dim">{{ blockGlance.freshnessStatus === 'unavailable' ? 'Network block data is unavailable right now.' : 'Loading recent network blocks…' }}</span>
+            </ng-template>
+            <div class="flex align-items-center justify-content-between mt-2">
+                <small class="nx-dim">Public network blocks — not local mining proof</small>
+                <a routerLink="/bitcoin" class="text-sm">Open Block Intelligence →</a>
+            </div>
+        </section>
+
         <!-- SYSTEM STATUS -->
         <section class="nx-panel">
             <div class="nx-panel-title nx-cyan">System Status</div>

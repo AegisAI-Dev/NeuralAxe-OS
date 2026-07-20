@@ -1,6 +1,6 @@
 import { Component, OnDestroy, OnInit } from '@angular/core';
 import { HttpErrorResponse } from '@angular/common/http';
-import { Observable, Subject, shareReplay, takeUntil } from 'rxjs';
+import { Observable, Subject, shareReplay, takeUntil, timer } from 'rxjs';
 import { ToastrService } from 'ngx-toastr';
 import { SystemInfo as ISystemInfo, SystemAsic as ISystemASIC, GenericResponse } from 'src/app/generated/models';
 import { LiveDataService } from 'src/app/services/live-data.service';
@@ -33,6 +33,11 @@ import {
 import { curveSegmentLabel, fanCurveSummary, thermalModeLabel } from '../edit/tuning';
 import { FleetDevice, fleetSummary } from '../swarm/fleet-intel';
 import { LocalStorageService } from 'src/app/local-storage.service';
+import { BlockIntelligenceService } from 'src/app/services/block-intelligence/block-intelligence.service';
+import { BlockIntelligenceSnapshot } from 'src/app/services/block-intelligence/block-intelligence.model';
+import { BlockDeckGlance, blockDeckGlance, freshnessSeverity } from './block-deck';
+import { confidenceSeverity } from 'src/app/services/block-intelligence/attribution';
+import { formatAgeShort, formatInterval } from 'src/app/services/block-intelligence/block-format';
 
 /** Compact Stability Lab entry (2K): shown only when a session is active or
  *  completed sessions exist. */
@@ -142,12 +147,18 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
   /** Non-null only when a Stability Lab session is active or has completed. */
   public labGlance: LabGlance | null = null;
 
+  /** Compact Block Intelligence glance (2L); always shown, honest when loading. */
+  public blockGlance: BlockDeckGlance = blockDeckGlance(null, Date.now());
+  public readonly fmtAge = formatAgeShort;
+  public readonly fmtInterval = formatInterval;
+
   constructor(
     private liveDataService: LiveDataService,
     private systemService: SystemApiService,
     private webVersionService: WebVersionService,
     private toastr: ToastrService,
     private localStorageService: LocalStorageService,
+    private blockIntel: BlockIntelligenceService,
   ) {
     this.info$ = this.liveDataService.info$;
     this.connected$ = this.liveDataService.connected$;
@@ -241,6 +252,43 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
         this.updateChart();
       }
     });
+
+    // Compact Block Intelligence glance from the ONE shared snapshot stream (2L).
+    this.blockIntel.snapshot$.pipe(takeUntil(this.destroy$)).subscribe(snap => {
+      this.lastBlockSnapshot = snap;
+      this.blockGlance = blockDeckGlance(snap, Date.now());
+    });
+    // Keep the glance age current without any extra polling.
+    timer(15000, 15000).pipe(takeUntil(this.destroy$)).subscribe(() => {
+      this.blockGlance = blockDeckGlance(this.lastBlockSnapshot, Date.now());
+    });
+  }
+
+  /** Last block snapshot retained so the age ticker can re-derive the glance. */
+  private lastBlockSnapshot: BlockIntelligenceSnapshot | null = null;
+
+  public blockFreshnessSeverity(): 'ok' | 'info' | 'warn' | 'neutral' {
+    return freshnessSeverity(this.blockGlance.freshnessStatus);
+  }
+
+  public blockConfidenceSeverity(): 'ok' | 'info' | 'neutral' {
+    return this.blockGlance.confidence ? confidenceSeverity(this.blockGlance.confidence) : 'neutral';
+  }
+
+  public blockMatchPillClass(): string {
+    const k = this.blockGlance.matchKind;
+    if (k === 'active' || k === 'both') return 'nx-pill-ok';
+    if (k === 'fallback') return 'nx-pill-info';
+    return 'nx-pill-neutral';
+  }
+
+  public blockPillClass(severity: 'ok' | 'info' | 'warn' | 'neutral'): string {
+    switch (severity) {
+      case 'ok': return 'nx-pill-ok';
+      case 'info': return 'nx-pill-info';
+      case 'warn': return 'nx-pill-warn';
+      default: return 'nx-pill-neutral';
+    }
   }
 
   ngOnDestroy(): void {

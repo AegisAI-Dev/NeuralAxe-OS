@@ -29,7 +29,7 @@ describe('AppMenuComponent (NeuralAxe navigation architecture)', () => {
   it('keeps every existing route reachable exactly once (deep-link compatibility)', () => {
     const links = flatItems().filter(i => i.routerLink).map(i => String(i.routerLink[0]));
     expect(links.sort()).toEqual([
-      '/', 'about', 'classic', 'design', 'logs', 'network',
+      '/', 'about', 'bitcoin', 'classic', 'design', 'logs', 'network',
       'pool', 'scoreboard', 'settings', 'stability-lab', 'swarm', 'system', 'update',
     ].sort());
     expect(new Set(links).size).toBe(links.length);
