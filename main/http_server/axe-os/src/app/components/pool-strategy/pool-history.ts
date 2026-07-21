@@ -16,7 +16,7 @@
  */
 
 import { SystemInfo as ISystemInfo, Settings } from 'src/app/generated/models';
-import { PoolChain, PoolEndpoint, chainShort, endpointFromInfo, maskHost, normalizePort, realSecret } from './pool-profile';
+import { PoolChain, PoolEndpoint, chainShortLabel, endpointFromInfo, maskHost, normalizePort, realSecret } from './pool-profile';
 import { RecoveryResult, SwitchState, SwitchTimelineEntry } from './pool-switch-machine';
 
 export const HISTORY_KEY = 'NX_POOL_SWITCH_HISTORY';
@@ -50,6 +50,14 @@ export interface RestoreSnapshot {
   fromProfileName: string | null;
   /** True when the switch set a new password (so restore cannot recover the old one). */
   passwordWasReplaced: boolean;
+  /**
+   * The profile that was active BEFORE the switch (what a restore returns to).
+   * Non-secret; used to reactivate the correct labelled profile after restore.
+   * Null id + 'unknown' chain means the previous configuration was unlabelled.
+   */
+  previousProfileId?: string | null;
+  previousProfileName?: string | null;
+  previousChain?: PoolChain | 'unknown';
 }
 
 /** Capture the device's current pool configuration (passwords are never read). */
@@ -115,6 +123,9 @@ export function buildRestoreSnapshot(input: {
   now: number;
   fromProfileName: string | null;
   passwordWasReplaced: boolean;
+  previousProfileId?: string | null;
+  previousProfileName?: string | null;
+  previousChain?: PoolChain | 'unknown';
   ttlMs?: number;
 }): RestoreSnapshot {
   const ttl = typeof input.ttlMs === 'number' && input.ttlMs > 0 ? input.ttlMs : RESTORE_TTL_MS;
@@ -124,6 +135,9 @@ export function buildRestoreSnapshot(input: {
     expiresAt: input.now + ttl,
     fromProfileName: input.fromProfileName,
     passwordWasReplaced: input.passwordWasReplaced,
+    previousProfileId: input.previousProfileId ?? null,
+    previousProfileName: input.previousProfileName ?? null,
+    previousChain: input.previousChain ?? 'unknown',
   };
 }
 
@@ -215,7 +229,7 @@ export function buildSwitchRecord(input: {
   startedAt: number;
   finishedAt: number;
   source: { profileId: string | null; profileName: string | null; chain: PoolChain | 'unknown' };
-  target: { profileId: string | null; profileName: string | null; chain: PoolChain };
+  target: { profileId: string | null; profileName: string | null; chain: PoolChain | 'unknown' };
   changes: MaskedHostChange[];
   credentialsReplaced: { primary: boolean; fallback: boolean };
   finalState: SwitchState;
@@ -232,10 +246,10 @@ export function buildSwitchRecord(input: {
     finishedAt: input.finishedAt,
     sourceProfileId: input.source.profileId,
     sourceProfileName: input.source.profileName,
-    sourceChain: input.source.chain === 'unknown' ? 'Unknown' : chainShort(input.source.chain),
+    sourceChain: chainShortLabel(input.source.chain),
     targetProfileId: input.target.profileId,
     targetProfileName: input.target.profileName,
-    targetChain: chainShort(input.target.chain),
+    targetChain: chainShortLabel(input.target.chain),
     changes: input.changes.map(c => ({ ...c })),
     credentialsReplaced: { ...input.credentialsReplaced },
     finalState: input.finalState,
@@ -284,8 +298,8 @@ export function exportMarkdown(records: PoolSwitchRecord[]): string {
   records.forEach(r => {
     lines.push(`## ${new Date(r.startedAt).toISOString()} — ${r.sourceChain} → ${r.targetChain}`);
     lines.push(`- **Session:** ${r.id}`);
-    lines.push(`- **From:** ${r.sourceProfileName ?? '—'} (${r.sourceChain})`);
-    lines.push(`- **To:** ${r.targetProfileName ?? '—'} (${r.targetChain})`);
+    lines.push(`- **From:** ${r.sourceProfileName ?? 'Unlabelled configuration'} (${r.sourceChain})`);
+    lines.push(`- **To:** ${r.targetProfileName ?? 'Unlabelled configuration'} (${r.targetChain})`);
     lines.push(`- **Outcome:** ${stateResult(r)}`);
     lines.push(`- **Verified:** ${r.switchVerified ? 'yes' : 'no'}`);
     if (r.reason) lines.push(`- **Reason:** ${r.reason}`);

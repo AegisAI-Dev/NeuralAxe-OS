@@ -17,7 +17,7 @@ import {
 import {
   PoolProfile, PoolChain, PoolEndpoint, StratumProtocol, PasswordMode, SwitchSecrets,
   CHAIN_LABELS, PROFILE_LIMITS, buildStarterProfiles, canAddProfile,
-  chainLabel, chainShort, endpointReplacesPassword, endpointUsable, fallbackProvided,
+  chainLabel, chainShortLabel, endpointReplacesPassword, endpointUsable, fallbackProvided,
   isDuplicateProfile, maskAccount, maskHost, maskPassword, normalizePort, realSecret,
   profileToSettings, validateProfile, StarterSpec,
 } from './pool-profile';
@@ -36,13 +36,17 @@ import {
   evaluatePoolVerification, verificationLevels,
 } from './pool-verify';
 import {
-  CapturedConfig, RestoreSnapshot, PoolSwitchRecord, RestoreSecretPlan,
+  CapturedConfig, RestoreSnapshot, PoolSwitchRecord, RestoreSecretPlan, MaskedHostChange,
   buildRestoreSnapshot, buildSwitchRecord, captureConfig, captureToSettings,
   containsForbiddenKeys, exportJson, exportMarkdown, maskedHostChange,
 } from './pool-history';
 import {
   SwitchInterruptionRecord, InterruptionRecovery, deriveInterruptionRecovery,
 } from './pool-recovery';
+import {
+  SwitchProvenance, RestoreOutcomeView, SourceHosts,
+  buildSwitchProvenance, buildRestoreProvenance, resolveRestoreActivation, restoreOutcome, transitionProfileLabel,
+} from './pool-provenance';
 
 /** Editor model for one endpoint. No password field — passwords are entered at switch time. */
 interface EndpointEditor {
@@ -112,7 +116,7 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
   public readonly maskAccount = maskAccount;
   public readonly maskPassword = maskPassword;
   public readonly chainLabelFn = chainLabel;
-  public readonly chainShortFn = chainShort;
+  public readonly chainShortFn = chainShortLabel;
 
   // ---- live device ----
   public info$: Observable<ISystemInfo>;
@@ -161,10 +165,22 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
   private verifyStartMono = 0;
   private recoveryPhase: RecoveryPhase = null;
   private passwordWasReplaced = false;
+  /**
+   * Immutable, non-secret provenance captured BEFORE the mutation. History
+   * source/target labels derive from this, never from the live (mutable) chain
+   * context — otherwise a first switch records target→target (the BCH→BCH bug).
+   */
+  private provenance: SwitchProvenance | null = null;
 
   // ---- restore snapshot ----
   public restoreSnapshot: RestoreSnapshot | null = null;
   public showRestore = false;
+  /** Technically-exact restore result wording shown after a restore. */
+  public restoreView: RestoreOutcomeView | null = null;
+  /** For a restore, the resolved target (from resolveRestoreActivation) overrides provenance. */
+  private historyTargetOverride: { profileId: string | null; profileName: string | null; chain: PoolChain | 'unknown' } | null = null;
+  /** Masked host/port changes for the CURRENT operation (switch or restore direction). */
+  private opChanges: MaskedHostChange[] = [];
 
   // ---- history ----
   public history: PoolSwitchRecord[] = [];
@@ -461,6 +477,16 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
     try { return JSON.parse(localStorage.getItem('NX_STABILITY_ACTIVE') || 'null'); } catch { return null; }
   }
 
+  /** Non-secret source host/port summary from a captured configuration. */
+  private sourceHostsOf(config: CapturedConfig): SourceHosts {
+    return {
+      primaryHost: config.primary.host,
+      primaryPort: normalizePort(config.primary.port),
+      fallbackHost: config.fallback.host,
+      fallbackPort: normalizePort(config.fallback.port),
+    };
+  }
+
   // ---- session-only secret gating (Blocker 1/2) ----
 
   /** The endpoint the fallback slot will actually write (mirror when none). */
@@ -593,6 +619,11 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
       a: typeof this.latestInfo?.sharesAccepted === 'number' ? this.latestInfo.sharesAccepted : null,
       r: typeof this.latestInfo?.sharesRejected === 'number' ? this.latestInfo.sharesRejected : null,
     };
+    // Fresh operation state (a capture-fail path must not reuse stale changes).
+    this.provenance = null;
+    this.opChanges = [];
+    this.historyTargetOverride = null;
+    this.restoreView = null;
     this.dispatch('CONFIRM', { profileId: profile.id, profileName: profile.name, chain: profile.chain });
     this.captureAndApply(profile);
   }
@@ -606,6 +637,24 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
     }
     this.capturedOriginal = captureConfig(info);
     this.dispatch('CAPTURED');
+    // Capture immutable provenance NOW — before any mutation — from the honest
+    // pre-switch chain context. History source/target derive from this, not from
+    // the live context (which becomes the target once the switch is applied).
+    this.provenance = buildSwitchProvenance({
+      operationId: this.sessionId,
+      at: this.sessionStartMs,
+      sourceContext: this.chainContext,
+      sourceActive: this.poolStrategy.activeRecord,
+      sourceHosts: this.sourceHostsOf(this.capturedOriginal),
+      targetProfile: profile,
+      passwordReplaced: this.passwordWasReplaced,
+    });
+    // Switch-direction masked changes: source device config → target profile.
+    this.opChanges = [
+      maskedHostChange('primary', this.capturedOriginal.primary, profile.primary),
+      maskedHostChange('fallback', this.capturedOriginal.fallback, this.effectiveFallback(profile)),
+    ];
+    this.historyTargetOverride = null;
     const fbHost = fallbackProvided(profile.fallback) ? (profile.fallback as PoolEndpoint).host : profile.primary.host;
     this.verifyTarget = { primaryHost: profile.primary.host, fallbackHost: fbHost };
     // Persist a NON-SECRET interruption record so a browser interruption can be
@@ -799,24 +848,59 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
     if (!snap || !(this.snapshot.state === 'complete' || this.snapshot.state === 'idle')) return;
     this.showRestore = false;
     this.dispatch('RESTORE_START', { profileName: this.snapshot.targetProfileName ?? undefined });
-    this.beginManualRestore(snap.config);
+    this.beginManualRestore(snap.config, this.previousOf(snap));
   }
 
   public retryRestore(): void {
     const snap = this.restoreSnapshot;
     if (this.snapshot.state !== 'failed' || !snap) return;
     this.dispatch('RETRY_RESTORE');
-    this.beginManualRestore(snap.config);
+    this.beginManualRestore(snap.config, this.previousOf(snap));
+  }
+
+  private previousOf(snap: RestoreSnapshot): { profileId: string | null; profileName: string | null; chain: PoolChain | 'unknown' } {
+    return {
+      profileId: snap.previousProfileId ?? null,
+      profileName: snap.previousProfileName ?? null,
+      chain: snap.previousChain ?? 'unknown',
+    };
   }
 
   /**
    * Reapply a saved configuration. The original password is NOT available here
    * (it was session-only and is long gone), so no password is sent — the device
    * keeps its current password and the UI says so. Reuses the recovery flow.
+   * `previous` is the profile that was active before the original switch, so the
+   * restore can reactivate it and record an honest target chain.
    */
-  private beginManualRestore(config: CapturedConfig): void {
+  private beginManualRestore(config: CapturedConfig, previous?: { profileId: string | null; profileName: string | null; chain: PoolChain | 'unknown' }): void {
     this.replaced = { primary: false, fallback: false };
     this.opSecrets = {};
+    const now = Date.now();
+    const opId = this.sessionId || `nx-pool-${now.toString(36)}`;
+    this.sessionId = opId;
+    const prevChain: PoolChain | 'unknown' = previous?.chain ?? 'unknown';
+    const fromCfg = this.latestInfo ? captureConfig(this.latestInfo) : config;
+    // RESTORE provenance: source = current active (undone), target = previous.
+    this.provenance = buildRestoreProvenance({
+      operationId: opId,
+      at: now,
+      sourceContext: this.chainContext,
+      sourceActive: this.poolStrategy.activeRecord,
+      sourceHosts: this.sourceHostsOf(fromCfg),
+      previousProfileId: previous?.profileId ?? null,
+      previousProfileName: previous?.profileName ?? null,
+      previousChain: prevChain,
+      passwordReplaced: false,
+    });
+    // Restore-direction masked changes: current live config → restored config.
+    this.opChanges = [
+      maskedHostChange('primary', fromCfg.primary, config.primary),
+      maskedHostChange('fallback', fromCfg.fallback, config.fallback),
+    ];
+    this.historyTargetOverride = null;
+    // The identity the device should end up on = the restored config.
+    this.capturedOriginal = config;
     this.baselineShares = {
       a: typeof this.latestInfo?.sharesAccepted === 'number' ? this.latestInfo.sharesAccepted : null,
       r: typeof this.latestInfo?.sharesRejected === 'number' ? this.latestInfo.sharesRejected : null,
@@ -824,11 +908,11 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
     // Non-secret interruption record for the restore operation.
     if (this.latestInfo) {
       this.poolStrategy.setInterruptionRecord({
-        sessionId: this.sessionId || `nx-pool-${Date.now().toString(36)}`,
-        at: Date.now(),
-        targetProfileName: this.restoreSnapshot?.fromProfileName ?? null,
-        targetChain: 'custom',
-        original: captureConfig(this.latestInfo),
+        sessionId: opId,
+        at: now,
+        targetProfileName: previous?.profileName ?? this.restoreSnapshot?.fromProfileName ?? null,
+        targetChain: (prevChain === 'unknown' ? 'custom' : prevChain) as PoolChain,
+        original: fromCfg,
         target: { host: config.primary.host, port: normalizePort(config.primary.port), user: config.primary.user },
         passwordWasReplaced: false,
       });
@@ -898,11 +982,16 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
       this.poolStrategy.setActiveRecord(record);
     }
     if (this.capturedOriginal) {
+      const prov = this.provenance;
       const restore = buildRestoreSnapshot({
         config: this.capturedOriginal,
         now: Date.now(),
         fromProfileName: profile?.name ?? null,
         passwordWasReplaced: this.passwordWasReplaced,
+        // The profile that was active BEFORE this switch — restore returns to it.
+        previousProfileId: prov?.sourceProfileId ?? null,
+        previousProfileName: prov?.sourceProfileName ?? null,
+        previousChain: prov?.sourceChain ?? 'unknown',
       });
       this.poolStrategy.setRestoreSnapshot(restore);
       this.restoreSnapshot = restore;
@@ -916,17 +1005,47 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
 
   private afterRestore(result: RecoveryResult): void {
     this.poolStrategy.clearSwitchActive();
+    const prov = this.provenance;
+    // In-session rollback holds the original secret; a manual restore does not.
+    const originalSecretAvailable = !!this.opSecrets.original;
+    const passwordWasReplaced = this.restoreSnapshot?.passwordWasReplaced ?? this.passwordWasReplaced;
+    this.restoreView = restoreOutcome(result, passwordWasReplaced, originalSecretAvailable);
+
     if (result === 'verified') {
-      // The device is back on the original config — the active labelled profile
-      // is no longer applied, so the chain context becomes Unknown until a new
-      // labelled switch. Clear the used restore snapshot and any interruption.
-      this.poolStrategy.clearActiveRecord();
+      // Deterministic reactivation from live NON-SECRET identity — never guessed.
+      const activation = resolveRestoreActivation({
+        previousProfileId: prov?.targetProfileId ?? null,
+        previousProfileName: prov?.targetProfileName ?? null,
+        previousChain: prov?.targetChain ?? 'unknown',
+        restoredIdentity: this.capturedOriginal
+          ? { host: this.capturedOriginal.primary.host, port: normalizePort(this.capturedOriginal.primary.port), user: this.capturedOriginal.primary.user }
+          : { host: '', port: null, user: '' },
+        liveInfo: this.latestInfo,
+        profiles: this.profiles,
+        at: Date.now(),
+      });
+      if (activation.activate) {
+        this.poolStrategy.setActiveRecord(activation.activate);
+      } else {
+        this.poolStrategy.clearActiveRecord();
+      }
+      this.historyTargetOverride = {
+        profileId: activation.activate?.profileId ?? null,
+        profileName: activation.historyTargetProfileName,
+        chain: activation.historyTargetChain,
+      };
       this.poolStrategy.clearRestoreSnapshot();
       this.restoreSnapshot = null;
       this.resolveInterruption();
-      this.toastr.success('Restored the previous pool configuration — verified by telemetry.');
+      this.toastr.success(`${this.restoreView.headline}. ${activation.note}`);
     } else {
-      this.toastr.warning('Restore could not be fully verified — check the device. The previous pool is NOT confirmed restored.');
+      // Not verified: never mark anything active; record the attempted previous.
+      this.historyTargetOverride = {
+        profileId: prov?.targetProfileId ?? null,
+        profileName: prov?.targetProfileName ?? null,
+        chain: prov?.targetChain ?? 'unknown',
+      };
+      this.toastr.warning(`${this.restoreView.headline} — ${this.restoreView.detail}`);
     }
     this.saveHistory();
     this.clearSecrets();
@@ -954,27 +1073,27 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
 
   private saveHistory(): void {
     const profile = this.selectedProfile;
-    const original = this.capturedOriginal;
-    const changes = profile && original ? [
-      maskedHostChange('primary', original.primary, profile.primary),
-      maskedHostChange('fallback', original.fallback, fallbackProvided(profile.fallback) ? (profile.fallback as PoolEndpoint) : profile.primary),
-    ] : [];
+    const prov = this.provenance;
     const info = this.latestInfo;
+    // SOURCE always comes from the immutable pre-mutation provenance — never from
+    // the live chain context (which has already become the target). The restore
+    // path overrides the TARGET with the resolved activation.
+    const target = this.historyTargetOverride ?? {
+      profileId: prov?.targetProfileId ?? (profile?.id ?? null),
+      profileName: prov?.targetProfileName ?? (profile?.name ?? null),
+      chain: prov?.targetChain ?? (profile?.chain ?? 'custom'),
+    };
     const record = buildSwitchRecord({
       id: this.sessionId || `nx-pool-${Date.now().toString(36)}`,
       startedAt: this.sessionStartMs || Date.now(),
       finishedAt: Date.now(),
       source: {
-        profileId: null,
-        profileName: this.chainContext.profileName,
-        chain: this.chainContext.chain,
+        profileId: prov?.sourceProfileId ?? null,
+        profileName: prov?.sourceProfileName ?? null,
+        chain: prov?.sourceChain ?? 'unknown',
       },
-      target: {
-        profileId: profile?.id ?? null,
-        profileName: profile?.name ?? null,
-        chain: profile?.chain ?? 'custom',
-      },
-      changes,
+      target,
+      changes: this.opChanges,
       // Reflect what this operation ACTUALLY replaced (honoring Keep-current), not
       // just the profile's declared mode. Booleans only — never a value.
       credentialsReplaced: { primary: this.replaced.primary, fallback: this.replaced.fallback },
@@ -1017,7 +1136,16 @@ export class PoolStrategyComponent implements OnInit, OnDestroy {
     this.selectedProfile = null;
     this.review = null;
     this.capturedOriginal = null;
+    this.provenance = null;
+    this.restoreView = null;
+    this.historyTargetOverride = null;
+    this.opChanges = [];
     this.clearSecrets();
+  }
+
+  /** Profile name for a history transition end, or "Unlabelled configuration". */
+  public txProfileLabel(name: string | null): string {
+    return transitionProfileLabel(name);
   }
 
   // ---- interrupted-switch recovery actions (Blocker 4) ----

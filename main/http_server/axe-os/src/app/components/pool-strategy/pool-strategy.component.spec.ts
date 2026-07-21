@@ -11,8 +11,11 @@ import { SystemApiService } from 'src/app/services/system.service';
 import { WebVersionService } from 'src/app/services/web-version.service';
 import { PoolStrategyService } from 'src/app/services/pool-strategy.service';
 import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
-import { bchProfile, secretProfile, systemInfo, SECRET_PASSWORDS, SECRET_TOKENS } from './pool-fixtures';
+import { bchProfile, btcProfile, secretProfile, systemInfo, SECRET_PASSWORDS, SECRET_TOKENS } from './pool-fixtures';
 import { PoolProfile } from './pool-profile';
+import { ActivePoolRecord } from './pool-chain';
+
+const BTC_USER = 'bc1qsyntheticbtcaddrexampleonly000000000000.rig1';
 
 const POOL_KEYS = ['NX_POOL_PROFILES', 'NX_POOL_ACTIVE', 'NX_POOL_RESTORE_SNAPSHOT', 'NX_POOL_SWITCH_HISTORY', 'NX_POOL_SWITCH_ACTIVE', 'NX_STABILITY_ACTIVE'];
 
@@ -348,7 +351,136 @@ describe('PoolStrategyComponent', () => {
     expect(component.canDeactivate()).toBeTrue();
     expect(window.confirm).toHaveBeenCalled();
   });
+
+  // ==================== Phase 2M.0 provenance / restore polish ====================
+
+  it('Fixture A — first switch from an unlabelled device records Custom/Unknown → BCH (not BCH → BCH)', () => {
+    const ctx = build();                                   // device on solo.ckpool.org, NO active record
+    const { component, pool } = ctx;
+    expect(pool.chainContext().labelled).toBeFalse();      // Custom/Unknown before
+    const bp = pool.addProfile(dropId(bchProfile()));
+    component.reviewSwitch(bp);
+    ackAll(component);
+    component.confirmSwitch();
+    reconnectOn(ctx, bp);
+    expect(component.snapshot.state).toBe('complete');
+    expect(pool.chainContext().chain).toBe('BCH');         // target now active
+    const rec = pool.listHistory()[0];
+    expect(rec.sourceChain).toBe('Custom / Unknown');      // ← the fixed bug (full label)
+    expect(rec.targetChain).toBe('BCH');
+    expect(rec.sourceProfileName).toBeNull();              // → "Unlabelled configuration"
+    expect(component.txProfileLabel(rec.sourceProfileName)).toBe('Unlabelled configuration');
+  });
+
+  it('Fixture B — BCH → restore reactivates the previous BTC profile (BCH → BTC history)', () => {
+    const ctx = build();
+    const { component, pool, info$, mono } = ctx;
+    const btc = pool.addProfile(dropId(btcProfileMatching()));
+    const bch = pool.addProfile(dropId(bchProfile()));
+    seedBtcActive(pool, btc);                              // device is BTC-labelled
+    expect(pool.chainContext().chain).toBe('BTC');
+    // Switch BTC → BCH.
+    component.reviewSwitch(bch);
+    ackAll(component);
+    component.confirmSwitch();
+    reconnectOn(ctx, bch);
+    expect(component.snapshot.state).toBe('complete');
+    expect(pool.chainContext().chain).toBe('BCH');
+    const switchRec = pool.listHistory()[0];
+    expect(switchRec.sourceChain).toBe('BTC');
+    expect(switchRec.targetChain).toBe('BCH');
+    // Now restore → back to the BTC profile.
+    component.openRestore();
+    component.confirmRestore();
+    reconnectOnConfig(ctx, { host: 'solo.ckpool.org', port: 3333, user: BTC_USER });
+    expect(pool.chainContext().chain).toBe('BTC');         // BTC profile reactivated
+    expect(pool.activeRecord?.profileId).toBe(btc.id);
+    const restoreRec = pool.listHistory()[0];
+    expect(restoreRec.sourceChain).toBe('BCH');
+    expect(restoreRec.targetChain).toBe('BTC');
+    expect(restoreRec.targetProfileName).toBe(btc.name);
+    expect(component.restoreView?.category).toBe('exact');
+  });
+
+  it('Fixture C — unlabelled restore returns to Custom/Unknown', () => {
+    const ctx = build();
+    const { component, pool } = ctx;
+    const bch = pool.addProfile(dropId(bchProfile()));
+    component.reviewSwitch(bch); ackAll(component); component.confirmSwitch(); reconnectOn(ctx, bch);
+    expect(component.snapshot.state).toBe('complete');
+    component.openRestore();
+    component.confirmRestore();
+    reconnectOnConfig(ctx, { host: 'solo.ckpool.org', port: 3333, user: BTC_USER });
+    expect(pool.chainContext().labelled).toBeFalse();      // Custom/Unknown
+    expect(pool.activeRecord).toBeNull();
+    const restoreRec = pool.listHistory()[0];
+    expect(restoreRec.sourceChain).toBe('BCH');
+    expect(restoreRec.targetChain).toBe('Custom / Unknown');
+  });
+
+  it('Fixture D — password-replaced restore reports OPERATIONAL restore (no exact-password claim)', () => {
+    const ctx = build();
+    const { component, pool } = ctx;
+    const sp = pool.addProfile(dropId(secretProfile()));   // replace-password profile
+    component.reviewSwitch(sp);
+    ackAll(component);
+    setSecrets(component);
+    component.confirmSwitch();
+    reconnectOn(ctx, sp);
+    expect(component.snapshot.state).toBe('complete');
+    // Manual restore — the original secret is gone.
+    component.openRestore();
+    component.confirmRestore();
+    reconnectOnConfig(ctx, { host: 'solo.ckpool.org', port: 3333, user: BTC_USER });
+    expect(component.restoreView?.category).toBe('operational');
+    expect(component.restoreView?.detail).toContain('write-only');
+    expect(JSON.stringify(pool.listHistory())).not.toContain('SECRET_PWD'); // still secret-free
+  });
+
+  it('Fixture E — restore whose live identity mismatches the original marks nothing active (Custom/Unknown)', () => {
+    const ctx = build();
+    const { component, pool } = ctx;
+    const bch = pool.addProfile(dropId(bchProfile()));
+    component.reviewSwitch(bch); ackAll(component); component.confirmSwitch(); reconnectOn(ctx, bch);
+    component.openRestore();
+    component.confirmRestore();
+    // Device reconnects on the restore HOST but a DIFFERENT account → verify (host) ok, identity mismatch.
+    reconnectOnConfig(ctx, { host: 'solo.ckpool.org', port: 3333, user: 'someone-elses-wallet.rig' });
+    expect(pool.activeRecord).toBeNull();
+    expect(pool.chainContext().labelled).toBeFalse();
+  });
+
+  it('provenance and restore snapshot never carry a session password (privacy)', () => {
+    const ctx = build();
+    const { component, pool } = ctx;
+    const sp = pool.addProfile(dropId(secretProfile()));
+    component.reviewSwitch(sp); ackAll(component); setSecrets(component); component.confirmSwitch(); reconnectOn(ctx, sp);
+    const stores = [
+      window.localStorage.getItem('NX_POOL_RESTORE_SNAPSHOT') || '',
+      window.localStorage.getItem('NX_POOL_SWITCH_ACTIVE') || '',
+      JSON.stringify((component as any).provenance),
+    ];
+    stores.forEach(s => SECRET_TOKENS.forEach(t => expect(s).not.toContain(t)));
+  });
 });
+
+function btcProfileMatching(): PoolProfile {
+  const p = btcProfile();
+  p.primary = { ...p.primary, host: 'solo.ckpool.org', port: 3333, user: BTC_USER };
+  return p;
+}
+
+function seedBtcActive(pool: PoolStrategyService, btc: PoolProfile) {
+  const record: ActivePoolRecord = { profileId: btc.id, profileName: btc.name, chain: 'BTC', primaryHost: 'solo.ckpool.org', primaryPort: 3333, primaryUser: BTC_USER, appliedAt: 1 };
+  pool.setActiveRecord(record);
+}
+
+/** Push a device that reconnected on an arbitrary identity, to drive verify. */
+function reconnectOnConfig(ctx: Ctx, id: { host: string; port: number; user: string }) {
+  const on = systemInfo({ stratumURL: id.host, stratumPort: id.port, stratumUser: id.user, sharesAccepted: 5 });
+  ctx.mono.v += 5; ctx.info$.next(on);
+  ctx.mono.v += 5; ctx.info$.next(on);
+}
 
 /** Strip id/timestamps so the fixture profile can be added through the service. */
 function dropId(p: PoolProfile): Omit<PoolProfile, 'id' | 'createdAt' | 'updatedAt'> {

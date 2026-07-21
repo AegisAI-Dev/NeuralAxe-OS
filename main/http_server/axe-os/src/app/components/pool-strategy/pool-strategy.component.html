@@ -177,8 +177,9 @@
       <b>Rollback:</b> {{ rollbackResultText(snapshot.rollbackResult) }}.
       The device was returned to your captured original configuration.
     </div>
-    <div class="nx-note mt-2" *ngIf="snapshot.restoreResult">
-      <b>Restore:</b> {{ snapshot.restoreResult }}.
+    <div class="nx-note mt-2" *ngIf="restoreView as rv"
+         [ngClass]="rv.severity === 'ok' ? '' : (rv.severity === 'warn' ? 'nx-note-warn' : 'nx-note-warn')">
+      <b>{{ rv.headline }}.</b> {{ rv.detail }}
     </div>
 
     <!-- Timeline -->
@@ -242,8 +243,9 @@
         <div>
           <span class="nx-pill" [ngClass]="r.finalState === 'complete' ? 'nx-pill-ok' : (r.finalState === 'failed' ? 'nx-pill-err' : 'nx-pill-neutral')">{{ r.finalState }}</span>
           <span class="nx-pill nx-pill-warn" *ngIf="r.rollbackResult">rollback {{ r.rollbackResult }}</span>
+          <span class="nx-pill nx-pill-info" *ngIf="r.restoreResult">restore {{ r.restoreResult }}</span>
         </div>
-        <div class="nx-dim">{{ r.targetProfileName || '—' }}</div>
+        <div class="nx-dim nx-ellipsis">{{ txProfileLabel(r.sourceProfileName) }} → {{ txProfileLabel(r.targetProfileName) }}</div>
         <button class="nx-chip" (click)="deleteHistory(r.id)">Delete</button>
       </div>
     </div>

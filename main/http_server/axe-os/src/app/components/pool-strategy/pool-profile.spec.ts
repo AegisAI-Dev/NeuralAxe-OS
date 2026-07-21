@@ -1,5 +1,5 @@
 import {
-  PROFILE_LIMITS, blankEndpoint, buildStarterProfiles, canAddProfile, chainLabel, chainShort,
+  PROFILE_LIMITS, blankEndpoint, buildStarterProfiles, canAddProfile, chainLabel, chainShort, chainShortLabel,
   endpointFromInfo, endpointReplacesPassword, endpointUsable, fallbackProvided, isDuplicateProfile, isPoolChain,
   maskAccount, maskHost, maskPassword, normalizePort, profileToSettings, realSecret, validateEndpoint, validateProfile,
 } from './pool-profile';
@@ -13,7 +13,16 @@ describe('pool-profile', () => {
       expect(chainLabel('custom')).toContain('Custom');
       expect(chainLabel(null)).toContain('Custom');
       expect(chainShort('BTC')).toBe('BTC');
-      expect(chainShort(undefined)).toBe('Custom');
+      // The unlabelled/custom case is always the full "Custom / Unknown".
+      expect(chainShort('custom')).toBe('Custom / Unknown');
+      expect(chainShort(undefined)).toBe('Custom / Unknown');
+    });
+    it('chainShortLabel renders BTC/BCH compact and unknown/custom as "Custom / Unknown"', () => {
+      expect(chainShortLabel('BTC')).toBe('BTC');
+      expect(chainShortLabel('BCH')).toBe('BCH');
+      expect(chainShortLabel('custom')).toBe('Custom / Unknown');
+      expect(chainShortLabel('unknown')).toBe('Custom / Unknown');
+      expect(chainShortLabel(null)).toBe('Custom / Unknown');
     });
     it('validates chain membership', () => {
       expect(isPoolChain('BTC')).toBeTrue();

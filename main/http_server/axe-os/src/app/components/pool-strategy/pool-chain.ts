@@ -15,7 +15,7 @@
  */
 
 import { SystemInfo as ISystemInfo } from 'src/app/generated/models';
-import { PoolChain, chainLabel, chainShort, normalizePort } from './pool-profile';
+import { PoolChain, chainLabel, chainShort, chainShortLabel, normalizePort } from './pool-profile';
 
 /** The exact wording required whenever a chain label is shown. */
 export const CHAIN_DISCLAIMER =
@@ -79,7 +79,7 @@ function unknownContext(detail: string): ChainContext {
     labelled: false,
     verified: false,
     label: 'Custom / Unknown',
-    short: 'Unknown',
+    short: chainShortLabel('unknown'),
     profileName: null,
     detail,
   };

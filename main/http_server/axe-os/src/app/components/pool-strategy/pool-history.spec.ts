@@ -46,6 +46,42 @@ describe('pool-history', () => {
       expect(isRestoreValid(snap, now + RESTORE_TTL_MS + 1)).toBeFalse();
       expect(isRestoreValid(null, now)).toBeFalse();
     });
+    it('carries the previous profile identity (for restore reactivation), defaults to unlabelled', () => {
+      const labelled = buildRestoreSnapshot({ config: captureConfig(systemInfo()), now: 1, fromProfileName: 'BCH', passwordWasReplaced: false, previousProfileId: 'p-btc', previousProfileName: 'BTC Solo', previousChain: 'BTC' });
+      expect(labelled.previousProfileId).toBe('p-btc');
+      expect(labelled.previousChain).toBe('BTC');
+      const unlabelled = buildRestoreSnapshot({ config: captureConfig(systemInfo()), now: 1, fromProfileName: null, passwordWasReplaced: false });
+      expect(unlabelled.previousProfileId).toBeNull();
+      expect(unlabelled.previousChain).toBe('unknown');
+    });
+  });
+
+  describe('export renders "Unlabelled configuration" for null profile names', () => {
+    it('markdown shows Unlabelled configuration for a first switch record', () => {
+      const rec = buildSwitchRecord({
+        id: 's', startedAt: 1, finishedAt: 2,
+        source: { profileId: null, profileName: null, chain: 'unknown' },
+        target: { profileId: 't', profileName: 'BCH Demo', chain: 'BCH' },
+        changes: [], credentialsReplaced: { primary: false, fallback: false },
+        finalState: 'complete', switchVerified: true, rollbackResult: null, restoreResult: null, reason: null, timeline: [],
+      });
+      expect(rec.sourceChain).toBe('Custom / Unknown');
+      expect(rec.targetChain).toBe('BCH');
+      const md = exportMarkdown([rec]);
+      expect(md).toContain('Custom / Unknown → BCH');
+      expect(md).toContain('**From:** Unlabelled configuration (Custom / Unknown)');
+    });
+    it('a restore-to-unlabelled record maps an unknown target to "Custom / Unknown"', () => {
+      const rec = buildSwitchRecord({
+        id: 's', startedAt: 1, finishedAt: 2,
+        source: { profileId: null, profileName: 'BCH Demo', chain: 'BCH' },
+        target: { profileId: null, profileName: null, chain: 'unknown' },
+        changes: [], credentialsReplaced: { primary: false, fallback: false },
+        finalState: 'complete', switchVerified: true, rollbackResult: null, restoreResult: 'verified', reason: null, timeline: [],
+      });
+      expect(rec.targetChain).toBe('Custom / Unknown');
+      expect(exportMarkdown([rec])).toContain('BCH → Custom / Unknown');
+    });
   });
 
   describe('masked host change', () => {

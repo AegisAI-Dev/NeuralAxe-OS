@@ -95,10 +95,15 @@ export const CHAIN_LABELS: { [k in PoolChain]: string } = {
   custom: 'Custom / Unknown',
 };
 
+/**
+ * Compact user-facing chain labels. The unlabelled/custom case is ALWAYS the
+ * full "Custom / Unknown" — it is never collapsed to just "Custom" or "Unknown"
+ * so the label reads consistently everywhere (history, exports, badges, deck).
+ */
 export const CHAIN_SHORT: { [k in PoolChain]: string } = {
   BTC: 'BTC',
   BCH: 'BCH',
-  custom: 'Custom',
+  custom: 'Custom / Unknown',
 };
 
 export function chainLabel(chain: PoolChain | null | undefined): string {
@@ -107,6 +112,14 @@ export function chainLabel(chain: PoolChain | null | undefined): string {
 
 export function chainShort(chain: PoolChain | null | undefined): string {
   return chain ? CHAIN_SHORT[chain] ?? CHAIN_SHORT.custom : CHAIN_SHORT.custom;
+}
+
+/**
+ * Compact chain label that also handles the 'unknown' CONTEXT value (no labelled
+ * profile applied / device drifted) — rendered as the same "Custom / Unknown".
+ */
+export function chainShortLabel(chain: PoolChain | 'unknown' | null | undefined): string {
+  return chain === 'unknown' ? CHAIN_SHORT.custom : chainShort(chain);
 }
 
 export function isPoolChain(value: unknown): value is PoolChain {

@@ -22,7 +22,7 @@ const lastRecord: PoolSwitchRecord = {
 describe('pool-deck', () => {
   it('summarizes an unknown context (no profile)', () => {
     const glance = poolDeckGlance({ context: deriveChainContext(null, systemInfo()), history: [], restoreAvailable: false, switchActive: false });
-    expect(glance.chainShort).toBe('Unknown');
+    expect(glance.chainShort).toBe('Custom / Unknown');
     expect(glance.chainSeverity).toBe('neutral');
     expect(glance.suppressBitcoinMatch).toBeFalse();
     expect(glance.lastSwitch).toBeNull();
