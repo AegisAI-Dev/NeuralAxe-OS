@@ -48,7 +48,7 @@ const baseInfo = (over = {}) => ({
   miningPaused: false, hashRate: 1290, hashRate_1m: 1288, hashRate_10m: 1285, hashRate_1h: 1280, expectedHashrate: 1275,
   power: 21.4, maxPower: 25, voltage: 5208, current: 2237, nominalVoltage: 5, errorPercentage: 0.4,
   sharesAccepted: 18760, sharesRejected: 92, sharesRejectedReasons: [], responseTime: 34, poolDifficulty: 1000,
-  bestDiff: 238214491, bestSessionDiff: 21212121, networkDifficulty: 155970000000000, blockHeight: 870000, blockFound: 0,
+  bestDiff: 238214491, bestSessionDiff: 21212121, networkDifficulty: 155970000000000, blockHeight: 870001, blockFound: 0,
   uptimeSeconds: 218520, wifiRSSI: -42, wifiStatus: 'Connected!', freeHeap: 200504, freeHeapInternal: 200504, cpuUsage: 18,
   hostname: 'gamma-lab-01', isUsingFallbackStratum: 0, hashrateMonitor: { asics: [{ total: 1290, domains: [321, 329, 318, 322], errorCount: 2 }], hashrate: 1290 },
   // configured pools — real HOSTS used for local matching (not secret):
@@ -64,6 +64,10 @@ const asicFixture = {
   defaultFrequency: 485, frequencyOptions: [400, 425, 450, 475, 485, 500, 525, 550, 575, 600, 625],
   defaultVoltage: 1200, voltageOptions: [1100, 1150, 1200, 1250, 1300],
 };
+
+// A realistic coinbase scriptsig hex: binary prefix + printable pool tag + binary suffix.
+const cbHex = (tag) => [0x03, 0x87, 0x9a, 0x0e, 0x00, ...Array.from(tag).map(c => c.charCodeAt(0)), 0x00, 0xff]
+  .map(b => b.toString(16).padStart(2, '0')).join('');
 
 // ---- deterministic mempool.space-shaped block fixtures -------------------
 const BLOCK_SPECS = [
@@ -98,7 +102,8 @@ function makeBlocks(tipHeight = 870000, { tipHashSuffix = 'a', tipHeightBump = 0
       mediantime: nowSec - 300 - i * 600, stale: false,
       extras: {
         reward: 315000000 - i * 100000, totalFees: 2500000 - i * 90000,
-        coinbaseSignatureAscii: spec.cb, pool: spec.pool, matchRate: 100,
+        coinbaseSignatureAscii: spec.cb, coinbaseRaw: spec.cb ? cbHex(spec.cb) : null,
+        pool: spec.pool, matchRate: 100,
       },
     };
   });

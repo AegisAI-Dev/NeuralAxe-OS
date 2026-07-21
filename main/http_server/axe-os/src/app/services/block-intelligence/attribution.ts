@@ -18,10 +18,10 @@ import {
   AttributionConfidence,
   AttributionEvidence,
   AttributionMethod,
-  MAX_COINBASE_TAG_CHARS,
   PoolAttribution,
 } from './block-intelligence.model';
 import { identifyPoolFromAttribution, identifyPoolWithKind, PoolIdentity } from './pool-normalize';
+import { sanitizeCoinbase, SanitizedCoinbase } from './coinbase-sanitize';
 
 /** Normalized inputs an adapter extracts from a provider's raw block. */
 export interface AttributionInput {
@@ -29,25 +29,23 @@ export interface AttributionInput {
   providerPoolName: string | null;
   /** Provider-supplied slug/id, or null. */
   providerSlug: string | null;
-  /** Decoded coinbase ASCII tag, or null. */
-  coinbaseTagAscii: string | null;
-  /** Coinbase tag identifier (bounded hex prefix), or null. */
-  coinbaseTagId: string | null;
+  /** Provider's LOSSY coinbase ASCII (may contain binary/replacement noise), or null. */
+  coinbaseAscii: string | null;
+  /** Provider's raw coinbase scriptsig hex (source of truth for evidence), or null. */
+  coinbaseHex: string | null;
   /** Provider's own match confidence in [0,1], or null. */
   providerMatchRate: number | null;
 }
 
-/** Bound and sanitize a free-text tag for storage/display. */
+/**
+ * Bound and sanitize a free-text coinbase tag to a readable ASCII string.
+ * Delegates to {@link sanitizeCoinbase} so a single, tested rule governs how
+ * non-printable / replacement-character noise is stripped. Returns null when no
+ * readable content remains.
+ */
 export function sanitizeTag(value: string | null | undefined): string | null {
-  if (typeof value !== 'string') {
-    return null;
-  }
-  // Strip control chars, collapse whitespace, bound length.
-  const cleaned = value.replace(/[\x00-\x1F\x7F]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (cleaned === '') {
-    return null;
-  }
-  return cleaned.length > MAX_COINBASE_TAG_CHARS ? cleaned.slice(0, MAX_COINBASE_TAG_CHARS) + '…' : cleaned;
+  const c = sanitizeCoinbase({ ascii: value ?? null, hex: null });
+  return c.hasReadable ? c.readable : null;
 }
 
 function finiteRate(value: unknown): number | null {
@@ -65,20 +63,22 @@ function finiteRate(value: unknown): number | null {
 export function deriveAttribution(input: AttributionInput, source: string): PoolAttribution {
   const providerLabel = nonEmpty(input.providerPoolName);
   const slug = nonEmpty(input.providerSlug);
-  const coinbaseTagAscii = sanitizeTag(input.coinbaseTagAscii);
-  const coinbaseTagId = nonEmpty(input.coinbaseTagId);
   const providerMatchRate = finiteRate(input.providerMatchRate);
 
+  // Sanitize the coinbase ONCE (prefers raw hex bytes over lossy ASCII). The
+  // readable form is the ONLY thing matching ever sees — the escaped/hex display
+  // views can never create a stronger match, and no raw binary is exposed.
+  const coinbase = sanitizeCoinbase({ ascii: input.coinbaseAscii, hex: input.coinbaseHex });
+  const readable = coinbase.hasReadable ? coinbase.readable : null;
+
   // How the coinbase tag matches a known pool (name = strong, domain = probable).
-  const coinbaseMatch = coinbaseTagAscii
-    ? identifyPoolWithKind({ coinbaseTag: coinbaseTagAscii })
-    : null;
+  const coinbaseMatch = readable ? identifyPoolWithKind({ coinbaseTag: readable }) : null;
   // Which known pool does the provider label point at (for canonicalization)?
   const labelIdentity = (providerLabel || slug)
     ? identifyPoolFromAttribution({ poolName: providerLabel, slug })
     : null;
 
-  const hasAnyCoinbase = coinbaseTagAscii !== null || coinbaseTagId !== null;
+  const hasAnyCoinbase = coinbase.status !== 'empty';
 
   const base = (
     confidence: AttributionConfidence,
@@ -93,7 +93,7 @@ export function deriveAttribution(input: AttributionInput, source: string): Pool
     method,
     confidence,
     source,
-    evidence: makeEvidence(coinbaseTagAscii, coinbaseTagId, providerMatchRate, reason, aliases),
+    evidence: makeEvidence(readable, coinbase, providerMatchRate, reason, aliases),
   });
 
   // ---- Provider supplied a pool → PROVIDER-REPORTED ----------------------
@@ -167,12 +167,19 @@ export function deriveAttribution(input: AttributionInput, source: string): Pool
 
 function makeEvidence(
   coinbaseTagAscii: string | null,
-  coinbaseTagId: string | null,
+  coinbase: SanitizedCoinbase,
   providerMatchRate: number | null,
   reason: string,
   aliases: string[],
 ): AttributionEvidence {
-  return { coinbaseTagAscii, coinbaseTagId, providerMatchRate, reason, aliases };
+  return {
+    coinbaseTagAscii,
+    coinbaseTagId: null,
+    providerMatchRate,
+    reason,
+    aliases,
+    coinbase: coinbase.status === 'empty' ? null : coinbase,
+  };
 }
 
 function nonEmpty(value: string | null | undefined): string | null {

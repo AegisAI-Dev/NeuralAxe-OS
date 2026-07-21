@@ -131,6 +131,8 @@ export class BlockIntelligenceComponent implements OnInit, OnDestroy {
   public detailLoading = false;
   public selectedDetail: BlockDetail | null = null;
   public selectedRow: BlockRow | null = null;
+  /** Bounded-hex disclosure in the coinbase-evidence section; reset per open. */
+  public showCoinbaseHex = false;
 
   private lastSnapshot: BlockIntelligenceSnapshot | null = null;
   private prevTipHeight: number | null = null;
@@ -175,6 +177,7 @@ export class BlockIntelligenceComponent implements OnInit, OnDestroy {
     this.selectedDetail = null;
     this.detailLoading = true;
     this.drawerOpen = true;
+    this.showCoinbaseHex = false;
     this.service.fetchBlockDetail(row.hash).pipe(takeUntil(this.destroy$)).subscribe({
       next: (detail) => {
         this.selectedDetail = detail;

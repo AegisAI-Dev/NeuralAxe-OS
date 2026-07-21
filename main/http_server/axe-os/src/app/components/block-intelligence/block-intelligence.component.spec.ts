@@ -32,10 +32,23 @@ function snap(blocks: BlockSummary[], status: ProviderStatus = 'live', tipReplac
   };
 }
 
-const DETAIL: BlockDetail = {
-  ...block(870010, 'active', 'provider-reported', 'Public Pool'),
-  version: 1, merkleRoot: 'mm', previousBlockHash: 'pp', medianTimeMs: 1, bits: 1, nonce: 1, difficulty: 1,
-};
+function withCoinbase(readable: string, escaped: string, hex: string | null): BlockDetail {
+  const b = block(870010, 'active', 'provider-reported', 'Public Pool');
+  return {
+    ...b,
+    attribution: {
+      ...b.attribution,
+      evidence: {
+        ...b.attribution.evidence,
+        coinbase: { readable, escaped, hex, originalLength: 24, truncated: false, status: 'sanitized', hasReadable: readable.length > 0 },
+      },
+    },
+    version: 1, merkleRoot: 'mm', previousBlockHash: 'pp', medianTimeMs: 1, bits: 1, nonce: 1, difficulty: 1,
+  };
+}
+
+const DETAIL: BlockDetail = withCoinbase('/Foundry USA Pool/', '\\x00\\x00/Foundry USA Pool/\\xFF', '000000' + '2f466f756e6472792f');
+const SCRIPT_DETAIL: BlockDetail = withCoinbase('<script>alert(1)</script>', '<script>alert(1)</script>', null);
 
 class StubService {
   snapshot$ = new BehaviorSubject<BlockIntelligenceSnapshot>(snap([], 'loading'));
@@ -98,6 +111,39 @@ describe('BlockIntelligenceComponent', () => {
     expect(stub.fetchBlockDetail).toHaveBeenCalledWith('hash870010');
     expect(component.drawerOpen).toBeTrue();
     expect(component.selectedDetail).toBe(DETAIL);
+  });
+
+  it('renders the "Latest Mined Block" summary tile (2L.1)', () => {
+    stub.snapshot$.next(snap([block(870010, 'active', 'provider-reported', 'Public Pool')]));
+    fixture.detectChanges();
+    expect((fixture.nativeElement.textContent as string)).toContain('Latest Mined Block');
+  });
+
+  it('renders sanitized coinbase evidence and toggles bounded hex; never raw binary (2L.1)', () => {
+    stub.snapshot$.next(snap([block(870010, 'active', 'provider-reported', 'Public Pool')]));
+    fixture.detectChanges();
+    component.openDetail(component.rows[0]);   // stub.fetchBlockDetail → of(DETAIL)
+    fixture.detectChanges();
+    const text = fixture.nativeElement.textContent as string;
+    expect(text).toContain('Coinbase evidence');
+    expect(text).toContain('/Foundry USA Pool/');  // readable preview
+    expect(text).toContain('\\x00');               // escaped form (literal backslash-x-0-0)
+    expect(text).not.toContain('\x00');            // no raw NUL byte rendered
+    expect(component.showCoinbaseHex).toBeFalse(); // reset on open
+    expect(fixture.nativeElement.querySelector('#nx-coinbase-hexval')).toBeNull();
+    component.showCoinbaseHex = true;
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('#nx-coinbase-hexval')).toBeTruthy();
+  });
+
+  it('renders coinbase evidence as inert text — never innerHTML / injected script (2L.1)', () => {
+    stub.fetchBlockDetail.and.returnValue(of(SCRIPT_DETAIL));
+    stub.snapshot$.next(snap([block(870010, 'active', 'provider-reported', 'Public Pool')]));
+    fixture.detectChanges();
+    component.openDetail(component.rows[0]);
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('script')).toBeNull();
+    expect((fixture.nativeElement.textContent as string)).toContain('<script>alert(1)</script>');
   });
 
   it('opens the drawer on keyboard Enter', () => {

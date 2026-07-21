@@ -506,6 +506,12 @@
 .nx-pill-neutral { color: var(--nx-text-dim); border-color: var(--nx-line-bright); background: rgba(94, 127, 147, 0.1); }
 .nx-pill-sm { font-size: 0.56rem; padding: 0.08rem 0.45rem; letter-spacing: 0.06em; }
 
+/* Miner-vs-network work-height relationship line (2L.1) — honest, never an alarm. */
+.nx-work-rel { display: flex; flex-direction: column; gap: 0.1rem; border-top: 1px dashed var(--nx-line); padding-top: 0.4rem; font-size: 0.72rem; }
+.nx-work-rel-detail { font-size: 0.66rem; }
+.nx-work-rel-ok > small > b:first-child { color: var(--nx-green); }
+.nx-work-rel-info > small > b:first-child { color: var(--nx-cyan); }
+
 /* ---------- block signal ---------- */
 
 .nx-block-signal {

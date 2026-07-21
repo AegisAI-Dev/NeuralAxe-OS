@@ -270,7 +270,7 @@
                     </div>
                 </div>
                 <div class="nx-pool-cell">
-                    <label>Block Height</label>
+                    <label pTooltip="The next candidate block height this miner is currently working on — not a block that has been mined." tooltipPosition="top">Current Work Height</label>
                     <b>{{ info.blockHeight ? fmt.int(info.blockHeight) : '—' }}</b>
                     <label class="mt-2">Best Difficulty</label>
                     <b>{{ (info.bestSessionDiff ?? 0) | diffSuffix }}</b>
@@ -486,7 +486,7 @@
             <ng-container *ngIf="blockGlance.hasData; else biNoData">
                 <div class="nx-statrow nx-statrow-tight">
                     <div class="nx-stat">
-                        <label>Latest block</label>
+                        <label pTooltip="The latest completed network block reported by the data provider." tooltipPosition="top">Latest Mined Block</label>
                         <span>{{ blockGlance.height }}</span>
                     </div>
                     <div class="nx-stat">
@@ -502,6 +502,11 @@
                     <b>{{ blockGlance.poolLabel }}</b>
                     <span class="nx-pill nx-pill-sm" [ngClass]="blockPillClass(blockConfidenceSeverity())">{{ blockGlance.confidenceText }}</span>
                     <span class="nx-pill nx-pill-sm" *ngIf="blockGlance.matchLabel" [ngClass]="blockMatchPillClass()">{{ blockGlance.matchLabel }}</span>
+                </div>
+                <!-- Honest miner-vs-network height relationship (2L.1): N vs N+1 is expected. -->
+                <div class="nx-work-rel mt-2" *ngIf="workHeightRelation(info) as rel" [ngClass]="'nx-work-rel-' + rel.severity">
+                    <small><b>Your miner</b> — Current Work Height <b>#{{ rel.currentWorkHeight }}</b>: {{ rel.label }}</small>
+                    <small class="nx-dim nx-work-rel-detail" *ngIf="rel.detail">{{ rel.detail }}</small>
                 </div>
             </ng-container>
             <ng-template #biNoData>

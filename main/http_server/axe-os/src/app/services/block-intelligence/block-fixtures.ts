@@ -73,10 +73,20 @@ export function mkEsploraBlock(overrides: any = {}): any {
 // ---------------------------------------------------------------------------
 // (1) known pool with strong coinbase evidence — no provider pool, coinbase names it
 // ---------------------------------------------------------------------------
+/**
+ * Build a realistic coinbase scriptsig hex: a binary prefix (BIP34 height /
+ * extranonce stand-in) + the printable pool tag + a binary suffix. Lets the
+ * sanitized-evidence drawer be exercised against genuine binary bytes.
+ */
+export function coinbaseHexFor(tagAscii: string, prefix: number[] = [0x03, 0x87, 0x9a, 0x0e, 0x00], suffix: number[] = [0x00, 0xff]): string {
+  const body = Array.from(tagAscii).map(c => c.charCodeAt(0));
+  return [...prefix, ...body, ...suffix].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 export const BLOCK_STRONG_COINBASE = mkMempoolBlock({
   id: 'strong-coinbase',
   height: BASE_HEIGHT + 10,
-  extras: { coinbaseSignatureAscii: 'AntPool/mined by xyz', pool: { id: 0, name: 'Unknown', slug: 'unknown' } },
+  extras: { coinbaseSignatureAscii: 'AntPool/mined by xyz', coinbaseRaw: coinbaseHexFor('AntPool/mined by xyz'), pool: { id: 0, name: 'Unknown', slug: 'unknown' } },
 });
 
 // ---------------------------------------------------------------------------
@@ -86,7 +96,7 @@ export const BLOCK_STRONG_COINBASE = mkMempoolBlock({
 export const BLOCK_PROVIDER_REPORTED = mkMempoolBlock({
   id: 'provider-reported',
   height: BASE_HEIGHT + 9,
-  extras: { coinbaseSignatureAscii: '/Foundry USA Pool/', pool: { id: 111, name: 'Foundry USA', slug: 'foundryusa' } },
+  extras: { coinbaseSignatureAscii: '/Foundry USA Pool/', coinbaseRaw: coinbaseHexFor('/Foundry USA Pool/'), pool: { id: 111, name: 'Foundry USA', slug: 'foundryusa' } },
 });
 
 // ---------------------------------------------------------------------------

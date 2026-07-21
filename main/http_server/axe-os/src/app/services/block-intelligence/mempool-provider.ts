@@ -16,7 +16,7 @@ import {
   BlockProviderDescriptor,
   BlockSummary,
 } from './block-intelligence.model';
-import { deriveAttribution, sanitizeTag } from './attribution';
+import { deriveAttribution } from './attribution';
 import {
   blockAgeMs,
   blockSubsidySats,
@@ -67,16 +67,16 @@ export function normalizeMempoolBlock(raw: any, source: string, fetchedAtMs: num
   const reward = nonNegOrNull(raw?.extras?.reward) ?? deriveReward(subsidy, totalFees);
 
   const { name, slug } = providerPool(raw);
-  const coinbaseTagAscii = sanitizeTag(raw?.extras?.coinbaseSignatureAscii);
 
   const attribution = deriveAttribution({
     providerPoolName: name,
     providerSlug: slug,
-    coinbaseTagAscii,
-    // The provider pool id is an internal identifier, NOT coinbase evidence, so it
-    // must never make "has coinbase evidence" true. Coinbase evidence comes solely
-    // from the decoded coinbase signature (coinbaseTagAscii).
-    coinbaseTagId: null,
+    // Raw coinbase evidence is sanitized inside deriveAttribution: the lossy ASCII
+    // is only a fallback; the raw scriptsig hex (coinbaseRaw) is the source of
+    // truth for the readable / escaped / hex views. The provider pool id is an
+    // internal identifier, never coinbase evidence.
+    coinbaseAscii: typeof raw?.extras?.coinbaseSignatureAscii === 'string' ? raw.extras.coinbaseSignatureAscii : null,
+    coinbaseHex: typeof raw?.extras?.coinbaseRaw === 'string' ? raw.extras.coinbaseRaw : null,
     providerMatchRate: null, // mempool "matchRate" is a template metric, not pool confidence
   }, source);
 

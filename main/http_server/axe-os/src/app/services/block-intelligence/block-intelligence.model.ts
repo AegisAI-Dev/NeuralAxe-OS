@@ -17,6 +17,8 @@
  *     used and never leave the browser.
  */
 
+import { SanitizedCoinbase } from './coinbase-sanitize';
+
 // ---------------------------------------------------------------------------
 // Attribution
 // ---------------------------------------------------------------------------
@@ -57,6 +59,12 @@ export interface AttributionEvidence {
   reason: string;
   /** Alias identities considered while matching (bounded, deduplicated). */
   aliases: string[];
+  /**
+   * Bounded, sanitized coinbase evidence for safe display (readable / escaped /
+   * optional hex). Optional so lightweight test constructions can omit it; the
+   * adapters always populate it. See {@link SanitizedCoinbase}.
+   */
+  coinbase?: SanitizedCoinbase | null;
 }
 
 export interface PoolAttribution {

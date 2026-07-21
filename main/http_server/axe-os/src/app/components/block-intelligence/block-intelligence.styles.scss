@@ -201,6 +201,11 @@
   .nx-k { color: var(--nx-text-dim); font-size: 0.72rem; }
   .nx-v { color: var(--nx-text); font-size: 0.76rem; text-align: right; }
   .nx-drawer-attr h3 { font-size: 0.78rem; color: var(--nx-green); margin: 0 0 0.5rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .nx-coinbase { margin-top: 0.7rem; border-top: 1px dashed var(--nx-line); padding-top: 0.6rem; }
+  .nx-coinbase h4 { font-size: 0.72rem; color: var(--nx-cyan); margin: 0 0 0.45rem; text-transform: uppercase; letter-spacing: 0.06em; }
+  .nx-coinbase-hex { margin-top: 0.4rem; }
+  .nx-coinbase-hexval { display: block; margin-top: 0.35rem; font-size: 0.7rem; background: var(--nx-panel-2); border: 1px solid var(--nx-line); border-radius: 6px; padding: 0.4rem 0.5rem; }
+  .nx-coinbase-note { font-size: 0.7rem; margin: 0.5rem 0 0; }
   .nx-attr-line { display: flex; gap: 0.6rem; align-items: center; margin-bottom: 0.6rem; }
   .nx-attr-reason { font-size: 0.74rem; margin: 0.5rem 0 0; }
   .nx-drawer-loading { display: flex; gap: 0.4rem; align-items: center; }

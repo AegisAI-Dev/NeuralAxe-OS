@@ -68,6 +68,19 @@ describe('CommandDeckComponent', () => {
     expect(imbalanced.some(i => i.label === 'Mild domain imbalance')).toBeTrue();
   });
 
+  it('classifies miner Current Work Height vs Latest Mined Block — N+1 is healthy, not a warning (2L.1)', () => {
+    component.blockGlance = { ...component.blockGlance, hasData: true, height: 958983 } as any;
+    const rel = component.workHeightRelation(baseInfo({ blockHeight: 958984 } as any));
+    expect(rel).not.toBeNull();
+    expect(rel!.state).toBe('expected-next');
+    expect(rel!.severity).toBe('ok'); // never an alarm for the ordinary one-block difference
+  });
+
+  it('work-height relationship is null (hidden) when the latest mined block is unavailable (2L.1)', () => {
+    component.blockGlance = { ...component.blockGlance, hasData: false, height: null } as any;
+    expect(component.workHeightRelation(baseInfo({ blockHeight: 958984 } as any))).toBeNull();
+  });
+
   it('should report fallback pool as a warning insight', () => {
     const insights = component.deriveInsights(baseInfo({ isUsingFallbackStratum: 1 } as any));
     const pool = insights.find(i => i.icon === 'pi-shield');
@@ -360,6 +373,21 @@ describe('CommandDeckComponent (rendered with live-like data)', () => {
     expect(el.querySelector('.nx-block-hex')).toBeTruthy();
     expect((el.querySelector('.nx-block-height') as HTMLElement)?.textContent).toContain('842,763');
     expect(el.textContent).not.toContain('🎉');
+    fixture.destroy();
+    discardPeriodicTasks();
+  }));
+
+  it('labels the miner candidate "Current Work Height", never the ambiguous "Block Height" (2L.1)', fakeAsync(() => {
+    const text = (render().nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('Current Work Height');
+    expect(text).not.toContain('Block Height');
+    fixture.destroy();
+    discardPeriodicTasks();
+  }));
+
+  it('labels the latest completed network block "Latest Mined Block" (2L.1)', fakeAsync(() => {
+    const text = (render().nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('Latest Mined Block');
     fixture.destroy();
     discardPeriodicTasks();
   }));

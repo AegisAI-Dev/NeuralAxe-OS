@@ -38,6 +38,7 @@ import { BlockIntelligenceSnapshot } from 'src/app/services/block-intelligence/b
 import { BlockDeckGlance, blockDeckGlance, freshnessSeverity } from './block-deck';
 import { confidenceSeverity } from 'src/app/services/block-intelligence/attribution';
 import { formatAgeShort, formatInterval } from 'src/app/services/block-intelligence/block-format';
+import { heightRelationshipView, HeightRelationshipView } from 'src/app/services/block-intelligence/height-relationship';
 
 /** Compact Stability Lab entry (2K): shown only when a session is active or
  *  completed sessions exist. */
@@ -289,6 +290,21 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
       case 'warn': return 'nx-pill-warn';
       default: return 'nx-pill-neutral';
     }
+  }
+
+  /**
+   * Honest relationship between the latest MINED network block (from Block
+   * Intelligence) and the miner's CURRENT WORK HEIGHT (`info.blockHeight`, the
+   * candidate it is hashing toward). Returns null when it cannot be computed, so
+   * the normal N vs N+1 difference is explained rather than mistaken for a stale
+   * block. Never an alarm.
+   */
+  public workHeightRelation(info: ISystemInfo): HeightRelationshipView | null {
+    if (!this.blockGlance.hasData || this.blockGlance.height == null) {
+      return null;
+    }
+    const view = heightRelationshipView(this.blockGlance.height, info.blockHeight);
+    return view.state === 'unavailable' ? null : view;
   }
 
   ngOnDestroy(): void {

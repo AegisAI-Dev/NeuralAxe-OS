@@ -67,7 +67,7 @@
     <!-- ===================== Top summary + metrics + session ===================== -->
     <section class="nx-bi-summary" aria-label="Network summary">
       <div class="nx-bi-stat">
-        <span class="nx-bi-stat-k">Latest block</span>
+        <span class="nx-bi-stat-k">Latest Mined Block</span>
         <span class="nx-bi-stat-v">{{ summary.latestHeight }}</span>
         <span class="nx-bi-stat-s">{{ summary.latestAgeText }} old</span>
       </div>
@@ -252,11 +252,32 @@
           <div class="nx-attr-kv">
             <div *ngIf="detail.attribution.providerLabel"><span class="nx-k">Provider label</span><span class="nx-v">{{ detail.attribution.providerLabel }}</span></div>
             <div><span class="nx-k">Method</span><span class="nx-v">{{ detail.attribution.method }}</span></div>
-            <div *ngIf="detail.attribution.evidence.coinbaseTagAscii"><span class="nx-k">Coinbase tag</span><span class="nx-v nx-mono nx-break">{{ detail.attribution.evidence.coinbaseTagAscii }}</span></div>
             <div><span class="nx-k">Source</span><span class="nx-v">{{ detail.attribution.source }}</span></div>
             <div><span class="nx-k">Configured pool</span><span class="nx-v">{{ detailMatchLabel(detail) }}</span></div>
           </div>
           <p class="nx-attr-reason nx-dim">{{ detail.attribution.evidence.reason }}</p>
+
+          <!-- Coinbase evidence, sanitized (2L.1): readable / escaped / optional bounded hex.
+               Values are plain text — never innerHTML, never raw binary, never replacement-char noise. -->
+          <div class="nx-coinbase" *ngIf="detail.attribution.evidence.coinbase as cb">
+            <h4>Coinbase evidence</h4>
+            <div class="nx-attr-kv">
+              <div><span class="nx-k">Readable tag</span><span class="nx-v nx-break" [class.nx-dim]="!cb.hasReadable">{{ cb.hasReadable ? cb.readable : 'no readable ASCII in coinbase' }}</span></div>
+              <div><span class="nx-k">Escaped</span><span class="nx-v nx-mono nx-break">{{ cb.escaped }}</span></div>
+              <div *ngIf="cb.originalLength"><span class="nx-k">Length</span><span class="nx-v">{{ cb.originalLength }} bytes<span *ngIf="cb.truncated"> · preview bounded</span></span></div>
+            </div>
+            <div class="nx-coinbase-hex" *ngIf="cb.hex">
+              <button type="button" class="nx-link-btn" (click)="showCoinbaseHex = !showCoinbaseHex"
+                      [attr.aria-expanded]="showCoinbaseHex" aria-controls="nx-coinbase-hexval">
+                {{ showCoinbaseHex ? 'Hide bounded hex' : 'Show bounded hex' }}
+              </button>
+              <code id="nx-coinbase-hexval" class="nx-mono nx-break nx-coinbase-hexval" *ngIf="showCoinbaseHex">{{ cb.hex }}</code>
+            </div>
+            <p class="nx-dim nx-coinbase-note">
+              Coinbase transactions may contain binary and non-printable data. NeuralAxe shows a sanitized preview
+              while preserving bounded evidence for attribution.
+            </p>
+          </div>
         </div>
 
         <p class="nx-bi-disclaimer nx-drawer-disclaimer">

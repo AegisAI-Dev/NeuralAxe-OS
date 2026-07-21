@@ -51,8 +51,8 @@ export function normalizeEsploraBlock(raw: any, source: string, fetchedAtMs: num
   const attribution = deriveAttribution({
     providerPoolName: null,
     providerSlug: null,
-    coinbaseTagAscii: null,
-    coinbaseTagId: null,
+    coinbaseAscii: null,
+    coinbaseHex: null,
     providerMatchRate: null,
   }, source);
 
