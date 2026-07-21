@@ -44,6 +44,7 @@ export class AppMenuComponent implements OnInit {
         label: 'Configuration',
         items: [
           { label: 'Pools', icon: 'pi pi-fw pi-server', routerLink: ['pool'] },
+          { label: 'Pool Strategy', icon: 'pi pi-fw pi-sync', routerLink: ['pool-strategy'] },
           { label: 'Network', icon: 'pi pi-fw pi-wifi', routerLink: ['network'] },
           { label: 'Tuning & Thermal', icon: 'pi pi-fw pi-sliders-h', routerLink: ['settings'] },
           { label: 'Stability Lab', icon: 'pi pi-fw pi-bolt', routerLink: ['stability-lab'] },

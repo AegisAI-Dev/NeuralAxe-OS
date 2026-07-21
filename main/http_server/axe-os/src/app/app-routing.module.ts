@@ -15,9 +15,11 @@ import { PoolComponent } from './components/pool/pool.component';
 import { AppLayoutComponent } from './layout/app.layout.component';
 import { ApModeGuard } from './guards/ap-mode.guard';
 import { StabilityLabGuard } from './guards/stability-lab.guard';
+import { PoolSwitchGuard } from './guards/pool-switch.guard';
 import { CommandDeckComponent } from './components/command-deck/command-deck.component';
 import { StabilityLabComponent } from './components/stability-lab/stability-lab.component';
 import { BlockIntelligenceComponent } from './components/block-intelligence/block-intelligence.component';
+import { PoolStrategyComponent } from './components/pool-strategy/pool-strategy.component';
 
 const TITLE_PREFIX = 'NeuralAxe OS';
 
@@ -103,6 +105,12 @@ const routes: Routes = [
         path: 'pool',
         component: PoolComponent,
         title: `${TITLE_PREFIX} Pool`,
+      },
+      {
+        path: 'pool-strategy',
+        component: PoolStrategyComponent,
+        title: `${TITLE_PREFIX} Pool Strategy`,
+        canDeactivate: [PoolSwitchGuard],
       },
       {
         path: 'about',

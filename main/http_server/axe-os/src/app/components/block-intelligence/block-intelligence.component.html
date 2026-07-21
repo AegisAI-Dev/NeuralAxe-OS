@@ -31,6 +31,22 @@
     </p>
   </section>
 
+  <!-- ===================== Chain context banner (Phase 2M, Stage 11) ===================== -->
+  <section class="nx-bi-banner nx-warn" *ngIf="bchContext" role="status">
+    <i class="pi pi-info-circle" aria-hidden="true"></i>
+    <div>
+      <b>This miner is using a BCH-labelled pool profile. The current Block Intelligence provider displays Bitcoin network data.</b>
+      <p class="nx-dim">Configured-pool match claims are hidden here — a Bitcoin-network match would not describe your active BCH pool. This Bitcoin data remains available as explicitly out-of-context public information.</p>
+    </div>
+  </section>
+  <section class="nx-bi-banner" *ngIf="customContext" role="status">
+    <i class="pi pi-info-circle" aria-hidden="true"></i>
+    <div>
+      <b>Chain matching is unavailable.</b>
+      <p class="nx-dim">The active pool profile is labelled Custom / Unknown, so configured-pool matches against Bitcoin blocks are not shown as chain-confirmed.</p>
+    </div>
+  </section>
+
   <!-- ===================== Replaced-tip notice (Stage 15) ===================== -->
   <section class="nx-bi-banner nx-warn" *ngIf="tipReplaced" role="status">
     <i class="pi pi-sync" aria-hidden="true"></i>
@@ -81,12 +97,12 @@
         <span class="nx-bi-stat-v nx-bi-stat-v-sm">{{ summary.shortestText }} – {{ summary.longestText }}</span>
         <span class="nx-bi-stat-s">{{ summary.perHourText }} observed</span>
       </div>
-      <div class="nx-bi-stat">
+      <div class="nx-bi-stat" *ngIf="showConfiguredMatches">
         <span class="nx-bi-stat-k">Active-pool blocks</span>
         <span class="nx-bi-stat-v" [class.nx-accent-ok]="summary.activeCount > 0">{{ summary.activeCount }}</span>
         <span class="nx-bi-stat-s">of {{ summary.blockCount }} in window</span>
       </div>
-      <div class="nx-bi-stat">
+      <div class="nx-bi-stat" *ngIf="showConfiguredMatches">
         <span class="nx-bi-stat-k">Fallback-pool blocks</span>
         <span class="nx-bi-stat-v" [class.nx-accent-info]="summary.fallbackCount > 0">{{ summary.fallbackCount }}</span>
         <span class="nx-bi-stat-s">{{ summary.unknownCount }} unknown</span>
@@ -120,7 +136,7 @@
           <div class="nx-tl-pool" [title]="row.poolLabel">{{ row.poolLabel }}</div>
           <div class="nx-tl-badges">
             <span class="nx-pill nx-pill-sm" [ngClass]="pillClass(row.confidenceSeverity)">{{ row.confidenceText }}</span>
-            <span class="nx-pill nx-pill-sm" *ngIf="row.matchNotable" [ngClass]="matchPillClass(row.matchKind)">{{ row.matchLabel }}</span>
+            <span class="nx-pill nx-pill-sm" *ngIf="row.matchNotable && showConfiguredMatches" [ngClass]="matchPillClass(row.matchKind)">{{ row.matchLabel }}</span>
           </div>
           <div class="nx-tl-foot nx-dim">
             <span *ngIf="row.txText !== '—'">{{ row.txText }} tx</span>
@@ -158,8 +174,11 @@
               </td>
               <td><span class="nx-pill nx-pill-sm" [ngClass]="pillClass(row.confidenceSeverity)">{{ row.confidenceText }}</span></td>
               <td>
-                <span class="nx-pill nx-pill-sm" *ngIf="row.matchNotable" [ngClass]="matchPillClass(row.matchKind)">{{ row.matchLabel }}</span>
-                <span class="nx-dim" *ngIf="!row.matchNotable">{{ row.matchLabel }}</span>
+                <ng-container *ngIf="showConfiguredMatches; else matchOutOfContext">
+                  <span class="nx-pill nx-pill-sm" *ngIf="row.matchNotable" [ngClass]="matchPillClass(row.matchKind)">{{ row.matchLabel }}</span>
+                  <span class="nx-dim" *ngIf="!row.matchNotable">{{ row.matchLabel }}</span>
+                </ng-container>
+                <ng-template #matchOutOfContext><span class="nx-dim">out of context</span></ng-template>
               </td>
               <td class="nx-num">{{ row.feesText }}</td>
               <td class="nx-num">{{ row.txText }}</td>

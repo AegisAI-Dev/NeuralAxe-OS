@@ -36,6 +36,9 @@ import { LocalStorageService } from 'src/app/local-storage.service';
 import { BlockIntelligenceService } from 'src/app/services/block-intelligence/block-intelligence.service';
 import { BlockIntelligenceSnapshot } from 'src/app/services/block-intelligence/block-intelligence.model';
 import { BlockDeckGlance, blockDeckGlance, freshnessSeverity } from './block-deck';
+import { PoolStrategyService } from 'src/app/services/pool-strategy.service';
+import { ChainContext } from '../pool-strategy/pool-chain';
+import { PoolDeckGlance, poolDeckGlance } from '../pool-strategy/pool-deck';
 import { confidenceSeverity } from 'src/app/services/block-intelligence/attribution';
 import { formatAgeShort, formatInterval } from 'src/app/services/block-intelligence/block-format';
 import { heightRelationshipView, HeightRelationshipView } from 'src/app/services/block-intelligence/height-relationship';
@@ -153,6 +156,10 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
   public readonly fmtAge = formatAgeShort;
   public readonly fmtInterval = formatInterval;
 
+  /** Compact Pool Strategy glance (2M); chain context + last switch + restore. */
+  public chainContext: ChainContext | null = null;
+  public poolGlance: PoolDeckGlance | null = null;
+
   constructor(
     private liveDataService: LiveDataService,
     private systemService: SystemApiService,
@@ -160,6 +167,7 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
     private toastr: ToastrService,
     private localStorageService: LocalStorageService,
     private blockIntel: BlockIntelligenceService,
+    private poolStrategy: PoolStrategyService,
   ) {
     this.info$ = this.liveDataService.info$;
     this.connected$ = this.liveDataService.connected$;
@@ -262,7 +270,31 @@ export class CommandDeckComponent implements OnInit, OnDestroy {
     // Keep the glance age current without any extra polling.
     timer(15000, 15000).pipe(takeUntil(this.destroy$)).subscribe(() => {
       this.blockGlance = blockDeckGlance(this.lastBlockSnapshot, Date.now());
+      this.rebuildPoolGlance();
     });
+
+    // Shared chain context (2M) — the honest chain label, never a hostname guess.
+    this.poolStrategy.chainContext$.pipe(takeUntil(this.destroy$)).subscribe(ctx => {
+      this.chainContext = ctx;
+      this.rebuildPoolGlance();
+    });
+  }
+
+  private rebuildPoolGlance(): void {
+    if (!this.chainContext) {
+      return;
+    }
+    this.poolGlance = poolDeckGlance({
+      context: this.chainContext,
+      history: this.poolStrategy.listHistory(),
+      restoreAvailable: !!this.poolStrategy.getRestoreSnapshot(),
+      switchActive: this.poolStrategy.wasSwitchInterrupted(),
+    });
+  }
+
+  /** Suppress Bitcoin block match claims while a BCH-labelled profile is active (2M / Stage 11). */
+  public get suppressBlockMatch(): boolean {
+    return this.poolGlance?.suppressBitcoinMatch ?? false;
   }
 
   /** Last block snapshot retained so the age ticker can re-derive the glance. */

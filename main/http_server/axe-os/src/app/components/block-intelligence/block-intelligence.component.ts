@@ -14,6 +14,8 @@ import { Observable, Subject, timer } from 'rxjs';
 import { takeUntil } from 'rxjs/operators';
 import { NEURALAXE } from 'src/app/neuralaxe';
 import { BlockIntelligenceService } from 'src/app/services/block-intelligence/block-intelligence.service';
+import { PoolStrategyService } from 'src/app/services/pool-strategy.service';
+import { ChainContext, deriveChainContext } from 'src/app/components/pool-strategy/pool-chain';
 import {
   AttributionConfidence,
   BlockDetail,
@@ -145,11 +147,40 @@ export class BlockIntelligenceComponent implements OnInit, OnDestroy {
   public readonly fmtAge = formatAgeShort;
   public readonly fmtUtc = formatUtc;
 
-  constructor(private service: BlockIntelligenceService) {
+  /**
+   * Active chain context (Phase 2M, Stage 11). Block Intelligence shows the
+   * Bitcoin network; when a BCH-labelled profile is active we present a context
+   * banner and suppress configured-pool match claims (they would be misleading
+   * against Bitcoin blocks). BTC / no-profile keep the normal 2L behavior.
+   */
+  public chainContext: ChainContext = deriveChainContext(null, null);
+
+  constructor(
+    private service: BlockIntelligenceService,
+    private poolStrategy: PoolStrategyService,
+  ) {
     this.snapshot$ = this.service.snapshot$;
   }
 
+  /** BCH-labelled profile active → Bitcoin data is explicitly out-of-context. */
+  public get bchContext(): boolean {
+    return this.chainContext.labelled && this.chainContext.chain === 'BCH';
+  }
+
+  /** Custom-labelled profile active → chain matching is unavailable. */
+  public get customContext(): boolean {
+    return this.chainContext.labelled && this.chainContext.chain === 'custom';
+  }
+
+  /** Match claims are shown unless a non-BTC profile is actively labelled. */
+  public get showConfiguredMatches(): boolean {
+    return !(this.chainContext.labelled && this.chainContext.chain !== 'BTC');
+  }
+
   ngOnInit(): void {
+    this.poolStrategy.chainContext$.pipe(takeUntil(this.destroy$)).subscribe((ctx) => {
+      this.chainContext = ctx;
+    });
     this.snapshot$.pipe(takeUntil(this.destroy$)).subscribe((snap) => {
       this.now = Date.now();
       this.detectEvents(snap);

@@ -1,0 +1,409 @@
+<div class="layout-main nx-pool-strategy" *ngIf="info$ | async as info">
+  <h2 class="nx-page-title">Pool Strategy Center</h2>
+  <p class="nx-page-desc">
+    Create labelled BTC / BCH / Custom pool profiles and switch between them safely. Every switch is
+    reviewed before it runs, verified after reconnect, and rolled back automatically if it cannot be
+    confirmed. This is controlled pool orchestration — it never selects a chain for you, never moves
+    funds, and never mines automatic profitability decisions.
+  </p>
+  <p class="nx-page-desc nx-dim"><i class="pi pi-info-circle"></i> {{ disclaimer }}</p>
+
+  <!-- Interrupted-switch recovery (Blocker 4): honest, telemetry-driven, never "Complete" -->
+  <div class="card nx-note nx-note-warn" *ngIf="interruptedNotice && interruptionRecovery as rec">
+    <i class="pi pi-exclamation-triangle"></i>
+    <b>{{ rec.headline }}</b>
+    <p style="margin:0.4rem 0">{{ rec.detail }}</p>
+    <div class="nx-note" *ngIf="rec.passwordNote" style="margin:0.4rem 0">{{ rec.passwordNote }}</div>
+    <div class="flex gap-2 mt-2">
+      <button pButton type="button" class="p-button-secondary" [disabled]="isActiveState() || !rec.canRetryRollback" (click)="retryInterruptionRollback()">Retry rollback (reapply original)</button>
+      <button pButton type="button" class="p-button-secondary" (click)="verifyCurrentConfiguration()">Verify current configuration</button>
+      <button pButton type="button" class="p-button-text" (click)="dismissInterruption()">Dismiss</button>
+    </div>
+  </div>
+  <div class="card nx-note nx-note-warn" *ngIf="interruptedNotice && !interruptionRecovery">
+    <i class="pi pi-exclamation-triangle"></i>
+    <b>Pool switch interrupted.</b>
+    A previous switch was cut off before it finished cleanly. Verify the pool configuration on the Pools page.
+    <button class="nx-chip" (click)="dismissInterruption()">Dismiss</button>
+  </div>
+
+  <!-- ===================== TOP STATUS ROW ===================== -->
+  <div class="nx-lab-top">
+    <!-- Active chain context -->
+    <div class="card nx-lab-card">
+      <div class="nx-card-title nx-cyan">Active chain context</div>
+      <div class="nx-lab-state">
+        <span class="nx-pill" [ngClass]="chainContext.labelled ? chainSeverityClass($any(chainContext.chain)) : 'nx-pill-neutral'">
+          {{ chainContext.label }}
+        </span>
+        <span class="nx-pill nx-pill-ok" *ngIf="chainContext.verified"><i class="pi pi-check"></i> verified</span>
+      </div>
+      <p class="nx-lab-detail" *ngIf="chainContext.profileName">Profile: <b>{{ chainContext.profileName }}</b></p>
+      <p class="nx-lab-detail">{{ chainContext.detail }}</p>
+    </div>
+
+    <!-- Device / pair -->
+    <div class="card nx-lab-card" [ngClass]="(preflightResult?.supported?.supported) ? 'nx-lab-ok' : 'nx-lab-block'">
+      <div class="nx-card-title">Device</div>
+      <div class="nx-lab-devclass" [ngClass]="preflightResult?.supported?.supported ? 'nx-ok-text' : 'nx-warn-text'">
+        <i class="pi" [ngClass]="preflightResult?.supported?.supported ? 'pi-check-circle' : 'pi-ban'"></i>
+        <b>{{ preflightResult?.supported?.label || 'Awaiting device' }}</b>
+      </div>
+      <div class="nx-lab-fresh" [ngClass]="online ? 'nx-ok-text' : 'nx-warn-text'">
+        <i class="pi" [ngClass]="online ? 'pi-circle-fill' : 'pi-exclamation-circle'"></i>
+        <span>{{ freshness.reason }}</span>
+      </div>
+      <p class="nx-lab-detail" *ngIf="pairStatus">{{ pairStatus.primary }} — {{ pairStatus.secondary }}</p>
+    </div>
+
+    <!-- Switch state -->
+    <div class="card nx-lab-card">
+      <div class="nx-card-title nx-cyan">Switch state</div>
+      <div class="nx-lab-state">
+        <span class="nx-pill"
+          [ngClass]="snapshot.state === 'complete' ? 'nx-pill-ok' : (snapshot.state === 'failed' || snapshot.state === 'interrupted' ? 'nx-pill-err' : (isActiveState() ? 'nx-pill-info' : 'nx-pill-neutral'))">
+          {{ switchStateLabel(snapshot.state) }}
+        </span>
+      </div>
+      <p class="nx-lab-detail">{{ switchStateExplanation(snapshot.state) }}</p>
+      <p class="nx-lab-detail nx-warn-text" *ngIf="snapshot.reason && snapshot.state !== 'complete'">{{ snapshot.reason }}</p>
+    </div>
+  </div>
+
+  <!-- Timed-session capability (deferred, honest) -->
+  <div class="card nx-note">
+    <b><i class="pi pi-clock"></i> Timed pool sessions are not available yet.</b>
+    A flow like “mine BCH for six hours, then restore BTC” needs the switch and the timed restore to run
+    on the device itself. NeuralAxe has no on-device pool scheduler today, and a browser timer cannot be
+    trusted — it stops when this tab is closed, the PC sleeps, or Wi-Fi drops, and would leave the wrong
+    pool active. Rather than present an unreliable timer as an autonomous schedule, timed sessions are
+    deferred to a proposed firmware sub-phase. Manual switching, verification, rollback and restore are
+    fully available below.
+  </div>
+
+  <!-- ===================== PREFLIGHT (when a profile is selected) ===================== -->
+  <div class="card" *ngIf="preflightResult as pf">
+    <div class="nx-card-title">Preflight</div>
+    <p class="nx-page-desc" style="margin:0 0 0.8rem">
+      Every precondition is checked explicitly — a switch starts only when all applicable checks pass.
+      There is no hidden score.
+    </p>
+    <div class="nx-lab-checks">
+      <div class="nx-lab-check" *ngFor="let c of pf.checks"
+        [ngClass]="!c.applicable ? 'nx-lab-na' : (c.ok ? 'nx-lab-pass' : 'nx-lab-fail')">
+        <i class="pi" [ngClass]="!c.applicable ? 'pi-minus-circle' : (c.ok ? 'pi-check-circle' : 'pi-times-circle')"></i>
+        <div>
+          <b>{{ c.label }}</b>
+          <small>{{ c.detail }}</small>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== PROFILES ===================== -->
+  <div class="card">
+    <div class="nx-card-title">
+      Pool profiles
+      <span class="nx-dim" style="font-weight:400"> ({{ profiles.length }} / {{ profileLimits.maxProfiles }})</span>
+      <button class="nx-chip" style="float:right" (click)="openNewProfile()" [disabled]="profiles.length >= profileLimits.maxProfiles">
+        <i class="pi pi-plus"></i> New profile
+      </button>
+    </div>
+
+    <p class="nx-page-desc" *ngIf="profiles.length === 0" style="margin:0.4rem 0">
+      No profiles yet. Create one from scratch, or start from your current device configuration below.
+    </p>
+
+    <div class="nx-lab-starters" *ngIf="profiles.length === 0 || starters.length">
+      <button class="nx-lab-starter" *ngFor="let s of starters" (click)="useStarter(s)">
+        <b>{{ s.label }}</b>
+        <small>{{ s.description }}</small>
+      </button>
+    </div>
+    <ul class="nx-lab-starter-notes" *ngIf="starterNotes.length">
+      <li *ngFor="let n of starterNotes"><i class="pi pi-info-circle"></i> {{ n }}</li>
+    </ul>
+
+    <div class="nx-pool-list">
+      <div class="card nx-pool-profile" *ngFor="let p of profiles; trackBy: trackById">
+        <div class="nx-pool-profile-head">
+          <b>{{ p.name }}</b>
+          <span class="nx-pill" [ngClass]="chainSeverityClass(p.chain)">{{ chainShortFn(p.chain) }}</span>
+          <span class="nx-pill nx-pill-ok" *ngIf="chainContext.profileName === p.name && chainContext.verified">Active</span>
+        </div>
+        <div class="nx-kv">
+          <div class="nx-kv-row"><label>Primary</label><b sensitive-data class="nx-ellipsis">{{ maskHost(p.primary.host) }}:{{ p.primary.port }}</b></div>
+          <div class="nx-kv-row"><label>Account</label><b sensitive-data class="nx-ellipsis">{{ maskAccount(p.primary.user) }}</b></div>
+          <div class="nx-kv-row" *ngIf="hasFallback(p)"><label>Fallback</label><b sensitive-data class="nx-ellipsis">{{ maskHost(p.fallback!.host) }}:{{ p.fallback!.port }}</b></div>
+          <div class="nx-kv-row" *ngIf="!hasFallback(p)"><label>Fallback</label><b class="nx-dim">mirrors primary (on-chain failover)</b></div>
+          <div class="nx-kv-row"><label>Password</label><b>{{ maskPassword(p.primary) }}</b></div>
+        </div>
+        <ul class="nx-lab-reasons" *ngIf="profileErrors(p).length">
+          <li *ngFor="let e of profileErrors(p)">{{ e }}</li>
+        </ul>
+        <div class="flex gap-2 mt-2">
+          <button pButton type="button" [disabled]="isActiveState() || !profileUsable(p)" (click)="reviewSwitch(p)">
+            <i class="pi pi-sync"></i>&nbsp; Switch to this profile
+          </button>
+          <button pButton type="button" class="p-button-secondary" [disabled]="isActiveState()" (click)="editProfile(p)">Edit</button>
+          <button pButton type="button" class="p-button-danger p-button-text" [disabled]="isActiveState()" (click)="removeProfile(p)">Remove</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== ACTIVE SWITCH PANEL ===================== -->
+  <div class="card" *ngIf="isActiveState() || snapshot.state === 'complete' || snapshot.state === 'failed'">
+    <div class="nx-card-title nx-cyan">Switch progress</div>
+    <p class="nx-lab-detail">
+      Target: <b>{{ snapshot.targetProfileName || '—' }}</b>
+      <span class="nx-pill" *ngIf="snapshot.targetChain" [ngClass]="chainSeverityClass($any(snapshot.targetChain))">{{ chainShortFn($any(snapshot.targetChain)) }}</span>
+    </p>
+
+    <!-- Verification evidence -->
+    <div class="nx-lab-checks" *ngIf="verification">
+      <div class="nx-lab-check" *ngFor="let v of verificationRows()"
+        [ngClass]="v.ok ? 'nx-lab-pass' : (v.required ? 'nx-lab-fail' : 'nx-lab-na')">
+        <i class="pi" [ngClass]="v.ok ? 'pi-check-circle' : (v.required ? 'pi-spinner' : 'pi-minus-circle')"></i>
+        <div>
+          <b>{{ v.label }}</b>
+          <small>{{ v.detail }}</small>
+        </div>
+      </div>
+    </div>
+
+    <!-- Rollback / restore outcome -->
+    <div class="nx-note nx-note-warn mt-2" *ngIf="snapshot.rollbackResult">
+      <b>Rollback:</b> {{ rollbackResultText(snapshot.rollbackResult) }}.
+      The device was returned to your captured original configuration.
+    </div>
+    <div class="nx-note mt-2" *ngIf="snapshot.restoreResult">
+      <b>Restore:</b> {{ snapshot.restoreResult }}.
+    </div>
+
+    <!-- Timeline -->
+    <details class="nx-pool-timeline mt-2">
+      <summary>State timeline ({{ snapshot.timeline.length }})</summary>
+      <ol>
+        <li *ngFor="let t of snapshot.timeline; trackBy: trackByIndex">
+          <b>{{ switchStateLabel(t.state) }}</b><span *ngIf="t.note"> — {{ t.note }}</span>
+        </li>
+      </ol>
+    </details>
+
+    <div class="flex gap-2 mt-3">
+      <button pButton type="button" class="p-button-danger" *ngIf="isActiveState()" (click)="abortSwitch()">Abort</button>
+      <button pButton type="button" class="p-button-secondary" *ngIf="snapshot.state === 'failed'" (click)="retryRollback()">Retry rollback</button>
+      <button pButton type="button" class="p-button-secondary" *ngIf="isTerminalState()" (click)="resetSwitch()">Done</button>
+      <button pButton type="button" *ngIf="snapshot.state === 'complete' && canRestore" (click)="openRestore()">
+        <i class="pi pi-history"></i>&nbsp; Restore previous pool configuration
+      </button>
+    </div>
+  </div>
+
+  <!-- ===================== RESTORE AVAILABILITY (idle) ===================== -->
+  <div class="card" *ngIf="snapshot.state === 'idle' && restoreSnapshot">
+    <div class="nx-card-title">Restore previous pool configuration</div>
+    <p class="nx-lab-detail">
+      A previous configuration is saved (captured {{ fmtTime(restoreSnapshot.capturedAt) }}) and can be
+      restored until it expires.
+    </p>
+    <div class="nx-note nx-note-warn" *ngIf="restoreSnapshot.passwordWasReplaced">
+      The last switch replaced a pool password. The original password cannot be recovered (it is
+      write-only on the device) — restoring sets the original host / account but keeps the current
+      password. Re-enter the original password on the Pools page if that pool needs it.
+    </div>
+    <div class="flex gap-2 mt-2">
+      <button pButton type="button" [disabled]="!canRestore" (click)="openRestore()">Restore</button>
+      <button pButton type="button" class="p-button-secondary" (click)="dismissRestore()">Dismiss snapshot</button>
+    </div>
+  </div>
+
+  <!-- ===================== HISTORY ===================== -->
+  <div class="card" *ngIf="history.length">
+    <div class="nx-card-title">
+      Switch history
+      <span class="nx-dim" style="font-weight:400"> ({{ history.length }})</span>
+      <span style="float:right">
+        <button class="nx-chip" (click)="exportHistory('json')">Export JSON</button>
+        <button class="nx-chip" (click)="exportHistory('md')">Export Markdown</button>
+        <button class="nx-chip" (click)="clearHistory()">Clear</button>
+      </span>
+    </div>
+    <p class="nx-page-desc nx-dim" style="margin:0 0 0.6rem">
+      Sanitized and local to this browser — no wallet, worker or password values are ever stored or exported.
+    </p>
+    <div class="nx-pool-history">
+      <div class="nx-pool-history-row" *ngFor="let r of history; trackBy: trackById">
+        <div>
+          <b>{{ r.sourceChain }} → {{ r.targetChain }}</b>
+          <small class="nx-dim">{{ fmtTime(r.startedAt) }}</small>
+        </div>
+        <div>
+          <span class="nx-pill" [ngClass]="r.finalState === 'complete' ? 'nx-pill-ok' : (r.finalState === 'failed' ? 'nx-pill-err' : 'nx-pill-neutral')">{{ r.finalState }}</span>
+          <span class="nx-pill nx-pill-warn" *ngIf="r.rollbackResult">rollback {{ r.rollbackResult }}</span>
+        </div>
+        <div class="nx-dim">{{ r.targetProfileName || '—' }}</div>
+        <button class="nx-chip" (click)="deleteHistory(r.id)">Delete</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== PROFILE EDITOR DIALOG ===================== -->
+<p-dialog header="Pool profile" [(visible)]="editorOpen" [modal]="true" [style]="{ width: '640px', maxWidth: '95vw' }" [dismissableMask]="false">
+  <div class="nx-lab-editor" *ngIf="editorOpen">
+    <div class="nx-lab-field">
+      <label>Name</label>
+      <input type="text" pInputText [(ngModel)]="editor.name" [maxlength]="profileLimits.maxNameLength" placeholder="e.g. BTC Solo CKPool" />
+    </div>
+    <div class="nx-lab-field">
+      <label>Chain label</label>
+      <p-dropdown [options]="chainOptions" optionLabel="label" optionValue="value" [(ngModel)]="editor.chain" appendTo="body"></p-dropdown>
+      <small class="nx-dim">The label is yours — NeuralAxe never infers a chain from a hostname.</small>
+    </div>
+
+    <h4 class="nx-cyan" style="margin:0.6rem 0 0.2rem">Primary pool</h4>
+    <div class="nx-lab-field"><label>Host</label><input type="text" pInputText [(ngModel)]="editor.primary.host" placeholder="pool host (no protocol, no :port)" /></div>
+    <div class="nx-lab-field"><label>Port</label><input type="number" pInputText [(ngModel)]="editor.primary.port" min="0" max="65535" /></div>
+    <div class="nx-lab-field"><label>User / account</label><input type="text" pInputText [(ngModel)]="editor.primary.user" placeholder="wallet.worker or account" /></div>
+    <div class="nx-lab-field">
+      <label>Password</label>
+      <p-dropdown [options]="[{label:'Keep current (recommended)',value:'keep'},{label:'Replace at switch time',value:'set'}]" optionLabel="label" optionValue="value" [(ngModel)]="editor.primary.passwordMode" appendTo="body"></p-dropdown>
+      <small class="nx-dim">The password is NEVER stored in a profile. “Keep” leaves the device's password unchanged; “Replace” means you'll type the new password (and the current one, for rollback) when you switch.</small>
+    </div>
+    <div class="flex gap-2">
+      <div class="nx-lab-field" style="flex:1"><label>Protocol</label><p-dropdown [options]="protocolOptions" [(ngModel)]="editor.primary.protocol" appendTo="body"></p-dropdown></div>
+      <div class="nx-lab-field" style="flex:1"><label>TLS</label><p-dropdown [options]="tlsOptions" optionLabel="label" optionValue="value" [(ngModel)]="editor.primary.tls" appendTo="body"></p-dropdown></div>
+    </div>
+
+    <label class="flex gap-2 mt-2" style="align-items:center">
+      <p-checkbox [(ngModel)]="editor.fallbackEnabled" [binary]="true"></p-checkbox> Configure a separate fallback pool
+    </label>
+    <ng-container *ngIf="editor.fallbackEnabled">
+      <div class="nx-lab-field"><label>Fallback host</label><input type="text" pInputText [(ngModel)]="editor.fallback.host" /></div>
+      <div class="nx-lab-field"><label>Fallback port</label><input type="number" pInputText [(ngModel)]="editor.fallback.port" min="0" max="65535" /></div>
+      <div class="nx-lab-field"><label>Fallback user / account</label><input type="text" pInputText [(ngModel)]="editor.fallback.user" /></div>
+      <div class="nx-lab-field">
+        <label>Fallback password</label>
+        <p-dropdown [options]="[{label:'Keep current',value:'keep'},{label:'Replace at switch time',value:'set'}]" optionLabel="label" optionValue="value" [(ngModel)]="editor.fallback.passwordMode" appendTo="body"></p-dropdown>
+      </div>
+    </ng-container>
+
+    <div class="nx-lab-field"><label>Notes (optional)</label><input type="text" pInputText [(ngModel)]="editor.notes" [maxlength]="profileLimits.maxNotesLength" /></div>
+
+    <ul class="nx-lab-reasons" *ngIf="editorErrors().length">
+      <li *ngFor="let e of editorErrors()">{{ e }}</li>
+    </ul>
+    <p class="nx-warn-text" *ngIf="editorDuplicate()">A profile with this name or the same primary pool already exists.</p>
+
+    <div class="flex gap-2 mt-3">
+      <button pButton type="button" class="p-button-secondary" (click)="cancelEditor()">Cancel</button>
+      <button pButton type="button" [disabled]="!canSaveEditor()" (click)="saveEditor()">Save profile</button>
+    </div>
+  </div>
+</p-dialog>
+
+<!-- ===================== SWITCH CONFIRM DIALOG ===================== -->
+<p-dialog header="Switch pool profile" [(visible)]="showConfirm" [modal]="true" [style]="{ width: '680px', maxWidth: '95vw' }" [dismissableMask]="false">
+  <ng-container *ngIf="review as rv">
+    <div class="nx-note" style="margin-bottom:0.7rem">
+      <b>{{ rv.currentChainLabel }}</b> → <b>{{ rv.targetChainLabel }}</b>
+    </div>
+
+    <h4 class="nx-cyan" style="margin:0.4rem 0 0.2rem">Primary pool changes</h4>
+    <div class="nx-kv">
+      <div class="nx-kv-row" *ngFor="let d of rv.primary">
+        <label>{{ d.label }}</label>
+        <b [ngClass]="d.changed ? 'nx-cyan' : 'nx-dim'">
+          {{ d.fromDisplay }} <i class="pi pi-arrow-right" *ngIf="d.changed" style="font-size:0.7rem"></i>
+          <span *ngIf="d.changed"> {{ d.toDisplay }}</span>
+          <span *ngIf="!d.changed"> (unchanged)</span>
+        </b>
+      </div>
+    </div>
+
+    <h4 class="nx-cyan" style="margin:0.6rem 0 0.2rem">Fallback pool changes</h4>
+    <p class="nx-dim" *ngIf="rv.fallbackMirrored" style="margin:0 0 0.3rem">No separate fallback — the primary is mirrored so failover stays on the same chain.</p>
+    <div class="nx-kv">
+      <div class="nx-kv-row" *ngFor="let d of rv.fallback">
+        <label>{{ d.label }}</label>
+        <b [ngClass]="d.changed ? 'nx-cyan' : 'nx-dim'">
+          {{ d.fromDisplay }} <i class="pi pi-arrow-right" *ngIf="d.changed" style="font-size:0.7rem"></i>
+          <span *ngIf="d.changed"> {{ d.toDisplay }}</span>
+          <span *ngIf="!d.changed"> (unchanged)</span>
+        </b>
+      </div>
+    </div>
+
+    <div class="nx-note nx-note-warn mt-2" *ngFor="let w of rv.warnings">{{ w }}</div>
+
+    <!-- Replace-password secret entry (Blocker 1/2): session-only, never stored. -->
+    <ng-container *ngIf="profileReplacesPassword">
+      <h4 class="nx-cyan" style="margin:0.6rem 0 0.2rem">Passwords (entered now, never stored)</h4>
+      <ng-container *ngIf="!pwd.keepOverride; else keptChoice">
+        <div class="nx-lab-field">
+          <label>New target password</label>
+          <input type="password" pInputText [(ngModel)]="pwd.target" placeholder="password for the target pool" autocomplete="new-password" />
+        </div>
+        <div class="nx-lab-field" *ngIf="fallbackNeedsPassword">
+          <label>New fallback password</label>
+          <input type="password" pInputText [(ngModel)]="pwd.targetFallback" autocomplete="new-password" />
+        </div>
+        <div class="nx-lab-field">
+          <label>Current pool password (for rollback)</label>
+          <input type="password" pInputText [(ngModel)]="pwd.current" placeholder="the password currently on the device" autocomplete="off" />
+          <small class="nx-dim">Kept only for this operation and wiped afterwards. It lets a rollback restore the original credentials.</small>
+        </div>
+        <div class="nx-note nx-note-warn" *ngIf="replacePasswordBlockerText">
+          {{ replacePasswordBlockerText }}
+          <div class="mt-2"><button pButton type="button" class="p-button-secondary" (click)="useKeepCurrentPassword()">Keep current password instead</button></div>
+        </div>
+      </ng-container>
+      <ng-template #keptChoice>
+        <div class="nx-note">
+          Keeping the current password — this switch will change the host / account only and will not replace the password. No rollback secret is needed.
+          <div class="mt-2"><button pButton type="button" class="p-button-text" (click)="pwd.keepOverride = false">Replace the password instead</button></div>
+        </div>
+      </ng-template>
+    </ng-container>
+
+    <h4 class="nx-cyan" style="margin:0.6rem 0 0.2rem">Before you confirm</h4>
+    <ul class="nx-lab-starter-notes">
+      <li *ngFor="let s of confirmStatements"><i class="pi pi-angle-right"></i> {{ s }}</li>
+    </ul>
+
+    <div class="nx-lab-acks">
+      <label><p-checkbox [(ngModel)]="acks.change" [binary]="true"></p-checkbox> I understand the device pool settings will change and mining will be interrupted briefly.</label>
+      <label><p-checkbox [(ngModel)]="acks.interrupt" [binary]="true"></p-checkbox> I understand the miner may restart and reconnect, and the switch can fail.</label>
+      <label><p-checkbox [(ngModel)]="acks.rollback" [binary]="true"></p-checkbox> I understand automatic rollback runs only while this dashboard stays open, and a browser interruption becomes “Interrupted”, not “Complete”.</label>
+      <label><p-checkbox [(ngModel)]="acks.funds" [binary]="true"></p-checkbox> I understand this changes which pool the miner connects to and does not move any funds.</label>
+    </div>
+
+    <div class="flex gap-2 mt-3">
+      <button pButton type="button" class="p-button-secondary" (click)="cancelConfirm()">Cancel</button>
+      <button pButton type="button" [disabled]="!allAcked || !secretsSatisfied" (click)="confirmSwitch()">SWITCH POOL PROFILE</button>
+    </div>
+  </ng-container>
+</p-dialog>
+
+<!-- ===================== RESTORE CONFIRM DIALOG ===================== -->
+<p-dialog header="Restore previous pool configuration" [(visible)]="showRestore" [modal]="true" [style]="{ width: '560px', maxWidth: '95vw' }" [dismissableMask]="false">
+  <ng-container *ngIf="restoreSnapshot as rs">
+    <p class="nx-lab-detail">This restores the pool configuration captured before your last switch:</p>
+    <div class="nx-kv">
+      <div class="nx-kv-row"><label>Primary</label><b sensitive-data class="nx-ellipsis">{{ maskHost(rs.config.primary.host) }}:{{ rs.config.primary.port }}</b></div>
+      <div class="nx-kv-row"><label>Account</label><b sensitive-data class="nx-ellipsis">{{ maskAccount(rs.config.primary.user) }}</b></div>
+      <div class="nx-kv-row"><label>Fallback</label><b sensitive-data class="nx-ellipsis">{{ maskHost(rs.config.fallback.host) }}:{{ rs.config.fallback.port }}</b></div>
+      <div class="nx-kv-row"><label>Password</label><b>kept on device (not changed)</b></div>
+    </div>
+    <div class="nx-note nx-note-warn mt-2" *ngIf="rs.passwordWasReplaced">
+      The original password cannot be recovered — the device keeps its current password. Re-enter it on
+      the Pools page if the original pool requires it.
+    </div>
+    <div class="flex gap-2 mt-3">
+      <button pButton type="button" class="p-button-secondary" (click)="cancelRestore()">Cancel</button>
+      <button pButton type="button" (click)="confirmRestore()">RESTORE PREVIOUS CONFIGURATION</button>
+    </div>
+  </ng-container>
+</p-dialog>

@@ -6,6 +6,8 @@ import { SharedModule } from 'primeng/api';
 import { BehaviorSubject, of } from 'rxjs';
 import { BlockIntelligenceComponent } from './block-intelligence.component';
 import { BlockIntelligenceService } from 'src/app/services/block-intelligence/block-intelligence.service';
+import { PoolStrategyService } from 'src/app/services/pool-strategy.service';
+import { ChainContext, deriveChainContext } from 'src/app/components/pool-strategy/pool-chain';
 import {
   BlockIntelligenceSnapshot,
   BlockSummary,
@@ -58,17 +60,30 @@ class StubService {
   fetchBlockDetail = jasmine.createSpy('fetchBlockDetail').and.returnValue(of(DETAIL));
 }
 
+function bchContext(): ChainContext {
+  return { chain: 'BCH', labelled: true, verified: true, label: 'Bitcoin Cash (BCH)', short: 'BCH', profileName: 'BCH Pool', detail: 'Active profile "BCH Pool" is labelled Bitcoin Cash (BCH).' };
+}
+
+class PoolStub {
+  chainContext$ = new BehaviorSubject<ChainContext>(deriveChainContext(null, null));
+}
+
 describe('BlockIntelligenceComponent', () => {
   let fixture: ComponentFixture<BlockIntelligenceComponent>;
   let component: BlockIntelligenceComponent;
   let stub: StubService;
+  let pool: PoolStub;
 
   beforeEach(async () => {
     stub = new StubService();
+    pool = new PoolStub();
     await TestBed.configureTestingModule({
       declarations: [BlockIntelligenceComponent],
       imports: [CommonModule, SidebarModule, SharedModule, NoopAnimationsModule],
-      providers: [{ provide: BlockIntelligenceService, useValue: stub }],
+      providers: [
+        { provide: BlockIntelligenceService, useValue: stub },
+        { provide: PoolStrategyService, useValue: pool },
+      ],
     }).compileComponents();
     fixture = TestBed.createComponent(BlockIntelligenceComponent);
     component = fixture.componentInstance;
@@ -188,5 +203,37 @@ describe('BlockIntelligenceComponent', () => {
     // structural sanity: the timeline is scrollable within its own container
     const tl = fixture.nativeElement.querySelector('.nx-tl');
     expect(tl).toBeTruthy();
+  });
+
+  // ---- Phase 2M chain context (Stage 11) ----
+
+  it('shows configured matches and no banner by default (no active profile)', () => {
+    stub.snapshot$.next(snap([block(870010, 'active', 'provider-reported', 'Public Pool')]));
+    fixture.detectChanges();
+    expect(component.showConfiguredMatches).toBeTrue();
+    const text = fixture.nativeElement.textContent as string;
+    expect(text).not.toContain('BCH-labelled pool profile');
+  });
+
+  it('shows the BCH context banner and suppresses match claims when a BCH profile is active', () => {
+    pool.chainContext$.next(bchContext());
+    stub.snapshot$.next(snap([block(870010, 'active', 'provider-reported', 'Public Pool')]));
+    fixture.detectChanges();
+    expect(component.bchContext).toBeTrue();
+    expect(component.showConfiguredMatches).toBeFalse();
+    const text = fixture.nativeElement.textContent as string;
+    expect(text).toContain('This miner is using a BCH-labelled pool profile');
+    expect(text).toContain('Bitcoin network data');
+    // The match pill label must not be presented as an active-chain claim.
+    expect(text).toContain('out of context');
+  });
+
+  it('shows a "chain matching unavailable" note for a Custom-labelled profile', () => {
+    pool.chainContext$.next({ chain: 'custom', labelled: true, verified: true, label: 'Custom / Unknown', short: 'Custom', profileName: 'Lab', detail: '' });
+    stub.snapshot$.next(snap([block(870010, 'active', 'provider-reported', 'Public Pool')]));
+    fixture.detectChanges();
+    expect(component.customContext).toBeTrue();
+    expect(component.showConfiguredMatches).toBeFalse();
+    expect((fixture.nativeElement.textContent as string)).toContain('Chain matching is unavailable');
   });
 });

@@ -20,6 +20,7 @@ import { HomeComponent } from './components/home/home.component';
 import { CommandDeckComponent } from './components/command-deck/command-deck.component';
 import { StabilityLabComponent } from './components/stability-lab/stability-lab.component';
 import { BlockIntelligenceComponent } from './components/block-intelligence/block-intelligence.component';
+import { PoolStrategyComponent } from './components/pool-strategy/pool-strategy.component';
 import { ModalComponent } from './components/modal/modal.component';
 import { TooltipIconComponent } from './components/tooltip-icon/tooltip-icon.component';
 import { TooltipTextIconComponent } from './components/tooltip-text-icon/tooltip-text-icon.component';
@@ -57,6 +58,7 @@ const components = [
   CommandDeckComponent,
   StabilityLabComponent,
   BlockIntelligenceComponent,
+  PoolStrategyComponent,
   ModalComponent,
   TooltipIconComponent,
   TooltipTextIconComponent,

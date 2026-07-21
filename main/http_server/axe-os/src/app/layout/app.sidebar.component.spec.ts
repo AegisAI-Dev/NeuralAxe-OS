@@ -93,19 +93,19 @@ describe('AppSidebarComponent (Neural Command Rail, Phase 2J)', () => {
   });
 
   describe('command rail structure', () => {
-    it('renders the six product sections and all fourteen route links', () => {
+    it('renders the six product sections and all fifteen route links', () => {
       const roots = fixture.nativeElement.querySelectorAll('.layout-menuitem-root-text');
       expect(roots.length).toBe(6);
       const leafLinks = Array.from(fixture.nativeElement.querySelectorAll('.layout-menu a'))
         .filter((a: any) => a.getAttribute('href') !== null);
-      expect(leafLinks.length).toBe(14); // + Block Intelligence (Phase 2L)
+      expect(leafLinks.length).toBe(15); // + Block Intelligence (2L) + Pool Strategy (2M)
     });
 
     it('renders every navigation label in full (2J.1 readability)', () => {
       const labels = Array.from(fixture.nativeElement.querySelectorAll('.layout-menuitem-text'))
         .map((el: any) => el.textContent.trim());
       for (const expected of [
-        'Command Deck', 'Scoreboard', 'Fleet', 'Pools', 'Network',
+        'Command Deck', 'Scoreboard', 'Fleet', 'Pools', 'Pool Strategy', 'Network',
         'Tuning & Thermal', 'Stability Lab', 'Display & Appearance', 'Device Status', 'Logs',
         'Updates', 'About NeuralAxe', 'Legacy Dashboard',
       ]) {

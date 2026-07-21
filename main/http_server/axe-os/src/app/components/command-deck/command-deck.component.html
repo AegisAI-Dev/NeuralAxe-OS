@@ -475,6 +475,40 @@
             <small class="nx-dim" *ngIf="!lab.active && lab.lastState">Last: {{ lab.lastState }}</small>
         </section>
 
+        <!-- POOL STRATEGY GLANCE (2M): chain context + last switch + restore; links to Center. -->
+        <section class="nx-panel" *ngIf="poolGlance as pool">
+            <div class="nx-panel-title nx-cyan">Pool Strategy</div>
+            <div class="flex align-items-center justify-content-between mb-2">
+                <span class="nx-pill nx-pill-sm"
+                    [ngClass]="pool.chainSeverity === 'ok' ? 'nx-pill-ok' : (pool.chainSeverity === 'info' ? 'nx-pill-info' : 'nx-pill-neutral')">
+                    {{ pool.chainLabel }}
+                </span>
+                <span *ngIf="pool.switching" class="nx-live"><span class="nx-live-dot"></span> Switching</span>
+                <span *ngIf="!pool.switching && pool.verified" class="nx-pill nx-pill-sm nx-pill-ok">verified</span>
+            </div>
+            <div class="nx-statrow nx-statrow-tight">
+                <div class="nx-stat">
+                    <label>Active profile</label>
+                    <span>{{ pool.profileName || '—' }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Pool</label>
+                    <span>{{ (info.isUsingFallbackStratum ?? 0) ? 'Fallback' : 'Primary' }}</span>
+                </div>
+                <div class="nx-stat">
+                    <label>Restore</label>
+                    <span>{{ pool.restoreAvailable ? 'Available' : '—' }}</span>
+                </div>
+            </div>
+            <small class="nx-dim mt-1" *ngIf="pool.lastSwitch as ls">
+                Last switch: {{ ls.sourceChain }} → {{ ls.targetChain }} · {{ ls.state }}{{ ls.rollbackResult ? ' (rollback ' + ls.rollbackResult + ')' : '' }}
+            </small>
+            <div class="flex align-items-center justify-content-between mt-2">
+                <small class="nx-dim">Chain label describes the selected profile — not a cryptographic determination</small>
+                <a routerLink="/pool-strategy" class="text-sm">Open Pool Strategy →</a>
+            </div>
+        </section>
+
         <!-- BLOCK INTELLIGENCE GLANCE (2L): compact network context; links to workspace.
              Never duplicates the full block table and never implies THIS device found a block. -->
         <section class="nx-panel">
@@ -501,8 +535,10 @@
                 <div class="flex align-items-center gap-2 mt-2 flex-wrap">
                     <b>{{ blockGlance.poolLabel }}</b>
                     <span class="nx-pill nx-pill-sm" [ngClass]="blockPillClass(blockConfidenceSeverity())">{{ blockGlance.confidenceText }}</span>
-                    <span class="nx-pill nx-pill-sm" *ngIf="blockGlance.matchLabel" [ngClass]="blockMatchPillClass()">{{ blockGlance.matchLabel }}</span>
+                    <!-- Configured-pool match is suppressed while a BCH-labelled profile is active (2M). -->
+                    <span class="nx-pill nx-pill-sm" *ngIf="blockGlance.matchLabel && !suppressBlockMatch" [ngClass]="blockMatchPillClass()">{{ blockGlance.matchLabel }}</span>
                 </div>
+                <small class="nx-dim mt-1" *ngIf="suppressBlockMatch">Configured-pool matching hidden — a BCH profile is active and this data is the Bitcoin network.</small>
                 <!-- Honest miner-vs-network height relationship (2L.1): N vs N+1 is expected. -->
                 <div class="nx-work-rel mt-2" *ngIf="workHeightRelation(info) as rel" [ngClass]="'nx-work-rel-' + rel.severity">
                     <small><b>Your miner</b> — Current Work Height <b>#{{ rel.currentWorkHeight }}</b>: {{ rel.label }}</small>
