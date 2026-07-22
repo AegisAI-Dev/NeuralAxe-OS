@@ -205,4 +205,16 @@ menu "Stratum Configuration"
         help
             Enable task monitor. NOTE: This is intended for debugging use only as the use of uxTaskGetSystemState results in the scheduler remaining suspended for an extended period.
 
+    config NX_TIMED_SESSIONS
+        bool "NeuralAxe timed pool sessions (EXPERIMENTAL, board 601 / BM1370 only)"
+        default n
+        help
+            EXPERIMENTAL. Reserves the feature flag for device-side unattended
+            timed pool sessions (NeuralAxe Phase 2M.1B). Board 601 / BM1370 only.
+            Disabled by default. Gate B1 wires NO runtime behavior to this flag -
+            the pure state-machine component (components/pool_session) compiles and
+            is unit-tested independently of it, and enabling the flag does not change
+            pool, Stratum, restart, OTA or frontend behavior. Leave disabled for
+            production until later gates integrate the scheduler, persistence and API.
+
 endmenu

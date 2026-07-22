@@ -1,2 +1,6 @@
 CONFIG_ESP_INT_WDT=n
 CONFIG_ESP_TASK_WDT=n
+# Unity tests run in the main task. The IDF default (3584 B) is too small for
+# suites that use larger value structs (e.g. pool_session's ~1 KB PoolSession);
+# match the main firmware's 8 KB so tests have adequate stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
