@@ -26,6 +26,9 @@
 #include "input.h"
 #include "log_buffer.h"
 #include "neuralaxe_identity.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS
+#include "pool_session_runtime_boot.h"
+#endif
 
 static GlobalState GLOBAL_STATE;
 
@@ -74,6 +77,17 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to init NVS");
         return;
     }
+
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    // NeuralAxe timed pool sessions (Gate B6): the earliest safe point — NVS is
+    // initialized and nothing has started Stratum yet. Synchronous: loads the
+    // persisted session store, plans boot recovery, bootstraps the single
+    // operation coordinator and decides whether protocol startup may proceed.
+    // Mutates no pool configuration and touches no Stratum.
+    if (!nx_timed_sessions_boot_init()) {
+        ESP_LOGW(TAG, "Timed pool session bootstrap incomplete — holding protocol start");
+    }
+#endif
 
     // Ensure SSID is initialized before any screen/self-test uses it.
     GLOBAL_STATE.SYSTEM_MODULE.ssid = nvs_config_get_string(NVS_CONFIG_WIFI_SSID);
@@ -139,6 +153,13 @@ void app_main(void)
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    // The single bounded network-ready notification. Performs no networking
+    // itself; the runtime task uses it only to decide whether a trusted-time
+    // provider may be started when boot recovery requires one.
+    nx_timed_sessions_notify_network_ready();
+#endif
+
     queue_init(&GLOBAL_STATE.stratum_queue);
 
     if (system_init_ret == ESP_OK) {
@@ -167,7 +188,21 @@ void app_main(void)
     }
 
     protocol_coordinator_init(&GLOBAL_STATE);
-    if (xTaskCreate(protocol_coordinator_task, "protocol coord", 8192, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
+
+    bool protocol_start_allowed = true;
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    // THE protocol-start barrier (Gate B6). protocol_coordinator_task is the only
+    // creator of the stratum v1/v2 tasks and the only caller of the pool probes, so
+    // withholding it withholds every pool connection. A hold is never released
+    // later in B6 — controlled release after live verification or restoration is
+    // Gate B7's job.
+    protocol_start_allowed = nx_timed_sessions_protocol_start_allowed();
+    if (!protocol_start_allowed) {
+        ESP_LOGW(TAG, "Protocol start held by timed pool session recovery");
+    }
+#endif
+    if (protocol_start_allowed &&
+        xTaskCreate(protocol_coordinator_task, "protocol coord", 8192, (void *) &GLOBAL_STATE, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating protocol coordinator task");
     }
 

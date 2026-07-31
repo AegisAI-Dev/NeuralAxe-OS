@@ -209,12 +209,38 @@ menu "Stratum Configuration"
         bool "NeuralAxe timed pool sessions (EXPERIMENTAL, board 601 / BM1370 only)"
         default n
         help
-            EXPERIMENTAL. Reserves the feature flag for device-side unattended
-            timed pool sessions (NeuralAxe Phase 2M.1B). Board 601 / BM1370 only.
-            Disabled by default. Gate B1 wires NO runtime behavior to this flag -
-            the pure state-machine component (components/pool_session) compiles and
-            is unit-tested independently of it, and enabling the flag does not change
-            pool, Stratum, restart, OTA or frontend behavior. Leave disabled for
-            production until later gates integrate the scheduler, persistence and API.
+            EXPERIMENTAL. Enables device-side unattended timed pool sessions
+            (NeuralAxe Phase 2M.1B). Board 601 / BM1370 only. Disabled by default.
+
+            Gate B6 is the first gate that wires runtime behavior to this flag: it
+            loads the persisted session store during boot, plans boot recovery,
+            bootstraps the single operation coordinator and HOLDS protocol/Stratum
+            startup for every unresolved session posture. It still performs NO pool
+            configuration change, NO restoration, NO Stratum control, NO target
+            mining authorization, NO OTA and NO restart - those belong to Gate B7.
+
+            With the flag disabled nothing changes: no runtime instance, no runtime
+            task, the nx_tps namespace is never opened, SNTP is never initialized and
+            protocol startup is unchanged. Leave disabled for production until the
+            later gates integrate controlled apply, restore and the API.
+
+    config NX_TIMED_SESSIONS_NTP_SERVER
+        string "Trusted-time (SNTP) server for timed pool sessions"
+        depends on NX_TIMED_SESSIONS
+        default ""
+        help
+            Product-configured SNTP server used ONLY to establish trusted time for
+            timed pool session deadlines after a reboot.
+
+            DELIBERATELY EMPTY BY DEFAULT. No public NTP hostname is baked into the
+            firmware. While this is empty the runtime reports an unconfigured time
+            source and keeps protocol startup HELD whenever boot recovery requires
+            trusted time - it never invents trust and never contacts a server that
+            the product has not explicitly chosen. Selecting a server is an open
+            product decision (privacy, availability and jurisdiction).
+
+            Note: standard SNTP/DNS is not cryptographically authenticated (no NTS,
+            no DNSSEC). See components/pool_time/include/pool_time.h for the exact
+            trust boundary and the documented network-trust residual.
 
 endmenu
