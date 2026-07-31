@@ -44,8 +44,11 @@ typedef struct {
     bool    opened;
     bool    fail_open;
     bool    fail_load_read;
-    int     fail_write_after;  /* -1 never; 0 fail on the next write   */
-    int     fail_commit_after; /* -1 never; 0 fail on the next commit  */
+    int     fail_write_after;       /* -1 never; 0 fail on the next write   */
+    int     fail_commit_after;      /* -1 never; 0 fail on the next commit  */
+    int     fail_active_read_after; /* -1 never; 0 fail the next "active"
+                                     * read — lets a commit fully succeed
+                                     * while the INDEPENDENT reload fails   */
     int     opens, reads, writes, commits, closes;
 } FakeNvs;
 
@@ -91,6 +94,9 @@ static int fk_read(void *ctx, const char *key, uint8_t *buf, size_t cap, size_t 
     assert_no_coordinator_lock();
     g_fake.reads++;
     if (g_fake.fail_load_read) return POOL_STORE_BACKEND_IO;
+    if (idx == FK_P && fk_should_fail(&g_fake.fail_active_read_after)) {
+        return POOL_STORE_BACKEND_IO;
+    }
     if (!g_fake.opened || idx < 0 || out_len == NULL) return POOL_STORE_BACKEND_IO;
     v = g_fake.staged_dirty[idx] ? &g_fake.staged[idx] : &g_fake.committed[idx];
     if (!v->present) return POOL_STORE_BACKEND_NOT_FOUND;
@@ -154,6 +160,7 @@ static void fake_reset(void)
     memset(&g_fake, 0, sizeof(g_fake));
     g_fake.fail_write_after = -1;
     g_fake.fail_commit_after = -1;
+    g_fake.fail_active_read_after = -1;
 }
 
 /* ---------------- fake platform ops ---------------- */
@@ -463,7 +470,7 @@ TEST_CASE("rt: a mandatory proposal is committed, read back and proven once",
     TEST_ASSERT_TRUE(g_rt.persist_attempted);
     TEST_ASSERT_EQUAL(STORE_OK, g_rt.persist_result);
     /* Exactly one durable proposal commit this boot. */
-    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.control.proposal_commits);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
     /* It really landed: a strictly newer committed generation. */
     TEST_ASSERT_TRUE(g_rt.record.generation > gen_before);
     /* The obligation survived the write. */
@@ -488,7 +495,8 @@ TEST_CASE("rt: a failed proposal commit holds and never advances", "[pool_runtim
 
     TEST_ASSERT_TRUE(g_rt.persist_attempted);
     TEST_ASSERT_FALSE(g_rt.persist_verified);
-    TEST_ASSERT_EQUAL_UINT32(0u, g_rt.control.proposal_commits);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_rt.tracker.commit_count);
+    TEST_ASSERT_FALSE(g_rt.tracker.proven);
     TEST_ASSERT_EQUAL(RUNTIME_PERSISTENCE_PENDING, g_rt.decision.state);
     TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
                       pool_session_runtime_protocol_permission(&g_rt));
@@ -530,18 +538,20 @@ TEST_CASE("rt: the same proposal is never written twice", "[pool_runtime_rt]")
 
     TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
     (void)pool_session_runtime_boot(&g_rt);
-    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.control.proposal_commits);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
     writes_after_boot = g_fake.writes;
 
-    /* The identical proposal can never be written again. */
-    TEST_ASSERT_FALSE(pool_runtime_proposal_should_commit(&g_rt.control,
-                                                          g_rt.control.proposal_fingerprint));
-
-    /* Boot commits AT MOST ONE proposal: a further durable step is left for
-     * the next boot rather than chained here. */
+    /* The identical proposal is proven durable and can never be written
+     * again — but the tracker is generation-aware, not a blanket per-boot
+     * ceiling: only THIS semantic proposal from THIS source generation is
+     * deduplicated. */
+    TEST_ASSERT_TRUE(g_rt.tracker.proven);
+    TEST_ASSERT_TRUE(pool_runtime_proposal_already_proven(&g_rt.tracker, &g_rt.proposal));
     TEST_ASSERT_EQUAL(writes_after_boot, g_fake.writes);
 
-    /* Nor does the running task chain writes from repeated events. */
+    /* Nor does the running task chain writes from repeated events: the
+     * re-derived plan normalizes to the already-accounted per-boot facts,
+     * so nothing new needs to be persisted. */
     TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_start_task(&g_rt));
     TEST_ASSERT_EQUAL(RUNTIME_OK,
                       pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_NETWORK_READY));
@@ -551,11 +561,378 @@ TEST_CASE("rt: the same proposal is never written twice", "[pool_runtime_rt]")
                       pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_MONOTONIC_BOUNDARY));
     vTaskDelay(pdMS_TO_TICKS(100));
     TEST_ASSERT_EQUAL(writes_after_boot, g_fake.writes);
-    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.control.proposal_commits);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
     TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
                       pool_session_runtime_protocol_permission(&g_rt));
 
     TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+/* ================================================================= */
+/* Generation-aware persistence proposals (corrective Gate B6)        */
+/* ================================================================= */
+
+/* Boot a WAITING_FOR_TRUSTED_TIME posture with a configured time source and
+ * a running task, and hand the provider to the test (network-ready started
+ * it). One boot proposal (the reboot increment) is already durable. */
+static void boot_waiting_with_source(void)
+{
+    fresh_runtime();
+    make_rec(&g_rec, POOL_STATE_TARGET_ACTIVE, true);
+    seed_fake_record(&g_rec);
+    g_deps.ntp_server = "time.example";
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+    TEST_ASSERT_EQUAL(RUNTIME_WAITING_FOR_TRUSTED_TIME, g_rt.decision.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.reboot_count);
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_start_task(&g_rt));
+    TEST_ASSERT_EQUAL(RUNTIME_OK,
+                      pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_NETWORK_READY));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    TEST_ASSERT_TRUE(g_rt.time_provider_started);
+}
+
+/* Feed one accepted SNTP completion through the designed fake-completion
+ * seam, then let the task observe the change. */
+static void inject_trusted_sync(uint64_t epoch_s)
+{
+    TEST_ASSERT_EQUAL(TIME_OK,
+                      pool_time_sntp_handle_sync(&g_rt.time_provider, epoch_s, 0u));
+    TEST_ASSERT_EQUAL(RUNTIME_OK,
+                      pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_TIME_SYNC_CHANGED));
+    vTaskDelay(pdMS_TO_TICKS(200));
+}
+
+TEST_CASE("rt: five duplicate evaluations never recommit the identical proposal",
+          "[pool_runtime_rt]")
+{
+    int writes_after_boot;
+    int i;
+
+    fresh_runtime();
+    make_rec(&g_rec, POOL_STATE_TARGET_ACTIVE, true);
+    seed_fake_record(&g_rec);
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+    TEST_ASSERT_EQUAL(RUNTIME_WAITING_FOR_TRUSTED_TIME, g_rt.decision.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+    writes_after_boot = g_fake.writes;
+
+    /* Five explicit re-evaluations of the SAME context: the re-derived plan
+     * normalizes to the already-accounted per-boot facts, so nothing is
+     * ever rewritten and the counters never move twice. */
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_start_task(&g_rt));
+    for (i = 0; i < 5; i++) {
+        TEST_ASSERT_EQUAL(RUNTIME_OK,
+                          pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_TIME_SYNC_CHANGED));
+        vTaskDelay(pdMS_TO_TICKS(30));
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    TEST_ASSERT_EQUAL(writes_after_boot, g_fake.writes);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.reboot_count);
+    TEST_ASSERT_EQUAL(RUNTIME_WAITING_FOR_TRUSTED_TIME, g_rt.control.state);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: a distinct trusted-time proposal commits exactly once after boot",
+          "[pool_runtime_rt]")
+{
+    boot_waiting_with_source();
+
+    /* A trusted sync ABOVE the persisted floor: the raised trusted-epoch
+     * floor is a DISTINCT proposal — committed, read back and proven before
+     * the state advances to target verification. */
+    inject_trusted_sync(EPOCH_A_S + 200u);
+
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.commit_count);
+    TEST_ASSERT_TRUE(g_rt.record.latest_trusted_valid);
+    TEST_ASSERT_EQUAL_UINT64(EPOCH_A_S + 200u, g_rt.record.latest_trusted_epoch_s);
+    /* The same physical boot never accounts its reboot increment twice. */
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.reboot_count);
+    TEST_ASSERT_EQUAL_UINT8(0u, g_rt.record.recovery_attempt_count);
+    /* Advancement happened only AFTER the proof: verification-only, held. */
+    TEST_ASSERT_EQUAL(RUNTIME_VERIFY_TARGET_PENDING, g_rt.control.state);
+    TEST_ASSERT_EQUAL(OP_PHASE_VERIFYING_TARGET, g_rt.lease.phase);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+    /* Exactly one matching B5 proof per distinct successful proposal. */
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.proof_count);
+    TEST_ASSERT_EQUAL_UINT32(g_rt.tracker.commit_count, g_rt.tracker.proof_count);
+    /* No proposal path authorizes mining or permits pool mutation. */
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_snapshot(&g_rt, &g_snap));
+    TEST_ASSERT_FALSE(g_snap.target_mining_authorized);
+    TEST_ASSERT_FALSE(g_snap.pool_mutation_permitted);
+
+    /* A duplicate TIME_SYNC_CHANGED event never duplicates the proposal. */
+    TEST_ASSERT_EQUAL(RUNTIME_OK,
+                      pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_TIME_SYNC_CHANGED));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.proof_count);
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: the wait-expiry restore proposal is committed, not suppressed",
+          "[pool_runtime_rt]")
+{
+    int i;
+
+    fresh_runtime();
+    make_rec(&g_rec, POOL_STATE_TARGET_ACTIVE, true);
+    seed_fake_record(&g_rec);
+    g_deps.sync_wait_limit_s = 1u; /* bounded window of one tick */
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+    TEST_ASSERT_EQUAL(RUNTIME_WAITING_FOR_TRUSTED_TIME, g_rt.decision.state);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_start_task(&g_rt));
+    for (i = 0; i < 60 && g_rt.control.state == RUNTIME_WAITING_FOR_TRUSTED_TIME; i++) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    /* The fail-safe restore plan is a DIFFERENT later proposal: its state
+     * update and recovery-attempt increment were preserved and committed
+     * during the SAME physical boot, while its raw duplicate reboot
+     * increment was normalized away. */
+    TEST_ASSERT_EQUAL(RUNTIME_RESTORE_SOURCE_PENDING, g_rt.control.state);
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.proof_count);
+    TEST_ASSERT_EQUAL(POOL_STATE_RESTORE_DUE, g_rt.record.state);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.recovery_attempt_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.reboot_count); /* once per boot */
+    TEST_ASSERT_TRUE(g_rt.record.restore_required);
+    TEST_ASSERT_EQUAL(OP_PHASE_RESTORING_SOURCE, g_rt.lease.phase);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_snapshot(&g_rt, &g_snap));
+    TEST_ASSERT_FALSE(g_snap.target_mining_authorized);
+    TEST_ASSERT_FALSE(g_snap.pool_mutation_permitted);
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: a new physical boot permits exactly one new reboot increment",
+          "[pool_runtime_rt]")
+{
+    fresh_runtime();
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    seed_fake_record(&g_rec);
+
+    /* Physical boot 1: the restore proposal commits with reboot 0 -> 1. */
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.reboot_count);
+    TEST_ASSERT_EQUAL(POOL_STATE_RESTORE_DUE, g_rt.record.state);
+
+    /* RAM loss on a real reboot clears the tracker naturally: model it with
+     * a full instance teardown; the fake NVS keeps the committed state. */
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_deinit(&g_rt));
+    memset(&g_rt, 0, sizeof(g_rt));
+
+    /* Physical boot 2: exactly one NEW increment (1 -> 2), never a second
+     * increment within either boot. */
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT8(2u, g_rt.record.reboot_count);
+    TEST_ASSERT_EQUAL_UINT8(2u, g_rt.record.recovery_attempt_count);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: a failed later commit blocks advancement until a retry proves it",
+          "[pool_runtime_rt]")
+{
+    boot_waiting_with_source();
+
+    /* Fail the SECOND proposal's first write: the raised-floor proposal
+     * cannot commit, so WAITING must NOT advance to VERIFY_TARGET_PENDING. */
+    g_fake.fail_write_after = 0;
+    inject_trusted_sync(EPOCH_A_S + 200u);
+
+    TEST_ASSERT_EQUAL(RUNTIME_PERSISTENCE_PENDING, g_rt.control.state);
+    TEST_ASSERT_EQUAL(OP_PHASE_WAITING_FOR_TRUSTED_TIME, g_rt.lease.phase);
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+    TEST_ASSERT_FALSE(g_rt.persist_verified);
+    TEST_ASSERT_EQUAL_UINT64(EPOCH_A_S + 100u, g_rt.record.latest_trusted_epoch_s);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+
+    /* The pending proposal is retried on an explicit event only; once the
+     * store works again it commits, is proven, and ONLY THEN advances. */
+    TEST_ASSERT_EQUAL(RUNTIME_OK,
+                      pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_MONOTONIC_BOUNDARY));
+    vTaskDelay(pdMS_TO_TICKS(200));
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT64(EPOCH_A_S + 200u, g_rt.record.latest_trusted_epoch_s);
+    TEST_ASSERT_EQUAL(RUNTIME_VERIFY_TARGET_PENDING, g_rt.control.state);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: an independent readback failure blocks advancement",
+          "[pool_runtime_rt]")
+{
+    boot_waiting_with_source();
+
+    /* Let the second proposal's COMMIT fully succeed, then fail the
+     * INDEPENDENT reload's pointer read: commit ok, reload not ok — the
+     * proposal stays unproven and pending. The B3 commit itself performs
+     * TWO pointer reads (committed-base validation + post-write verify),
+     * so the THIRD read after arming is the independent reload's. */
+    g_fake.fail_active_read_after = 2;
+    inject_trusted_sync(EPOCH_A_S + 200u);
+
+    TEST_ASSERT_EQUAL(RUNTIME_PERSISTENCE_PENDING, g_rt.control.state);
+    TEST_ASSERT_EQUAL(OP_PHASE_WAITING_FOR_TRUSTED_TIME, g_rt.lease.phase);
+    TEST_ASSERT_FALSE(g_rt.persist_verified);
+    TEST_ASSERT_FALSE(g_rt.tracker.proven &&
+                      pool_runtime_proposal_already_proven(&g_rt.tracker, &g_rt.proposal));
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: an uncertain later commit enters the recovery guard",
+          "[pool_runtime_rt]")
+{
+    boot_waiting_with_source();
+
+    /* Slot commit succeeds, POINTER commit fails: STORE_COMMIT_UNCERTAIN on
+     * the SECOND proposal escalates to the B5 recovery guard, retains
+     * ownership evidence and never advances toward execution. */
+    g_fake.fail_commit_after = 1;
+    inject_trusted_sync(EPOCH_A_S + 200u);
+
+    TEST_ASSERT_EQUAL(STORE_COMMIT_UNCERTAIN, g_rt.persist_result);
+    TEST_ASSERT_EQUAL(RUNTIME_RECOVERY_GUARD, g_rt.control.state);
+    TEST_ASSERT_EQUAL(RUNTIME_ERR_STORE_UNCERTAIN, g_rt.decision.status);
+    TEST_ASSERT_EQUAL(OP_PHASE_RECOVERY_GUARD, g_rt.lease.phase);
+    TEST_ASSERT_EQUAL(OP_OWNER_RECOVERY_GUARD, g_rt.lease.owner);
+    TEST_ASSERT_TRUE(g_rt.lease.durable_claim); /* evidence retained */
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: a forced fingerprint collision still commits the distinct proposal",
+          "[pool_runtime_rt]")
+{
+    PoolRuntimeProposal expect;
+
+    boot_waiting_with_source();
+
+    /* Predict the epoch-ratchet proposal the coming trusted sync will
+     * produce (the proposal captures persisted-field changes only, so it is
+     * identical whether derived from the WAIT or the RESUME plan), then
+     * FORCE the stored diagnostic hash to collide with it while the stored
+     * EXACT key remains the boot plan proposal. */
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_EPOCH_FLOOR,
+                      pool_runtime_proposal_build(&g_rt.plan, &g_rt.record,
+                                                  &g_rt.tracker,
+                                                  g_rt.committed_generation,
+                                                  true, EPOCH_A_S + 200u, &expect));
+    g_rt.tracker.last_fingerprint = pool_runtime_proposal_fingerprint(&expect);
+    TEST_ASSERT_FALSE(pool_runtime_proposal_equal(&g_rt.tracker.last_proposal, &expect));
+    TEST_ASSERT_FALSE(pool_runtime_proposal_already_proven(&g_rt.tracker, &expect));
+
+    /* The colliding hash suppresses NOTHING: the distinct proposal earns its
+     * own commit, independent readback and B5 proof, and only then advances. */
+    inject_trusted_sync(EPOCH_A_S + 200u);
+
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT32(2u, g_rt.tracker.proof_count);
+    TEST_ASSERT_TRUE(g_rt.record.latest_trusted_valid);
+    TEST_ASSERT_EQUAL_UINT64(EPOCH_A_S + 200u, g_rt.record.latest_trusted_epoch_s);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.reboot_count);
+    TEST_ASSERT_EQUAL(RUNTIME_VERIFY_TARGET_PENDING, g_rt.control.state);
+    /* No collision case authorizes mining or permits pool mutation. */
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD,
+                      pool_session_runtime_protocol_permission(&g_rt));
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_snapshot(&g_rt, &g_snap));
+    TEST_ASSERT_FALSE(g_snap.target_mining_authorized);
+    TEST_ASSERT_FALSE(g_snap.pool_mutation_permitted);
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_stop_task(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: an unowned retained terminal commits boot accounting without a proof",
+          "[pool_runtime_rt]")
+{
+    fresh_runtime();
+    make_rec(&g_rec, POOL_STATE_COMPLETE, false);
+    seed_fake_record(&g_rec);
+
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+
+    /* The reboot accounting still lands durably, but B5 proofs are
+     * token-gated by design: the FREE + retained-terminal posture holds no
+     * lease, so NO proof is applied and none is needed. */
+    TEST_ASSERT_EQUAL_UINT32(1u, g_rt.tracker.commit_count);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_rt.tracker.proof_count);
+    TEST_ASSERT_TRUE(g_rt.tracker.proven);
+    TEST_ASSERT_EQUAL_UINT8(1u, g_rt.record.reboot_count);
+    TEST_ASSERT_EQUAL(POOL_STATE_COMPLETE, g_rt.record.state);
+    TEST_ASSERT_FALSE(g_rt.record.restore_required);
+    /* The committed baseline posture is preserved exactly. */
+    TEST_ASSERT_EQUAL(RUNTIME_TERMINAL_PENDING, g_rt.decision.state);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_ALLOW_SOURCE,
+                      pool_session_runtime_protocol_permission(&g_rt));
+    runtime_teardown();
+}
+
+TEST_CASE("rt: identical inputs and tracker state yield byte-identical output",
+          "[pool_runtime_rt]")
+{
+    PoolRuntimeSnapshot        snap1, snap2;
+    PoolRuntimeProposalTracker trk1;
+
+    fresh_runtime();
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    seed_fake_record(&g_rec);
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_snapshot(&g_rt, &snap1));
+    trk1 = g_rt.tracker;
+    runtime_teardown();
+
+    /* The identical committed store + identical platform inputs reproduce a
+     * byte-identical snapshot AND byte-identical tracker state. */
+    fresh_runtime();
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    seed_fake_record(&g_rec);
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_init(&g_rt, &g_deps));
+    (void)pool_session_runtime_boot(&g_rt);
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_session_runtime_snapshot(&g_rt, &snap2));
+    TEST_ASSERT_EQUAL(0, memcmp(&snap1, &snap2, sizeof(snap1)));
+    TEST_ASSERT_EQUAL(0, memcmp(&trk1, &g_rt.tracker, sizeof(trk1)));
     runtime_teardown();
 }
 

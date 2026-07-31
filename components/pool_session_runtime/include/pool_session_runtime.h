@@ -146,10 +146,16 @@ typedef struct {
     PoolOperationState       lease;
     PoolOperationStatus      bootstrap_status;
 
-    /* Persistence-before-action evidence for this boot. */
+    /* Persistence-before-action evidence for the CURRENT evaluation. */
     bool            persist_attempted;
     bool            persist_verified; /* committed AND read-back verified */
     PoolStoreResult persist_result;
+
+    /* B6 — generation-aware persistence-proposal tracking (RAM-only; reset
+     * naturally by RAM loss on a real reboot). `proposal` is the normalized
+     * semantic proposal of the CURRENT evaluation. */
+    PoolRuntimeProposalTracker tracker;
+    PoolRuntimeProposal        proposal;
 
     /* B6 */
     PoolRuntimeControl  control;

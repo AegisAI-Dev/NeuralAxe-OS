@@ -503,89 +503,406 @@ TEST_CASE("rt core: a committed proposal that fails read-back stays pending",
 
 TEST_CASE("rt core: an identical proposal is never committed twice", "[pool_runtime]")
 {
-    PoolRuntimeControl c;
-    pool_runtime_control_init(&c, 600u);
+    PoolRuntimeProposalTracker t;
+    PoolRuntimeProposal        p;
 
-    TEST_ASSERT_TRUE(pool_runtime_proposal_should_commit(&c, 0xABCDu));
-    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_runtime_proposal_record_commit(&c, 0xABCDu));
-    TEST_ASSERT_EQUAL(1u, c.proposal_commits);
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    boot_into(STORE_OK, &g_rec, true, 0u);
+    pool_runtime_tracker_init(&t);
 
-    /* Duplicate: refused, and the counter does NOT move. */
-    TEST_ASSERT_FALSE(pool_runtime_proposal_should_commit(&c, 0xABCDu));
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_PLAN,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  false, 0u, &p));
+    TEST_ASSERT_FALSE(pool_runtime_proposal_already_proven(&t, &p));
+    TEST_ASSERT_EQUAL(RUNTIME_OK,
+                      pool_runtime_tracker_record_commit(&t, &p, &g_rec,
+                                                         g_rec.generation + 1u));
+    TEST_ASSERT_EQUAL_UINT32(1u, t.commit_count);
+    /* Tracker completion happens ONLY via record_proven (after B5 proof). */
+    TEST_ASSERT_FALSE(t.proven);
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_runtime_tracker_record_proven(&t, &p));
+    TEST_ASSERT_TRUE(t.proven);
+
+    /* Duplicate: refused, and nothing moves. */
+    TEST_ASSERT_TRUE(pool_runtime_proposal_already_proven(&t, &p));
     TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_DUPLICATE,
-                      pool_runtime_proposal_record_commit(&c, 0xABCDu));
-    TEST_ASSERT_EQUAL(1u, c.proposal_commits);
+                      pool_runtime_tracker_record_proven(&t, &p));
+    TEST_ASSERT_EQUAL_UINT32(1u, t.commit_count);
 
-    /* A genuinely different proposal is a new commit. */
-    TEST_ASSERT_TRUE(pool_runtime_proposal_should_commit(&c, 0x1234u));
-    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_runtime_proposal_record_commit(&c, 0x1234u));
-    TEST_ASSERT_EQUAL(2u, c.proposal_commits);
+    /* A genuinely different proposal (a raised trusted-epoch floor from the
+     * NEWER committed generation) is a new commit + a new proof. */
+    {
+        PoolSessionRecord next = g_rec;
+        PoolRuntimeProposal p2;
+        next.generation   = g_rec.generation + 1u;
+        next.reboot_count = p.reboot_count;
+        next.recovery_attempt_count        = p.recovery_attempt_count;
+        next.consecutive_recovery_failures = p.consecutive_recovery_failures;
+        next.state             = (PoolSessionState)(p.state_update ? p.proposed_state
+                                                                   : (uint8_t)next.state);
+        next.last_failure_code = p.state_update ? p.proposed_failure_code
+                                                : next.last_failure_code;
+        (void)pool_session_recovery_plan(&g_bctx, &g_plan); /* same context */
+        TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_EPOCH_FLOOR,
+                          pool_runtime_proposal_build(&g_plan, &next, &t, next.generation,
+                                                      true, EPOCH_A_S + 500u, &p2));
+        TEST_ASSERT_FALSE(pool_runtime_proposal_already_proven(&t, &p2));
+        TEST_ASSERT_EQUAL(RUNTIME_OK,
+                          pool_runtime_tracker_record_commit(&t, &p2, &next,
+                                                             next.generation + 1u));
+        TEST_ASSERT_EQUAL(RUNTIME_OK, pool_runtime_tracker_record_proven(&t, &p2));
+        TEST_ASSERT_EQUAL_UINT32(2u, t.commit_count);
+    }
 }
 
 TEST_CASE("rt core: proposal read-back proof accepts only an exact landing",
           "[pool_runtime]")
 {
-    PoolSessionRecord after;
+    PoolRuntimeProposalTracker t;
+    PoolRuntimeProposal        p;
+    PoolSessionRecord          after;
 
     make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
     boot_into(STORE_OK, &g_rec, true, 0u);
     TEST_ASSERT_TRUE(pool_runtime_plan_requires_persistence(&g_plan));
+    pool_runtime_tracker_init(&t);
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_PLAN,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  false, 0u, &p));
 
     after = g_rec;
     after.generation = g_rec.generation + 1u;
-    if (g_plan.record_proposal.update_needed) {
-        after.state             = g_plan.record_proposal.proposed_state;
-        after.last_failure_code = g_plan.record_proposal.proposed_failure_code;
+    if (p.state_update) {
+        after.state             = (PoolSessionState)p.proposed_state;
+        after.last_failure_code = p.proposed_failure_code;
     }
-    after.reboot_count                  = g_plan.counters.reboot_count;
-    after.recovery_attempt_count        = g_plan.counters.recovery_attempt_count;
-    after.consecutive_recovery_failures = g_plan.counters.consecutive_recovery_failures;
-    after.last_reset_class              = g_plan.counters.reset_class_for_record;
+    after.reboot_count                  = p.reboot_count;
+    after.recovery_attempt_count        = p.recovery_attempt_count;
+    after.consecutive_recovery_failures = p.consecutive_recovery_failures;
+    after.last_reset_class              = p.reset_class_for_record;
 
     TEST_ASSERT_EQUAL(RUNTIME_OK,
-                      pool_runtime_verify_proposal_readback(&g_rec, &after, &g_plan, STORE_OK));
+                      pool_runtime_verify_proposal_readback(&g_rec, &after, &p, STORE_OK));
 
     /* A non-OK reload is never a proof. */
     TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
-                      pool_runtime_verify_proposal_readback(&g_rec, &after, &g_plan,
+                      pool_runtime_verify_proposal_readback(&g_rec, &after, &p,
                                                             STORE_IO_ERROR));
     /* The restore obligation may never be discharged by a B6 proposal. */
     {
         PoolSessionRecord bad = after;
         bad.restore_required = !g_rec.restore_required;
         TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
-                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &g_plan, STORE_OK));
+                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &p, STORE_OK));
     }
     /* The trusted-epoch floor may never be lowered. */
     {
         PoolSessionRecord bad = after;
         bad.latest_trusted_epoch_s = g_rec.latest_trusted_epoch_s - 1u;
         TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
-                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &g_plan, STORE_OK));
+                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &p, STORE_OK));
+    }
+    /* Without an epoch part the floor must be exactly untouched. */
+    {
+        PoolSessionRecord bad = after;
+        bad.latest_trusted_epoch_s = g_rec.latest_trusted_epoch_s + 1u;
+        TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
+                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &p, STORE_OK));
     }
     /* Counters must be exactly the proposed values. */
     {
         PoolSessionRecord bad = after;
         bad.reboot_count = (uint8_t)(after.reboot_count + 1u);
         TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
-                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &g_plan, STORE_OK));
+                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &p, STORE_OK));
     }
     /* A commit must produce a strictly newer generation. */
     {
         PoolSessionRecord bad = after;
         bad.generation = g_rec.generation;
         TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
-                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &g_plan, STORE_OK));
+                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &p, STORE_OK));
     }
     /* The session identity must survive. */
     {
         PoolSessionRecord bad = after;
         bad.session_id = SESSION_ID + 1u;
         TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
-                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &g_plan, STORE_OK));
+                          pool_runtime_verify_proposal_readback(&g_rec, &bad, &p, STORE_OK));
+    }
+    /* A raised floor must land EXACTLY at the proposed value. */
+    {
+        PoolRuntimeProposal pe = p;
+        PoolSessionRecord   good = after;
+        pe.raise_epoch_floor      = true;
+        pe.proposed_epoch_floor_s = g_rec.latest_trusted_epoch_s + 400u;
+        TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_READBACK,
+                          pool_runtime_verify_proposal_readback(&g_rec, &good, &pe, STORE_OK));
+        good.latest_trusted_epoch_s = pe.proposed_epoch_floor_s;
+        TEST_ASSERT_EQUAL(RUNTIME_OK,
+                          pool_runtime_verify_proposal_readback(&g_rec, &good, &pe, STORE_OK));
     }
     TEST_ASSERT_EQUAL(RUNTIME_ERR_INVALID_ARGUMENT,
-                      pool_runtime_verify_proposal_readback(NULL, &after, &g_plan, STORE_OK));
+                      pool_runtime_verify_proposal_readback(NULL, &after, &p, STORE_OK));
+}
+
+TEST_CASE("rt core: normalization removes only already-accounted per-boot facts",
+          "[pool_runtime]")
+{
+    PoolRuntimeProposalTracker t;
+    PoolRuntimeProposal        p;
+
+    /* A crash-class boot: the raw plan proposes BOTH per-boot increments
+     * (reboot; reset-class-driven consecutive) plus a restore-state update
+     * and a recovery-attempt increment. */
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    memset(&g_bctx, 0, sizeof(g_bctx));
+    g_bctx.store_result                = STORE_OK;
+    g_bctx.record_present              = true;
+    g_bctx.record                      = &g_rec;
+    g_bctx.reset_class                 = POOL_RESET_CLASS_TASK_WATCHDOG;
+    g_bctx.sync_wait_limit_s           = 600u;
+    g_bctx.time_provider_initialized   = true;
+    g_bctx.time_snapshot.status        = TIME_ERR_NOT_SYNCED;
+    g_bctx.mining_inhibition_available = true;
+    (void)pool_session_recovery_plan(&g_bctx, &g_plan);
+    TEST_ASSERT_TRUE(g_plan.counters.reboot_changed);
+    TEST_ASSERT_TRUE(g_plan.counters.consecutive_changed);
+    TEST_ASSERT_TRUE(g_plan.counters.recovery_attempt_changed);
+    TEST_ASSERT_TRUE(g_plan.record_proposal.update_needed);
+
+    /* Fresh boot: nothing accounted — every raw part survives. */
+    pool_runtime_tracker_init(&t);
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_PLAN,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  false, 0u, &p));
+    TEST_ASSERT_EQUAL_UINT8(1u, p.reboot_count);
+    TEST_ASSERT_EQUAL_UINT8(1u, p.consecutive_recovery_failures);
+    TEST_ASSERT_EQUAL_UINT8(1u, p.recovery_attempt_count);
+    TEST_ASSERT_TRUE(p.state_update);
+
+    /* Both per-boot facts already durably accounted this physical boot:
+     * ONLY those parts are normalized back to the committed values — the
+     * state update and the per-action attempt increment are PRESERVED. */
+    t.reboot_increment_committed      = true;
+    t.consecutive_increment_committed = true;
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_PLAN,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  false, 0u, &p));
+    TEST_ASSERT_EQUAL_UINT8(g_rec.reboot_count, p.reboot_count);
+    TEST_ASSERT_EQUAL_UINT8(g_rec.consecutive_recovery_failures,
+                            p.consecutive_recovery_failures);
+    TEST_ASSERT_EQUAL_UINT8(1u, p.recovery_attempt_count); /* NOT normalized */
+    TEST_ASSERT_TRUE(p.state_update);                      /* NOT discarded  */
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)g_plan.record_proposal.proposed_state,
+                            p.proposed_state);
+}
+
+TEST_CASE("rt core: a same-content proposal from another generation is new",
+          "[pool_runtime]")
+{
+    PoolRuntimeProposalTracker t;
+    PoolRuntimeProposal        p1, p2;
+
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    boot_into(STORE_OK, &g_rec, true, 0u);
+    pool_runtime_tracker_init(&t);
+
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_PLAN,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  false, 0u, &p1));
+    TEST_ASSERT_EQUAL(RUNTIME_OK,
+                      pool_runtime_tracker_record_commit(&t, &p1, &g_rec,
+                                                         g_rec.generation + 1u));
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_runtime_tracker_record_proven(&t, &p1));
+    TEST_ASSERT_TRUE(pool_runtime_proposal_already_proven(&t, &p1));
+
+    /* Identical semantic content re-derived from a NEWER committed source
+     * generation is a NEW proposal — never suppressed by the earlier one. */
+    p2 = p1;
+    p2.source_generation = p1.source_generation + 1u;
+    TEST_ASSERT_FALSE(pool_runtime_proposal_already_proven(&t, &p2));
+
+    /* And forcing the tracker fingerprint to collide across generations
+     * still never dedupes: the source generation is checked explicitly. */
+    t.last_fingerprint = pool_runtime_proposal_fingerprint(&p2);
+    TEST_ASSERT_FALSE(pool_runtime_proposal_already_proven(&t, &p2));
+}
+
+TEST_CASE("rt core: a forced fingerprint collision never suppresses a proposal",
+          "[pool_runtime]")
+{
+    PoolRuntimeProposalTracker t;
+    PoolRuntimeProposal        p1, p2;
+    int                        i;
+
+    /* A real proven proposal (restore plan: state update + attempt +1). */
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    boot_into(STORE_OK, &g_rec, true, 0u);
+    pool_runtime_tracker_init(&t);
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_PLAN,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  false, 0u, &p1));
+    TEST_ASSERT_TRUE(p1.state_update);
+    TEST_ASSERT_EQUAL(RUNTIME_OK,
+                      pool_runtime_tracker_record_commit(&t, &p1, &g_rec,
+                                                         g_rec.generation + 1u));
+    TEST_ASSERT_EQUAL(RUNTIME_OK, pool_runtime_tracker_record_proven(&t, &p1));
+    TEST_ASSERT_TRUE(pool_runtime_proposal_already_proven(&t, &p1));
+
+    /* Hash equality is NOT semantic equality: for every safety-relevant
+     * field, a candidate differing ONLY in that field — with the stored
+     * fingerprint FORCED to collide with it (the test seam; no brute-forced
+     * real FNV collision) — must still be a DISTINCT, unsuppressed
+     * proposal, because exact field-by-field equality is the authority. */
+    for (i = 0; i < 5; i++) {
+        p2 = p1;
+        switch (i) {
+        case 0: /* different persistent state */
+            p2.proposed_state = (uint8_t)POOL_STATE_RECOVERY_REQUIRED;
+            break;
+        case 1: /* different failure code */
+            p2.proposed_failure_code = (uint16_t)(p1.proposed_failure_code + 1u);
+            break;
+        case 2: /* different trusted-epoch floor */
+            p2.raise_epoch_floor      = true;
+            p2.proposed_epoch_floor_s = EPOCH_A_S + 777u;
+            break;
+        case 3: /* different recovery-attempt counter */
+            p2.recovery_attempt_count = (uint8_t)(p1.recovery_attempt_count + 1u);
+            break;
+        case 4: /* different restore_required expectation */
+        default:
+            p2.expected_restore_required = !p1.expected_restore_required;
+            break;
+        }
+        TEST_ASSERT_FALSE(pool_runtime_proposal_equal(&p1, &p2));
+        /* Force the stored diagnostic hash to equal the candidate's. */
+        t.last_fingerprint = pool_runtime_proposal_fingerprint(&p2);
+        TEST_ASSERT_FALSE(pool_runtime_proposal_already_proven(&t, &p2));
+        /* The distinct proposal earns its OWN completion (never DUPLICATE),
+         * on the unchanged commit -> readback -> proof ordering. */
+        {
+            PoolRuntimeProposalTracker probe = t;
+            probe.last_fingerprint = pool_runtime_proposal_fingerprint(&p2);
+            TEST_ASSERT_EQUAL(RUNTIME_OK,
+                              pool_runtime_tracker_record_proven(&probe, &p2));
+        }
+        /* Restore the genuine stored hash for the next iteration. */
+        t.last_fingerprint = pool_runtime_proposal_fingerprint(&p1);
+    }
+
+    /* The identical proposal itself still deduplicates exactly. */
+    TEST_ASSERT_TRUE(pool_runtime_proposal_already_proven(&t, &p1));
+    TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_DUPLICATE,
+                      pool_runtime_tracker_record_proven(&t, &p1));
+
+    /* Two epoch proposals differing only in the floor value are distinct. */
+    p1.raise_epoch_floor      = true;
+    p1.proposed_epoch_floor_s = EPOCH_A_S + 500u;
+    p2                        = p1;
+    p2.proposed_epoch_floor_s = EPOCH_A_S + 501u;
+    TEST_ASSERT_FALSE(pool_runtime_proposal_equal(&p1, &p2));
+    /* NULL totality. */
+    TEST_ASSERT_FALSE(pool_runtime_proposal_equal(NULL, &p2));
+    TEST_ASSERT_FALSE(pool_runtime_proposal_equal(&p1, NULL));
+}
+
+TEST_CASE("rt core: proposal build is deterministic and byte-identical",
+          "[pool_runtime]")
+{
+    PoolRuntimeProposalTracker t;
+    PoolRuntimeProposal        a, b;
+
+    make_rec(&g_rec, POOL_STATE_APPLYING_TARGET, true);
+    boot_into(STORE_OK, &g_rec, true, 0u);
+    pool_runtime_tracker_init(&t);
+    t.reboot_increment_committed = true;
+
+    memset(&a, 0xA5, sizeof(a));
+    memset(&b, 0x5A, sizeof(b));
+    (void)pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                      true, EPOCH_A_S + 500u, &a);
+    (void)pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                      true, EPOCH_A_S + 500u, &b);
+    TEST_ASSERT_EQUAL(0, memcmp(&a, &b, sizeof(a)));
+    /* Exact equality is byte-deterministic for identical input, and the
+     * fingerprint (a pure function of the same fields) agrees. */
+    TEST_ASSERT_TRUE(pool_runtime_proposal_equal(&a, &b));
+    TEST_ASSERT_TRUE(pool_runtime_proposal_equal(&b, &a));
+    TEST_ASSERT_EQUAL_UINT32(pool_runtime_proposal_fingerprint(&a),
+                             pool_runtime_proposal_fingerprint(&b));
+}
+
+TEST_CASE("rt core: the epoch-floor part requires strict progress in the band",
+          "[pool_runtime]")
+{
+    PoolRuntimeProposalTracker t;
+    PoolRuntimeProposal        p;
+
+    make_rec(&g_rec, POOL_STATE_TARGET_ACTIVE, true);
+    boot_into_epoch(STORE_OK, &g_rec, EPOCH_A_S + 100u, 0u); /* trusted resume */
+    pool_runtime_tracker_init(&t);
+    t.reboot_increment_committed = true; /* boot accounting already durable */
+
+    /* Equal to the persisted floor: no change, nothing to persist. */
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_NONE,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  true, EPOCH_A_S + 100u, &p));
+    /* Below the floor: never a proposal (the floor never decreases). */
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_NONE,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  true, EPOCH_A_S + 99u, &p));
+    /* Outside the sanity band: never a proposal. */
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_NONE,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  true, POOL_RECORD_EPOCH_MAX_S + 1u, &p));
+    /* Strictly above the floor, inside the band: an independent proposal. */
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_EPOCH_FLOOR,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  true, EPOCH_A_S + 500u, &p));
+    TEST_ASSERT_TRUE(p.raise_epoch_floor);
+    TEST_ASSERT_EQUAL_UINT64(EPOCH_A_S + 500u, p.proposed_epoch_floor_s);
+    /* An untrusted candidate never proposes anything. */
+    TEST_ASSERT_EQUAL(RUNTIME_PROPOSAL_NONE,
+                      pool_runtime_proposal_build(&g_plan, &g_rec, &t, g_rec.generation,
+                                                  false, EPOCH_A_S + 500u, &p));
+}
+
+TEST_CASE("rt core: the runtime's own persistence demand holds until verified",
+          "[pool_runtime]")
+{
+    /* An epoch-only proposal can exist while the PLAN itself demands nothing
+     * (e.g. a saturated reboot counter making reboot_changed=false). Model
+     * that synthetic plan and prove the runtime-known demand alone arms the
+     * same persistence barrier. */
+    make_rec(&g_rec, POOL_STATE_TARGET_ACTIVE, true);
+    boot_into_epoch(STORE_OK, &g_rec, EPOCH_A_S + 100u, 0u); /* trusted resume */
+
+    g_plan.counters.must_persist_before_action = false;
+    g_plan.counters.reboot_changed             = false;
+    g_plan.counters.recovery_attempt_changed   = false;
+    g_plan.counters.consecutive_changed        = false;
+    g_plan.record_proposal.update_needed       = false;
+    TEST_ASSERT_FALSE(pool_runtime_plan_requires_persistence(&g_plan));
+
+    g_in.lease_persistence_required = false;
+    g_in.persist_required  = true; /* the runtime built a non-empty proposal */
+    g_in.persist_attempted = false;
+    g_in.persist_verified  = false;
+    classify();
+    TEST_ASSERT_EQUAL(RUNTIME_PERSISTENCE_PENDING, g_dec.state);
+    TEST_ASSERT_EQUAL(RUNTIME_ERR_PERSIST_REQUIRED, g_dec.status);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD, g_dec.protocol);
+
+    /* Verified: the same input advances normally (still never an ALLOW —
+     * target verification is eligibility only). */
+    g_in.persist_attempted = true;
+    g_in.persist_verified  = true;
+    g_in.persist_result    = STORE_OK;
+    classify();
+    TEST_ASSERT_EQUAL(RUNTIME_VERIFY_TARGET_PENDING, g_dec.state);
+    TEST_ASSERT_EQUAL(POOL_RUNTIME_PROTOCOL_HOLD, g_dec.protocol);
 }
 
 /* ================================================================= */

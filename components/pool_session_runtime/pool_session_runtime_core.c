@@ -211,8 +211,12 @@ PoolRuntimeStatus pool_runtime_classify(const PoolRuntimeClassifyInput *in,
     }
 
     /* ---- 7. Persistence before action. A required, not-yet-verified
-     *         proposal holds regardless of what the plan wants next. ---- */
-    if (pool_runtime_plan_requires_persistence(plan) || in->lease_persistence_required) {
+     *         proposal holds regardless of what the plan wants next. The
+     *         runtime's own demand (in->persist_required — e.g. a raised
+     *         trusted-epoch floor with a saturated counter plan) arms the
+     *         same barrier as the plan's demand. ---- */
+    if (pool_runtime_plan_requires_persistence(plan) || in->lease_persistence_required ||
+        in->persist_required) {
         if (!in->persist_verified) {
             PoolRuntimeStatus why = RUNTIME_ERR_PERSIST_REQUIRED;
             if (in->persist_attempted) {
@@ -522,14 +526,19 @@ PoolRuntimeStatus pool_runtime_control_apply(PoolRuntimeControl *c,
     if (events & RUNTIME_EVENT_TIME_SYNC_CHANGED) {
         c->time_sync_seen = true;
         out->applied_events |= RUNTIME_EVENT_TIME_SYNC_CHANGED;
-        if (c->state == RUNTIME_WAITING_FOR_TRUSTED_TIME) {
+        /* PERSISTENCE_PENDING re-evaluates too: a pending required proposal
+         * is retried on explicit events only (never a tick-driven write
+         * loop), and retrying can never advance state until it is proven. */
+        if (c->state == RUNTIME_WAITING_FOR_TRUSTED_TIME ||
+            c->state == RUNTIME_PERSISTENCE_PENDING) {
             out->reevaluate_plan = true;
         }
     }
 
     if (events & RUNTIME_EVENT_MONOTONIC_BOUNDARY) {
         out->applied_events |= RUNTIME_EVENT_MONOTONIC_BOUNDARY;
-        if (c->state == RUNTIME_WAITING_FOR_TRUSTED_TIME) {
+        if (c->state == RUNTIME_WAITING_FOR_TRUSTED_TIME ||
+            c->state == RUNTIME_PERSISTENCE_PENDING) {
             out->reevaluate_plan = true;
         }
     }
@@ -581,8 +590,29 @@ bool pool_runtime_control_advance_wait(PoolRuntimeControl *c, uint32_t delta_s)
 }
 
 /* ------------------------------------------------------------------ */
-/* Persistence-before-action guards                                    */
+/* Persistence-proposal tracking (generation-aware)                    */
 /* ------------------------------------------------------------------ */
+
+/* Deterministic FNV-1a 32 over an explicit serialization buffer. */
+static uint32_t fnv1a32(const uint8_t *data, size_t len)
+{
+    uint32_t h = 0x811C9DC5u;
+    size_t   i;
+    for (i = 0; i < len; i++) {
+        h ^= data[i];
+        h *= 0x01000193u;
+    }
+    return h;
+}
+
+void pool_runtime_tracker_init(PoolRuntimeProposalTracker *t)
+{
+    if (t == NULL) {
+        return;
+    }
+    memset(t, 0, sizeof(*t));
+    t->initialized = true;
+}
 
 bool pool_runtime_plan_requires_persistence(const PoolSessionRecoveryPlan *plan)
 {
@@ -592,41 +622,242 @@ bool pool_runtime_plan_requires_persistence(const PoolSessionRecoveryPlan *plan)
     return plan->counters.must_persist_before_action || plan->record_proposal.update_needed;
 }
 
-bool pool_runtime_proposal_should_commit(const PoolRuntimeControl *c,
-                                         uint32_t plan_fingerprint)
+PoolRuntimeProposalKind pool_runtime_proposal_build(
+    const PoolSessionRecoveryPlan *plan, const PoolSessionRecord *record,
+    const PoolRuntimeProposalTracker *t, uint32_t source_generation,
+    bool epoch_candidate_valid, uint64_t epoch_candidate_s,
+    PoolRuntimeProposal *out)
 {
-    if (c == NULL) {
+    bool plan_part;
+    bool epoch_part;
+
+    if (out == NULL) {
+        return RUNTIME_PROPOSAL_NONE;
+    }
+    memset(out, 0, sizeof(*out));
+    out->kind = RUNTIME_PROPOSAL_NONE;
+    if (plan == NULL || record == NULL || t == NULL) {
+        return out->kind; /* no committed record: nothing may be persisted */
+    }
+    if (record->kind != (uint8_t)POOL_RECORD_KIND_SESSION) {
+        return out->kind;
+    }
+
+    out->source_generation        = source_generation;
+    out->expected_restore_required = record->restore_required;
+
+    /*
+     * Raw B4 counter proposal first, then NORMALIZE the per-physical-boot
+     * facts already durably accounted this boot (B4 derives them from the
+     * persisted record, so a same-boot replan re-proposes them):
+     *  - the reboot_count increment ("reboot +1 per boot with a record");
+     *  - the reset-class-driven consecutive_recovery_failures increment.
+     * recovery_attempt_count is per-planned-restore-action, never per-boot,
+     * and is deliberately NOT normalized.
+     */
+    out->reboot_count = plan->counters.reboot_count;
+    if (plan->counters.reboot_changed && t->reboot_increment_committed) {
+        out->reboot_count = record->reboot_count; /* accounted: keep committed */
+    }
+    out->consecutive_recovery_failures = plan->counters.consecutive_recovery_failures;
+    if (plan->counters.consecutive_changed && t->consecutive_increment_committed) {
+        out->consecutive_recovery_failures = record->consecutive_recovery_failures;
+    }
+    out->recovery_attempt_count = plan->counters.recovery_attempt_count;
+    out->reset_class_for_record = plan->counters.reset_class_for_record;
+
+    /* State/failure part. A proposal naming the already-committed values
+     * changes nothing and drops out of the semantic proposal. */
+    if (plan->record_proposal.update_needed &&
+        ((uint8_t)plan->record_proposal.proposed_state != (uint8_t)record->state ||
+         plan->record_proposal.proposed_failure_code != record->last_failure_code)) {
+        out->state_update          = true;
+        out->proposed_state        = (uint8_t)plan->record_proposal.proposed_state;
+        out->proposed_failure_code = plan->record_proposal.proposed_failure_code;
+    }
+
+    plan_part = out->state_update ||
+                out->reboot_count != record->reboot_count ||
+                out->recovery_attempt_count != record->recovery_attempt_count ||
+                out->consecutive_recovery_failures != record->consecutive_recovery_failures;
+
+    /* Trusted-epoch floor ratchet: only STRICTLY above the persisted floor,
+     * never below a valid verified_start, only inside the B3 sanity band
+     * (mirrors pool_session_record_propose_trusted_epoch acceptance). */
+    epoch_part = false;
+    if (epoch_candidate_valid &&
+        epoch_candidate_s >= POOL_RECORD_EPOCH_MIN_S &&
+        epoch_candidate_s <= POOL_RECORD_EPOCH_MAX_S &&
+        (!record->latest_trusted_valid ||
+         epoch_candidate_s > record->latest_trusted_epoch_s) &&
+        (!record->verified_start_valid ||
+         epoch_candidate_s >= record->verified_start_epoch_s)) {
+        epoch_part                  = true;
+        out->raise_epoch_floor      = true;
+        out->proposed_epoch_floor_s = epoch_candidate_s;
+    }
+
+    if (plan_part && epoch_part) {
+        out->kind = RUNTIME_PROPOSAL_PLAN_AND_EPOCH;
+    } else if (plan_part) {
+        out->kind = RUNTIME_PROPOSAL_PLAN;
+    } else if (epoch_part) {
+        out->kind = RUNTIME_PROPOSAL_EPOCH_FLOOR;
+    } else {
+        out->kind = RUNTIME_PROPOSAL_NONE;
+    }
+    return out->kind;
+}
+
+uint32_t pool_runtime_proposal_fingerprint(const PoolRuntimeProposal *p)
+{
+    uint8_t buf[24];
+    size_t  o = 0;
+    int     i;
+
+    if (p == NULL) {
+        return 0u;
+    }
+    buf[o++] = (uint8_t)p->kind;
+    for (i = 0; i < 4; i++) {
+        buf[o++] = (uint8_t)((p->source_generation >> (8 * i)) & 0xFFu);
+    }
+    buf[o++] = p->state_update ? 1u : 0u;
+    buf[o++] = p->proposed_state;
+    buf[o++] = (uint8_t)(p->proposed_failure_code & 0xFFu);
+    buf[o++] = (uint8_t)(p->proposed_failure_code >> 8);
+    buf[o++] = p->reboot_count;
+    buf[o++] = p->recovery_attempt_count;
+    buf[o++] = p->consecutive_recovery_failures;
+    buf[o++] = p->reset_class_for_record;
+    buf[o++] = p->raise_epoch_floor ? 1u : 0u;
+    for (i = 0; i < 8; i++) {
+        buf[o++] = (uint8_t)((p->proposed_epoch_floor_s >> (8 * i)) & 0xFFu);
+    }
+    buf[o++] = p->expected_restore_required ? 1u : 0u;
+    return fnv1a32(buf, o);
+}
+
+bool pool_runtime_proposal_equal(const PoolRuntimeProposal *a,
+                                 const PoolRuntimeProposal *b)
+{
+    if (a == NULL || b == NULL) {
+        return false; /* total: nothing equals a missing proposal */
+    }
+    /* Explicit field-by-field equality over EVERY normalized proposal-key
+     * field, unconditionally — never a memcmp over the (padded) struct.
+     * pool_runtime_proposal_build zeroes unset fields deterministically, so
+     * comparing them unconditionally is exact, and any single differing
+     * field makes the proposals DISTINCT. */
+    if (a->kind != b->kind) {
         return false;
     }
-    if (c->proposal_committed && c->proposal_fingerprint == plan_fingerprint) {
-        return false; /* identical proposal already durable this boot */
+    if (a->source_generation != b->source_generation) {
+        return false;
+    }
+    if (a->state_update != b->state_update ||
+        a->proposed_state != b->proposed_state ||
+        a->proposed_failure_code != b->proposed_failure_code) {
+        return false;
+    }
+    if (a->reboot_count != b->reboot_count ||
+        a->recovery_attempt_count != b->recovery_attempt_count ||
+        a->consecutive_recovery_failures != b->consecutive_recovery_failures ||
+        a->reset_class_for_record != b->reset_class_for_record) {
+        return false;
+    }
+    if (a->raise_epoch_floor != b->raise_epoch_floor ||
+        a->proposed_epoch_floor_s != b->proposed_epoch_floor_s) {
+        return false;
+    }
+    if (a->expected_restore_required != b->expected_restore_required) {
+        return false;
     }
     return true;
 }
 
-PoolRuntimeStatus pool_runtime_proposal_record_commit(PoolRuntimeControl *c,
-                                                      uint32_t plan_fingerprint)
+bool pool_runtime_proposal_already_proven(const PoolRuntimeProposalTracker *t,
+                                          const PoolRuntimeProposal *p)
 {
-    if (c == NULL) {
+    if (t == NULL || p == NULL || p->kind == RUNTIME_PROPOSAL_NONE) {
+        return false;
+    }
+    if (!t->proven) {
+        return false;
+    }
+    /* The fingerprint is ONLY a preliminary inequality check: it is a pure
+     * function of the fields, so a differing hash proves the proposals
+     * differ. A MATCHING hash proves nothing — 32-bit hashes collide. */
+    if (t->last_fingerprint != pool_runtime_proposal_fingerprint(p)) {
+        return false;
+    }
+    /* THE authoritative proof: exact field-by-field equality against the
+     * stored normalized proposal key (covers kind and source generation, so
+     * a colliding hash from a different generation or with any differing
+     * field is a DISTINCT proposal and is never suppressed). */
+    return pool_runtime_proposal_equal(&t->last_proposal, p);
+}
+
+PoolRuntimeStatus pool_runtime_tracker_record_commit(
+    PoolRuntimeProposalTracker *t, const PoolRuntimeProposal *p,
+    const PoolSessionRecord *pre_commit_record, uint32_t committed_generation)
+{
+    if (t == NULL || p == NULL || pre_commit_record == NULL ||
+        p->kind == RUNTIME_PROPOSAL_NONE ||
+        (unsigned)p->kind >= (unsigned)POOL_RUNTIME_PROPOSAL_KIND__COUNT) {
         return RUNTIME_ERR_INVALID_ARGUMENT;
     }
-    if (!pool_runtime_proposal_should_commit(c, plan_fingerprint)) {
-        return RUNTIME_ERR_PERSIST_DUPLICATE; /* no counter moves */
+    t->initialized          = true;
+    t->committed_generation = committed_generation;
+    /* Per-physical-boot accounting: set exactly when this durable proposal
+     * carried the increment. These are facts about FLASH — they must stick
+     * even when a later proof step fails, or a retry would re-propose the
+     * same physical boot's increment a second time. Cleared only by RAM
+     * loss on a real reboot. */
+    if (p->reboot_count != pre_commit_record->reboot_count) {
+        t->reboot_increment_committed = true;
     }
-    c->proposal_committed   = true;
-    c->proposal_fingerprint = plan_fingerprint;
-    if (c->proposal_commits < UINT32_MAX) {
-        c->proposal_commits++;
+    if (p->consecutive_recovery_failures !=
+        pre_commit_record->consecutive_recovery_failures) {
+        t->consecutive_increment_committed = true;
     }
+    if (t->commit_count < UINT32_MAX) {
+        t->commit_count++;
+    }
+    return RUNTIME_OK;
+}
+
+PoolRuntimeStatus pool_runtime_tracker_record_proven(
+    PoolRuntimeProposalTracker *t, const PoolRuntimeProposal *p)
+{
+    if (t == NULL || p == NULL || p->kind == RUNTIME_PROPOSAL_NONE ||
+        (unsigned)p->kind >= (unsigned)POOL_RUNTIME_PROPOSAL_KIND__COUNT) {
+        return RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (pool_runtime_proposal_already_proven(t, p)) {
+        return RUNTIME_ERR_PERSIST_DUPLICATE; /* nothing moves */
+    }
+    t->initialized   = true;
+    t->proven        = true;
+    /* THE exact normalized proposal key — the deduplication authority. */
+    t->last_proposal = *p;
+    /* Diagnostic tokens only (never consulted as equality authority). */
+    t->last_kind         = p->kind;
+    t->last_fingerprint  = pool_runtime_proposal_fingerprint(p);
+    t->source_generation = p->source_generation;
     return RUNTIME_OK;
 }
 
 PoolRuntimeStatus pool_runtime_verify_proposal_readback(
     const PoolSessionRecord *before, const PoolSessionRecord *reloaded,
-    const PoolSessionRecoveryPlan *plan, PoolStoreResult reload_result)
+    const PoolRuntimeProposal *proposal, PoolStoreResult reload_result)
 {
-    if (before == NULL || reloaded == NULL || plan == NULL) {
+    if (before == NULL || reloaded == NULL || proposal == NULL) {
         return RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    if (proposal->kind == RUNTIME_PROPOSAL_NONE ||
+        (unsigned)proposal->kind >= (unsigned)POOL_RUNTIME_PROPOSAL_KIND__COUNT) {
+        return RUNTIME_ERR_INVALID_ARGUMENT; /* nothing was committed */
     }
     if (reload_result != STORE_OK) {
         return RUNTIME_ERR_PERSIST_READBACK;
@@ -638,37 +869,51 @@ PoolRuntimeStatus pool_runtime_verify_proposal_readback(
     if (reloaded->session_id != before->session_id) {
         return RUNTIME_ERR_PERSIST_READBACK;
     }
-    /* The restore obligation is NEVER discharged by a B6 proposal. */
-    if (reloaded->restore_required != before->restore_required) {
+    /* The restore obligation is NEVER weakened (or touched) by a B6
+     * proposal: the landing must equal both the expectation and the
+     * pre-commit committed value. */
+    if (reloaded->restore_required != proposal->expected_restore_required ||
+        reloaded->restore_required != before->restore_required) {
         return RUNTIME_ERR_PERSIST_READBACK;
     }
-    /* The persisted trusted-epoch floor is never lowered. */
+    /* The persisted trusted-epoch floor is never lowered; a raised floor
+     * must land exactly; without an epoch part it must be untouched. */
     if (before->latest_trusted_valid) {
         if (!reloaded->latest_trusted_valid ||
             reloaded->latest_trusted_epoch_s < before->latest_trusted_epoch_s) {
             return RUNTIME_ERR_PERSIST_READBACK;
         }
     }
+    if (proposal->raise_epoch_floor) {
+        if (!reloaded->latest_trusted_valid ||
+            reloaded->latest_trusted_epoch_s != proposal->proposed_epoch_floor_s) {
+            return RUNTIME_ERR_PERSIST_READBACK;
+        }
+    } else if (reloaded->latest_trusted_valid != before->latest_trusted_valid ||
+               (before->latest_trusted_valid &&
+                reloaded->latest_trusted_epoch_s != before->latest_trusted_epoch_s)) {
+        return RUNTIME_ERR_PERSIST_READBACK;
+    }
     /* A commit must produce a strictly newer committed generation. */
     if (reloaded->generation <= before->generation) {
         return RUNTIME_ERR_PERSIST_READBACK;
     }
-    /* The proposed state / failure code must be exactly what landed. */
-    if (plan->record_proposal.update_needed) {
-        if (reloaded->state != plan->record_proposal.proposed_state) {
+    /* The NORMALIZED proposed state / failure code must be exactly what
+     * landed; without a state part both must be untouched. */
+    if (proposal->state_update) {
+        if ((uint8_t)reloaded->state != proposal->proposed_state ||
+            reloaded->last_failure_code != proposal->proposed_failure_code) {
             return RUNTIME_ERR_PERSIST_READBACK;
         }
-        if (reloaded->last_failure_code != plan->record_proposal.proposed_failure_code) {
-            return RUNTIME_ERR_PERSIST_READBACK;
-        }
-    } else if (reloaded->state != before->state) {
+    } else if (reloaded->state != before->state ||
+               reloaded->last_failure_code != before->last_failure_code) {
         return RUNTIME_ERR_PERSIST_READBACK;
     }
-    /* The proposed counters must be exactly what landed. */
-    if (reloaded->reboot_count != plan->counters.reboot_count ||
-        reloaded->recovery_attempt_count != plan->counters.recovery_attempt_count ||
-        reloaded->consecutive_recovery_failures != plan->counters.consecutive_recovery_failures ||
-        reloaded->last_reset_class != plan->counters.reset_class_for_record) {
+    /* The NORMALIZED counters must be exactly what landed. */
+    if (reloaded->reboot_count != proposal->reboot_count ||
+        reloaded->recovery_attempt_count != proposal->recovery_attempt_count ||
+        reloaded->consecutive_recovery_failures != proposal->consecutive_recovery_failures ||
+        reloaded->last_reset_class != proposal->reset_class_for_record) {
         return RUNTIME_ERR_PERSIST_READBACK;
     }
     return RUNTIME_OK;

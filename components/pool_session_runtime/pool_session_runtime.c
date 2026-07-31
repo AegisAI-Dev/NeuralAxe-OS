@@ -42,17 +42,26 @@
 #define POOL_RUNTIME_STOP_WAIT_MS 2000u
 
 /*
- * Hard per-boot ceiling on B4 proposal commits: EXACTLY ONE.
+ * Persistence-proposal contract (generation-aware; replaces the earlier
+ * blanket one-proposal-per-boot ceiling):
  *
  * The committed B4 counter model derives its proposal from the record's
  * persisted values (reboot_count = increment(record.reboot_count)), so
- * re-evaluating the engine on a freshly persisted record would propose a
- * SECOND increment for the same physical boot. The committed B4 §4.1 order
- * is therefore plan -> persist the proposal -> act, never plan -> persist ->
- * re-plan -> persist. Gate B6 obeys that literally: one durable proposal per
- * boot, and re-evaluation NEVER writes. No flash-wear loop is possible.
+ * re-evaluating the engine on a freshly persisted record re-proposes the
+ * per-PHYSICAL-BOOT increments (reboot; reset-class-driven consecutive) a
+ * second time. The corrected rule is NOT "never write again": it is
+ *  - the same semantic proposal from the same committed source generation
+ *    commits at most once (tracker dedupe);
+ *  - the per-boot increments are durably accounted at most once per
+ *    physical boot and NORMALIZED out of later raw plans, WITHOUT
+ *    discarding the other field changes those plans carry;
+ *  - a different later persist-before-action proposal (new state, failure
+ *    code, recovery-attempt increment, raised trusted-epoch floor) still
+ *    commits, is independently read back and is proven to B5 in the same
+ *    physical boot — and no related state advancement happens before that.
+ * Writes remain event-driven (boot, TIME_SYNC/MONOTONIC/STORE_RELOAD and
+ * the bounded wait expiry) and deduped, so no flash-wear loop is possible.
  */
-#define POOL_RUNTIME_MAX_PROPOSAL_COMMITS 1u
 
 static const char *TAG = "nx_pool_rt";
 
@@ -274,6 +283,7 @@ static void runtime_build_classify_input(const PoolSessionRuntime *rt,
     in->lease_restore_required     = rt->lease.restore_required;
     in->lease_persistence_required = rt->lease.persistence_required_before_action;
 
+    in->persist_required  = (rt->proposal.kind != RUNTIME_PROPOSAL_NONE);
     in->persist_attempted = rt->persist_attempted;
     in->persist_verified  = rt->persist_verified;
     in->persist_result    = rt->persist_result;
@@ -300,7 +310,7 @@ static void runtime_publish(PoolSessionRuntime *rt)
                                       rt->committed_generation,
                                       rt->control.wait_elapsed_s,
                                       rt->control.wait_limit_s,
-                                      rt->control.proposal_commits,
+                                      rt->tracker.commit_count,
                                       rt->task_running, &rt->snapshot);
 
     ESP_LOGI(TAG, "state=%s protocol=%s status=%s decision=%s store=%s phase=%s",
@@ -317,18 +327,25 @@ static void runtime_publish(PoolSessionRuntime *rt)
 /* ------------------------------------------------------------------ */
 
 /*
- * Commit the mandatory B4 proposal through B3 and PROVE it landed by an
- * independent reload. Only after that proof does the runtime state advance.
+ * Commit the CURRENT evaluation's NORMALIZED semantic proposal
+ * (rt->proposal) through B3 and PROVE it landed by an independent reload,
+ * then hand the durable evidence to B5 whenever an owned session-class
+ * lease exists (B5 proofs are token-gated by design: an unowned posture —
+ * e.g. a retained safe terminal on the FREE phase — has no lease to update,
+ * so commit + independent read-back verification is the complete proof
+ * there and no B5 call is made). Only after every applicable step succeeds
+ * is the tracker marked complete and may the runtime state advance.
  * Never clears a record, never writes a tombstone, never discharges the
  * restore obligation, never lowers the trusted-epoch floor.
  */
 static PoolRuntimeStatus runtime_persist_proposal(PoolSessionRuntime *rt)
 {
-    PoolStoreResult  commit_res;
-    PoolStoreResult  reload_res;
+    PoolStoreResult   commit_res;
+    PoolStoreResult   reload_res;
     PoolRuntimeStatus proof;
     PoolOperationPersistenceProof ev;
     PoolOperationStatus os;
+    PoolSessionRecord   pre_commit;
 
     if (!rt->record_present) {
         /* A proposal without a committed record is internally inconsistent:
@@ -338,29 +355,30 @@ static PoolRuntimeStatus runtime_persist_proposal(PoolSessionRuntime *rt)
         rt->persist_result    = STORE_STATE_CONFLICT;
         return RUNTIME_ERR_INTERNAL_CONSISTENCY;
     }
-    if (rt->control.proposal_commits >= POOL_RUNTIME_MAX_PROPOSAL_COMMITS) {
+
+    /* Stage: copy the committed record and apply ONLY the normalized
+     * semantic proposal. Session identity, obligation and epochs are
+     * preserved by construction; the epoch part goes through the B3
+     * acceptance helper so the band/floor rules stay authoritative. */
+    pre_commit      = rt->record;
+    rt->work_record = rt->record;
+    if (rt->proposal.state_update) {
+        rt->work_record.state             = (PoolSessionState)rt->proposal.proposed_state;
+        rt->work_record.last_failure_code = rt->proposal.proposed_failure_code;
+    }
+    rt->work_record.reboot_count                  = rt->proposal.reboot_count;
+    rt->work_record.recovery_attempt_count        = rt->proposal.recovery_attempt_count;
+    rt->work_record.consecutive_recovery_failures = rt->proposal.consecutive_recovery_failures;
+    rt->work_record.last_reset_class              = rt->proposal.reset_class_for_record;
+    if (rt->proposal.raise_epoch_floor &&
+        pool_session_record_propose_trusted_epoch(&rt->work_record,
+                                                  rt->proposal.proposed_epoch_floor_s)
+            != RECORD_OK) {
         rt->persist_attempted = true;
         rt->persist_verified  = false;
         rt->persist_result    = STORE_STATE_CONFLICT;
-        return RUNTIME_ERR_PERSIST_DUPLICATE;
+        return RUNTIME_ERR_INTERNAL_CONSISTENCY;
     }
-    if (!pool_runtime_proposal_should_commit(&rt->control, rt->plan.plan_fingerprint)) {
-        /* The identical proposal is already durable: not an error, and
-         * crucially NOT a second write. */
-        rt->persist_verified = true;
-        return RUNTIME_OK;
-    }
-
-    /* Stage: copy the committed record and apply ONLY the abstract proposal. */
-    rt->work_record = rt->record;
-    if (rt->plan.record_proposal.update_needed) {
-        rt->work_record.state             = rt->plan.record_proposal.proposed_state;
-        rt->work_record.last_failure_code = rt->plan.record_proposal.proposed_failure_code;
-    }
-    rt->work_record.reboot_count                  = rt->plan.counters.reboot_count;
-    rt->work_record.recovery_attempt_count        = rt->plan.counters.recovery_attempt_count;
-    rt->work_record.consecutive_recovery_failures = rt->plan.counters.consecutive_recovery_failures;
-    rt->work_record.last_reset_class              = rt->plan.counters.reset_class_for_record;
 
     rt->persist_attempted = true;
     commit_res = pool_session_store_commit_record(&rt->store, &rt->work_record);
@@ -368,55 +386,117 @@ static PoolRuntimeStatus runtime_persist_proposal(PoolSessionRuntime *rt)
     if (commit_res != STORE_OK) {
         rt->persist_verified = false;
         if (commit_res == STORE_COMMIT_UNCERTAIN) {
-            /* Contract 13: create the B5 recovery guard and keep the hold. */
-            coord_enter();
-            memset(&ev, 0, sizeof(ev));
-            ev.kind         = OP_PROOF_RECOVERY_UPDATE_COMMITTED;
-            ev.store_result = STORE_COMMIT_UNCERTAIN;
-            ev.session_id   = rt->record.session_id;
-            (void)pool_operation_coordinator_apply_persistence_proof(&rt->coord, &rt->token,
-                                                                     &ev, &rt->token);
-            coord_exit();
-            runtime_refresh_lease(rt);
+            /* Contract 13: create the B5 recovery guard and keep the hold.
+             * The guard escalation is unconditional — with no owned lease
+             * the coordinator still enters the guard via the uncertain
+             * proof path only when a token exists; without one the
+             * classifier's STORE_COMMIT_UNCERTAIN rule guards regardless. */
+            if (rt->token.valid) {
+                coord_enter();
+                memset(&ev, 0, sizeof(ev));
+                ev.kind         = OP_PROOF_RECOVERY_UPDATE_COMMITTED;
+                ev.store_result = STORE_COMMIT_UNCERTAIN;
+                ev.session_id   = rt->record.session_id;
+                (void)pool_operation_coordinator_apply_persistence_proof(&rt->coord, &rt->token,
+                                                                         &ev, &rt->token);
+                coord_exit();
+                runtime_refresh_lease(rt);
+            }
             return RUNTIME_ERR_STORE_UNCERTAIN;
         }
         return RUNTIME_ERR_PERSIST_FAILED;
     }
 
-    /* Independent read-back: reload the committed state and prove it. */
+    /* Independent read-back: reload the committed state and prove it
+     * against the NORMALIZED proposal. */
     reload_res = pool_session_store_load(&rt->store, &rt->work_record, &rt->load_info);
-    proof = pool_runtime_verify_proposal_readback(&rt->record, &rt->work_record,
-                                                  &rt->plan, reload_res);
+    proof = pool_runtime_verify_proposal_readback(&pre_commit, &rt->work_record,
+                                                  &rt->proposal, reload_res);
     if (proof != RUNTIME_OK) {
         rt->persist_verified = false;
         rt->persist_result   = reload_res;
         return proof;
     }
 
-    /* Proven durable: adopt the reloaded record as the committed truth. */
+    /* Durable: adopt the reloaded record as the committed truth and account
+     * the per-physical-boot increments NOW — they are facts about flash and
+     * must survive a later proof-step failure. */
     rt->record = rt->work_record;
     (void)pool_session_store_committed_generation(&rt->store, &rt->committed_generation);
-    rt->persist_verified = true;
-    (void)pool_runtime_proposal_record_commit(&rt->control, rt->plan.plan_fingerprint);
+    (void)pool_runtime_tracker_record_commit(&rt->tracker, &rt->proposal, &pre_commit,
+                                             rt->committed_generation);
 
-    /* Hand the durable evidence to B5 (outside any store operation). */
-    memset(&ev, 0, sizeof(ev));
-    ev.kind                        = OP_PROOF_RECOVERY_UPDATE_COMMITTED;
-    ev.store_result                = STORE_OK;
-    ev.committed_record_generation = rt->record.generation;
-    ev.session_id                  = rt->record.session_id;
-    ev.persisted_state             = rt->record.state;
-    ev.restore_required            = rt->record.restore_required;
+    /* Hand the durable evidence to B5 (outside any store operation) when an
+     * owned lease exists. A rejected proof keeps the proposal UNPROVEN and
+     * the posture pending — never an advancement. */
+    if (rt->token.valid) {
+        memset(&ev, 0, sizeof(ev));
+        ev.kind                        = OP_PROOF_RECOVERY_UPDATE_COMMITTED;
+        ev.store_result                = STORE_OK;
+        ev.committed_record_generation = rt->record.generation;
+        ev.session_id                  = rt->record.session_id;
+        ev.persisted_state             = rt->record.state;
+        ev.restore_required            = rt->record.restore_required;
 
-    coord_enter();
-    os = pool_operation_coordinator_apply_persistence_proof(&rt->coord, &rt->token,
-                                                            &ev, &rt->token);
-    coord_exit();
-    runtime_refresh_lease(rt);
-    if (os != OP_OK) {
-        return RUNTIME_ERR_OWNERSHIP_MISMATCH;
+        coord_enter();
+        os = pool_operation_coordinator_apply_persistence_proof(&rt->coord, &rt->token,
+                                                                &ev, &rt->token);
+        coord_exit();
+        runtime_refresh_lease(rt);
+        if (os != OP_OK) {
+            rt->persist_verified = false;
+            return RUNTIME_ERR_OWNERSHIP_MISMATCH;
+        }
+        if (rt->tracker.proof_count < UINT32_MAX) {
+            rt->tracker.proof_count++;
+        }
     }
+
+    rt->persist_verified = true;
+    (void)pool_runtime_tracker_record_proven(&rt->tracker, &rt->proposal);
     return RUNTIME_OK;
+}
+
+/*
+ * Evaluate the persistence demand of the CURRENT plan: build the normalized
+ * semantic proposal (per-boot increments already accounted are normalized
+ * away; a raised trusted-epoch floor is added when the B2 snapshot proves
+ * one), dedupe it against the tracker, and commit + read back + prove any
+ * NEW proposal. Deterministic; called from the boot path and from every
+ * owner-task re-evaluation.
+ */
+static PoolRuntimeStatus runtime_evaluate_persistence(PoolSessionRuntime *rt)
+{
+    bool     epoch_valid;
+    uint64_t epoch_s;
+
+    /* The floor candidate exists only when the B2 predicate fully passed. */
+    epoch_valid = rt->time_snapshot.trusted && rt->time_snapshot.status == TIME_OK;
+    epoch_s     = epoch_valid ? rt->time_snapshot.trusted_epoch_s : 0u;
+
+    (void)pool_runtime_proposal_build(&rt->plan,
+                                      rt->record_present ? &rt->record : NULL,
+                                      &rt->tracker, rt->committed_generation,
+                                      epoch_valid, epoch_s, &rt->proposal);
+
+    if (rt->proposal.kind == RUNTIME_PROPOSAL_NONE) {
+        /* Nothing (after normalization) would change the committed record:
+         * the plan's demand is already durably satisfied. Not a write. */
+        rt->persist_verified = true;
+        return RUNTIME_OK;
+    }
+    if (pool_runtime_proposal_already_proven(&rt->tracker, &rt->proposal)) {
+        /* The identical proposal from the same committed source generation
+         * is already durable and proven: not an error, NOT a second write. */
+        rt->persist_verified = true;
+        return RUNTIME_OK;
+    }
+
+    /* A NEW distinct proposal: reset the per-evaluation evidence and run
+     * the full commit + independent-readback + proof sequence. */
+    rt->persist_attempted = false;
+    rt->persist_verified  = false;
+    return runtime_persist_proposal(rt);
 }
 
 /* ------------------------------------------------------------------ */
@@ -467,18 +547,29 @@ static void runtime_reconcile_lease(PoolSessionRuntime *rt)
  * bounded wait reaching its bound, or a store reload) — never merely because
  * a proposal was persisted.
  *
- * This NEVER writes: the single per-boot proposal was already committed and
- * read-back verified during boot, and re-running the counter model would
- * propose a second increment for the same boot. It only tightens the posture
- * (owned phase + runtime state) and republishes. It never releases a protocol
- * hold, never frees ownership and never executes a pool or Stratum action.
+ * PERSISTENCE ORDER (the corrected contract): the re-derived plan's
+ * NORMALIZED semantic proposal — the per-physical-boot increments already
+ * durably accounted are normalized away; every OTHER change (new state,
+ * failure code, recovery-attempt increment, raised trusted-epoch floor) is
+ * preserved — is committed through B3, independently reloaded, readback-
+ * verified and proven to B5 BEFORE any lease reconciliation or state
+ * advancement. A failed/uncertain/unproven proposal leaves the posture
+ * pending and reconciles NOTHING. This never releases a protocol hold,
+ * never frees ownership and never executes a pool or Stratum action.
  */
 static void runtime_reevaluate(PoolSessionRuntime *rt)
 {
+    PoolRuntimeStatus ps;
+
     runtime_refresh_time_snapshot(rt);
     runtime_build_boot_context(rt);
     (void)pool_session_recovery_plan(&rt->boot_ctx, &rt->plan);
-    runtime_reconcile_lease(rt);
+
+    ps = runtime_evaluate_persistence(rt);
+    if (ps == RUNTIME_OK && rt->persist_verified) {
+        /* Only a durably satisfied evaluation may tighten the owned phase. */
+        runtime_reconcile_lease(rt);
+    }
     runtime_refresh_lease(rt);
     runtime_publish(rt);
 }
@@ -567,6 +658,7 @@ PoolRuntimeStatus pool_session_runtime_init(PoolSessionRuntime *rt,
     rt->time_source_configured = runtime_time_source_configured(rt);
 
     pool_runtime_control_init(&rt->control, runtime_sync_wait_limit(rt));
+    pool_runtime_tracker_init(&rt->tracker);
     pool_runtime_snapshot_init(&rt->snapshot);
     pool_time_trust_policy_defaults(&rt->time_policy);
     pool_operation_state_init(&rt->lease);
@@ -676,20 +768,22 @@ PoolRuntimeStatus pool_session_runtime_boot(PoolSessionRuntime *rt)
     rt->bootstrap_status = os;
     runtime_refresh_lease(rt);
 
-    /* ---- Step 9: persist + read-back verify the mandatory proposal. ---- */
-    if (os == OP_OK && pool_runtime_plan_requires_persistence(&rt->plan)) {
-        persist_status = runtime_persist_proposal(rt);
+    /* ---- Step 9: normalize, commit, independently read back and prove the
+     *      mandatory proposal (generation-aware persistence tracking). ---- */
+    if (os == OP_OK) {
+        persist_status = runtime_evaluate_persistence(rt);
         (void)persist_status; /* the posture is decided by classification */
     }
 
     /*
-     * ---- Step 10: re-evaluation is NOT required here, and doing it would be
-     * WRONG. The committed B4 counter model derives reboot_count from the
-     * record's persisted value, so re-running the engine on the record we
-     * just wrote would propose a second increment for this one boot. The
-     * committed B4 §4.1 order is plan -> persist -> act; the plan the B5
-     * lease was bootstrapped from stays authoritative for this boot, and
-     * re-evaluation happens only in the owner task when the CONTEXT changes.
+     * ---- Step 10: boot itself never re-plans. The plan the B5 lease was
+     * bootstrapped from stays authoritative for this boot's decision; the
+     * B4 §4.1 order is plan -> persist -> act. Re-evaluation happens only
+     * in the owner task when the CONTEXT changes (time sync, monotonic
+     * boundary, store reload, bounded-wait expiry) — and, under the
+     * corrected contract, each such re-evaluation commits, reads back and
+     * proves its own NORMALIZED proposal before any state advancement,
+     * with the per-physical-boot increments accounted at most once.
      */
 
     /* ---- Steps 11/12: classify and publish the sanitized snapshot. ---- */

@@ -191,7 +191,10 @@ typedef struct {
     bool                    lease_restore_required;
     bool                    lease_persistence_required;
 
-    /* Persistence-before-action evidence for this boot. */
+    /* Persistence-before-action evidence for the CURRENT evaluation. */
+    bool            persist_required;  /* this evaluation's normalized proposal
+                                        * is non-empty (runtime-known demand;
+                                        * ORed with the plan's own demand)    */
     bool            persist_attempted;
     bool            persist_verified;  /* committed AND read-back verified */
     PoolStoreResult persist_result;    /* meaningful when persist_attempted */
@@ -308,8 +311,8 @@ bool pool_runtime_snapshot_valid(const PoolRuntimeSnapshot *snap);
 
 /*
  * The task's pure working state. Holds no pointers, no handles and no
- * identities. `plan_fingerprint` is the identity of the proposal already
- * committed this boot — the duplicate-commit guard.
+ * identities. Persistence-proposal accounting lives in the separate
+ * PoolRuntimeProposalTracker below, not here.
  */
 typedef struct {
     PoolRuntimeState state;
@@ -320,9 +323,6 @@ typedef struct {
     bool             shutdown_requested;
     uint32_t         wait_elapsed_s;
     uint32_t         wait_limit_s;
-    bool             proposal_committed;
-    uint32_t         proposal_fingerprint;
-    uint32_t         proposal_commits;    /* saturating audit counter         */
 } PoolRuntimeControl;
 
 /* What the adapter must do after applying a batch of events. */
@@ -369,36 +369,196 @@ bool pool_runtime_control_advance_wait(PoolRuntimeControl *c, uint32_t delta_s);
 bool pool_runtime_wait_expired(uint32_t elapsed_s, uint32_t limit_s);
 
 /* ------------------------------------------------------------------ */
-/* Persistence-before-action guards (pure)                             */
+/* Persistence-proposal tracking (pure; generation-aware)              */
 /* ------------------------------------------------------------------ */
+
+/*
+ * SEMANTIC persistence proposals — the corrected duplicate-commit contract.
+ *
+ * The committed B4 counter model derives every proposal from the record's
+ * PERSISTED values (reboot_count = increment(record.reboot_count)), so
+ * re-planning over a record persisted earlier in the SAME physical boot
+ * re-proposes the per-boot increments a second time. The correction is NOT
+ * "one proposal per boot": it is
+ *
+ *  - the SAME semantic proposal derived from the SAME committed source
+ *    generation is committed at most once;
+ *  - a DIFFERENT later persist-before-action proposal (new state, failure
+ *    code, recovery-attempt increment or raised trusted-epoch floor) is
+ *    still committed and independently read back during the same boot;
+ *  - a proposal derived from a NEWER committed generation is never
+ *    suppressed by an earlier one;
+ *  - the per-PHYSICAL-BOOT facts — the reboot_count increment and the
+ *    reset-class-driven consecutive_recovery_failures increment (B4 §2.4:
+ *    "reboot +1 per boot, consecutive +1 on abnormal classes") — are
+ *    durably accounted at most once per physical boot and are NORMALIZED
+ *    out of later raw plans without discarding their other field changes.
+ *    recovery_attempt_count is per-planned-restore-action and is NEVER
+ *    normalized.
+ *
+ * The tracker is RAM-only, bounded, and reset naturally by RAM loss on a
+ * real reboot. It deliberately contains NO wall-clock time, NO Stratum
+ * ntime, NO raw reset value, NO persistent boot identifier, NO hostname,
+ * account, worker, wallet, password, session identity, raw record or raw
+ * NVS bytes. It is an internal consistency mechanism, not a cryptographic
+ * capability.
+ */
+
+typedef enum {
+    RUNTIME_PROPOSAL_NONE = 0,       /* nothing (after normalization) to persist */
+    RUNTIME_PROPOSAL_PLAN,           /* B4 plan-driven record/counter update      */
+    RUNTIME_PROPOSAL_EPOCH_FLOOR,    /* raised latest-accepted trusted epoch only */
+    RUNTIME_PROPOSAL_PLAN_AND_EPOCH, /* both parts in one staged commit           */
+    POOL_RUNTIME_PROPOSAL_KIND__COUNT
+} PoolRuntimeProposalKind;
+
+/*
+ * One complete, NORMALIZED semantic proposal: every safety-relevant field a
+ * commit may change in the persisted record, plus the committed source
+ * generation it was derived from. No identity, secret or string exists here.
+ */
+typedef struct {
+    PoolRuntimeProposalKind kind;              /* NONE = nothing to persist  */
+    uint32_t source_generation;                /* committed gen planned FROM */
+
+    bool     state_update;                     /* apply proposed state/code  */
+    uint8_t  proposed_state;                   /* PoolSessionState value     */
+    uint16_t proposed_failure_code;            /* PoolSessionError value     */
+
+    uint8_t  reboot_count;                     /* absolute, NORMALIZED       */
+    uint8_t  recovery_attempt_count;           /* absolute (never normalized)*/
+    uint8_t  consecutive_recovery_failures;    /* absolute, NORMALIZED       */
+    uint8_t  reset_class_for_record;           /* PoolRecordResetClass value */
+
+    bool     raise_epoch_floor;                /* ratchet the trusted floor  */
+    uint64_t proposed_epoch_floor_s;           /* valid when raising         */
+
+    bool     expected_restore_required;        /* preserved exactly by B6    */
+} PoolRuntimeProposal;
+
+/*
+ * Bounded RAM-only tracker of durable persistence work this PHYSICAL boot.
+ * `proven` refers to the LAST proposal and is set only after commit +
+ * independent reload + complete readback verification (+ B5 proof
+ * acceptance whenever an owned session-class lease exists — B5 proofs are
+ * token-gated by design, so unowned postures have no proof to apply).
+ *
+ * DEDUPLICATION AUTHORITY: `last_proposal` is the EXACT normalized proposal
+ * key — fixed-width bounded fields only, no identity, secret, raw record or
+ * unrestricted string — and explicit field-by-field equality over it is the
+ * ONLY authoritative "already proven" proof. The 32-bit fingerprint below
+ * is a diagnostic token and an inexpensive preliminary INEQUALITY check; a
+ * hash match is NEVER sufficient to treat two proposals as equal, so a
+ * fingerprint collision can never suppress a distinct proposal.
+ */
+typedef struct {
+    bool     initialized;
+    /* Once-per-physical-boot accounting (cleared only by RAM loss). */
+    bool     reboot_increment_committed;
+    bool     consecutive_increment_committed;
+    /* The last PROVEN proposal (bounded; replans always derive from the
+     * current committed record, so older proposals cannot recur). */
+    bool     proven;
+    PoolRuntimeProposal last_proposal; /* THE exact normalized proposal key */
+    /* Diagnostic tokens only — never equality authority. */
+    PoolRuntimeProposalKind last_kind;
+    uint32_t last_fingerprint;      /* diagnostic / preliminary inequality  */
+    uint32_t source_generation;     /* generation the proposal derived FROM */
+    uint32_t committed_generation;  /* generation the commit produced       */
+    /* Saturating audit counters. */
+    uint32_t commit_count;          /* durable proposal commits this boot   */
+    uint32_t proof_count;           /* accepted B5 persistence proofs       */
+} PoolRuntimeProposalTracker;
+
+/* Zero the tracker to the fresh-physical-boot posture. */
+void pool_runtime_tracker_init(PoolRuntimeProposalTracker *t);
 
 /* True when a B4 plan carries a proposal that MUST be committed through B3
  * and read-back verified before the runtime state may advance. */
 bool pool_runtime_plan_requires_persistence(const PoolSessionRecoveryPlan *plan);
 
-/* False when the identical proposal (same plan fingerprint) has already been
- * committed this boot — the duplicate-commit guard. */
-bool pool_runtime_proposal_should_commit(const PoolRuntimeControl *c,
-                                         uint32_t plan_fingerprint);
-
 /*
- * Record one successful, read-back-verified proposal commit. A second
- * attempt with the same fingerprint returns RUNTIME_ERR_PERSIST_DUPLICATE
- * and changes NOTHING (no counter increment).
+ * Build the normalized semantic proposal for ONE evaluation from the raw B4
+ * plan, the CURRENT committed record, the tracker's per-boot accounting and
+ * an optional trusted-epoch floor candidate. Deterministic and total:
+ *  - no committed record (or NULL plan/record) => kind NONE;
+ *  - per-boot increments already durably accounted are normalized back to
+ *    the committed values while every OTHER changed field is preserved;
+ *  - the epoch part exists only for a candidate strictly above the persisted
+ *    floor, not below verified_start, and inside the B3 sanity band;
+ *  - kind NONE exactly when nothing would change in the committed record.
+ * *out is fully written on every path. Returns out->kind for convenience.
  */
-PoolRuntimeStatus pool_runtime_proposal_record_commit(PoolRuntimeControl *c,
-                                                      uint32_t plan_fingerprint);
+PoolRuntimeProposalKind pool_runtime_proposal_build(
+    const PoolSessionRecoveryPlan *plan, const PoolSessionRecord *record,
+    const PoolRuntimeProposalTracker *t, uint32_t source_generation,
+    bool epoch_candidate_valid, uint64_t epoch_candidate_s,
+    PoolRuntimeProposal *out);
 
 /*
- * Independent read-back proof of a committed proposal: the reloaded record
- * must carry the proposed state, the proposed counters and the proposed
- * reset class, must preserve the restore obligation and the session
- * identity, and must never lower the persisted trusted-epoch floor.
+ * Deterministic field-by-field fingerprint (FNV-1a 32) of a semantic
+ * proposal, covering the kind, the source generation and every persisted
+ * field above. Explicit serialization — never a raw struct hash. ROLE: a
+ * diagnostic token, an inexpensive preliminary INEQUALITY check and test
+ * instrumentation ONLY. Because it is a pure function of the fields, a
+ * differing fingerprint proves inequality; a MATCHING fingerprint proves
+ * nothing (32-bit hashes collide) and never suffices for deduplication.
+ */
+uint32_t pool_runtime_proposal_fingerprint(const PoolRuntimeProposal *p);
+
+/*
+ * EXACT semantic-proposal equality: explicit field-by-field comparison of
+ * every normalized proposal-key field (kind, source generation, state
+ * update flag + proposed state + failure code, all three counters, reset
+ * class, epoch flag + proposed floor, expected restore_required). Never a
+ * memcmp over the padded struct. Total: NULL inputs are never equal.
+ */
+bool pool_runtime_proposal_equal(const PoolRuntimeProposal *a,
+                                 const PoolRuntimeProposal *b);
+
+/*
+ * True only when the tracker's last proposal is PROVEN (commit + independent
+ * readback verified + applicable B5 proof accepted) AND matches the
+ * candidate by EXACT field-by-field equality — same kind, same source
+ * generation, every normalized proposal-key field identical. The stored
+ * fingerprint is consulted only as a preliminary inequality check; a
+ * matching hash with any differing exact field is a DISTINCT proposal.
+ */
+bool pool_runtime_proposal_already_proven(const PoolRuntimeProposalTracker *t,
+                                          const PoolRuntimeProposal *p);
+
+/*
+ * Record one durable, independently-read-back proposal COMMIT. Marks the
+ * per-physical-boot reboot/consecutive accounting exactly when the proposal
+ * carried those increments (proposal value != pre-commit committed value)
+ * and advances the audit counter — those are facts about FLASH and must
+ * survive a later proof-step failure. Does NOT mark the proposal complete.
+ */
+PoolRuntimeStatus pool_runtime_tracker_record_commit(
+    PoolRuntimeProposalTracker *t, const PoolRuntimeProposal *p,
+    const PoolSessionRecord *pre_commit_record, uint32_t committed_generation);
+
+/*
+ * Mark the committed proposal COMPLETE — call only after commit, independent
+ * reload, full readback verification AND B5 proof acceptance (whenever an
+ * owned lease exists) all succeeded. Completing the identical already-proven
+ * proposal again returns RUNTIME_ERR_PERSIST_DUPLICATE and changes NOTHING.
+ */
+PoolRuntimeStatus pool_runtime_tracker_record_proven(
+    PoolRuntimeProposalTracker *t, const PoolRuntimeProposal *p);
+
+/*
+ * Independent read-back proof of a committed proposal against the NORMALIZED
+ * semantic proposal: the reloaded record must be a SESSION record with the
+ * exact proposed state, failure code, counters and reset class, must
+ * preserve the session identity and the restore obligation exactly, must
+ * carry a strictly newer committed generation, and must never lower the
+ * persisted trusted-epoch floor (a raised floor must land exactly).
  * Returns RUNTIME_OK only when every check passes.
  */
 PoolRuntimeStatus pool_runtime_verify_proposal_readback(
     const PoolSessionRecord *before, const PoolSessionRecord *reloaded,
-    const PoolSessionRecoveryPlan *plan, PoolStoreResult reload_result);
+    const PoolRuntimeProposal *proposal, PoolStoreResult reload_result);
 
 /* ------------------------------------------------------------------ */
 /* Stable machine tokens (dot-free; never carry identities or prose)   */
@@ -424,6 +584,10 @@ _Static_assert(RUNTIME_UNINITIALIZED == 0,
                "UNINITIALIZED must be zero so a zeroed control fails closed");
 _Static_assert(RUNTIME_EVENT__ALL_VALID == 0x3Fu,
                "event mask changed — review sanitization/tests");
+_Static_assert(POOL_RUNTIME_PROPOSAL_KIND__COUNT == 4,
+               "proposal kind count changed — review fingerprint/tests");
+_Static_assert(RUNTIME_PROPOSAL_NONE == 0,
+               "NONE must be zero so a zeroed proposal persists nothing");
 /* A new B3 result, B4 decision, B5 phase or B5 owner must be handled here
  * explicitly and must never fall through to an ALLOW. */
 _Static_assert(POOL_STORE_RESULT__COUNT == 16,
