@@ -243,4 +243,27 @@ menu "Stratum Configuration"
             no DNSSEC). See components/pool_time/include/pool_time.h for the exact
             trust boundary and the documented network-trust residual.
 
+    config NX_TIMED_SESSIONS_EXECUTION
+        bool "Timed pool session controlled execution (EXPERIMENTAL, Gate B7)"
+        depends on NX_TIMED_SESSIONS
+        default n
+        help
+            EXPERIMENTAL. Enables the Gate B7 controlled-execution layer for
+            timed pool sessions: bounded target/source configuration
+            transactions with independent readback, controlled protocol
+            stop/reconfigure/start, live target verification before the first
+            target-mining grant, initial health monitoring, and verified
+            source restoration. Board 601 / BM1370 only. Disabled by default.
+
+            This is a SECOND, independent safety flag: NX_TIMED_SESSIONS may
+            stay enabled while this stays disabled, in which case Gate B6
+            remains a hold-only runtime - no pool configuration write, no
+            protocol verification connection, no controlled reconnect, no
+            target-mining grant, no restart, and no B7 executor or singleton
+            exists at all.
+
+            Session creation over HTTP remains out of scope even with this
+            flag enabled (a later gate owns the API surface). Leave disabled
+            for production.
+
 endmenu

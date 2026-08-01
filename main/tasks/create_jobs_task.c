@@ -16,6 +16,9 @@
 #include "stratum_api.h"
 #include "stratum_v2_task.h"
 #include "utils.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+#include "pool_session_execution.h"
+#endif
 
 static const char *TAG = "create_jobs_task";
 
@@ -63,6 +66,17 @@ void create_jobs_task(void *pvParameters)
     ESP_LOGI(TAG, "ASIC Ready!");
 
     while (1) {
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+        // NeuralAxe Gate B7 job-delivery gate: while a timed-session
+        // execution epoch inhibits ASIC work, no job is dequeued or sent —
+        // the stratum task keeps the bounded queue fresh, and delivery
+        // resumes only when the executor releases the gate (target grant or
+        // verified source restoration).
+        if (!pool_session_execution_asic_work_allowed()) {
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            continue;
+        }
+#endif
         // Read protocol dynamically each iteration (coordinator may have switched it)
         stratum_protocol_t active_protocol = GLOBAL_STATE->stratum_protocol;
 
@@ -175,15 +189,47 @@ void create_jobs_task(void *pvParameters)
         // Generate and send job
         if (active_protocol == STRATUM_PROTOCOL_V2) {
             if (stratum_v2_is_extended_channel(GLOBAL_STATE)) {
-                generate_work_sv2_ext(GLOBAL_STATE, (sv2_ext_job_t *)current_work, difficulty, extranonce_2);
+                uint64_t en2_effective = extranonce_2;
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+                // NeuralAxe Gate B7 generation discriminator: while a
+                // controlled work domain is active and the pool grants a
+                // wide-enough miner-rollable extranonce, the generation
+                // tag is embedded in counter bits 24..31 (serialized into
+                // the coinbase, hence the hashed header). Otherwise the
+                // counter passes through unchanged — stock behaviour.
+                (void)pool_session_execution_extranonce2_tag(
+                    true /* v2 */, true /* extended */,
+                    GLOBAL_STATE->sv2_conn ? GLOBAL_STATE->sv2_conn->extranonce_size : 0u,
+                    extranonce_2, &en2_effective);
+#endif
+                generate_work_sv2_ext(GLOBAL_STATE, (sv2_ext_job_t *)current_work, difficulty, en2_effective);
                 extranonce_2++;
             } else {
+                // SV2 standard channel: the pool owns the merkle root, so
+                // NO generation discriminator exists on this path — the B7
+                // evidence path fails closed by construction (the delivered
+                // record carries no discriminator and can never be counted).
                 generate_work_sv2(GLOBAL_STATE, (sv2_job_t *)current_work, difficulty);
             }
         } else {
-            generate_work(GLOBAL_STATE, (mining_notify *)current_work, extranonce_2, difficulty);
+            uint64_t en2_effective = extranonce_2;
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+            // Same generation discriminator for Stratum V1 (extranonce2 is
+            // miner-owned rolling space; bits 24..31 land in byte 3 of the
+            // little-endian encoding whenever extranonce_2_len >= 4).
+            (void)pool_session_execution_extranonce2_tag(
+                false /* v1 */, false,
+                GLOBAL_STATE->extranonce_2_len,
+                extranonce_2, &en2_effective);
+#endif
+            generate_work(GLOBAL_STATE, (mining_notify *)current_work, en2_effective, difficulty);
             extranonce_2++;
         }
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+        // Bounded evidence for the B7 health windows: one job released
+        // through the delivery gate toward the ASIC.
+        pool_session_execution_note_job_forwarded();
+#endif
         timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
     }
 }

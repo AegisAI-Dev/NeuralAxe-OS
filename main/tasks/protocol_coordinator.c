@@ -11,6 +11,9 @@
 #include "connect.h"
 #include "system.h"
 #include "nvs_config.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+#include "pool_session_execution.h"
+#endif
 
 #include <string.h>
 
@@ -55,8 +58,12 @@ static stratum_protocol_t s_fallback_protocol;
 static stratum_protocol_t s_running_protocol;
 static bool s_heartbeat_enabled = false;
 
-// Primary pool info (saved at startup for heartbeat probing)
-static const char *s_primary_url = NULL;
+// Primary pool info (saved at startup for heartbeat probing).
+// NeuralAxe Gate B7 reader contract: this is a bounded CALLER-OWNED COPY,
+// never a retained pointer into the published identity storage. It is used
+// only for diagnostics; every probe re-reads the live configuration.
+#define NX_PRIMARY_URL_MAX 80
+static char s_primary_url[NX_PRIMARY_URL_MAX] = {0};
 static uint16_t s_primary_port = 0;
 
 // Number of consecutive pools (primary and/or fallback) that have exhausted
@@ -167,7 +174,8 @@ static void start_protocol_task(GlobalState *gs, stratum_protocol_t protocol)
 // Tell the V1 task to shut down and wait for it to exit.
 // Only closes the transport socket to unblock V1's recv — does NOT destroy it.
 // The V1 task handles its own full cleanup (destroy, queue clear) on exit.
-static void stop_v1_task(GlobalState *gs)
+// Returns true when the task provably exited within the bounded wait.
+static bool stop_v1_task(GlobalState *gs)
 {
     s_v1_should_shutdown = true;
 
@@ -181,17 +189,19 @@ static void stop_v1_task(GlobalState *gs)
         if (xQueueReceive(s_event_queue, &evt, pdMS_TO_TICKS(100)) == pdTRUE) {
             if (evt == COORD_EVENT_V1_TASK_EXITED || evt == COORD_EVENT_PROTOCOL_FAILED) {
                 ESP_LOGI(TAG, "V1 task exited cleanly");
-                return;
+                return true;
             }
         }
     }
     ESP_LOGW(TAG, "V1 task did not exit within timeout");
+    return false;
 }
 
 // Tell the V2 task to shut down and wait for it to exit.
 // Only closes the transport socket to unblock V2's recv — does NOT destroy it.
 // The V2 task handles its own full cleanup (destroy, noise ctx, queue clear) on exit.
-static void stop_v2_task(GlobalState *gs)
+// Returns true when the task provably exited within the bounded wait.
+static bool stop_v2_task(GlobalState *gs)
 {
     s_v2_should_shutdown = true;
 
@@ -205,11 +215,12 @@ static void stop_v2_task(GlobalState *gs)
         if (xQueueReceive(s_event_queue, &evt, pdMS_TO_TICKS(100)) == pdTRUE) {
             if (evt == COORD_EVENT_V2_TASK_EXITED || evt == COORD_EVENT_PROTOCOL_FAILED) {
                 ESP_LOGI(TAG, "V2 task exited cleanly");
-                return;
+                return true;
             }
         }
     }
     ESP_LOGW(TAG, "V2 task did not exit within timeout");
+    return false;
 }
 
 // Stop the currently running protocol task
@@ -484,11 +495,26 @@ static void handle_event(GlobalState *gs, coordinator_event_t evt)
     }
 }
 
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+// Set once the coordinator task entered; the controlled B7 hooks refuse to
+// run while the production coordinator owns the protocol.
+static volatile bool s_coordinator_task_started = false;
+#endif
+
 void protocol_coordinator_task(void *pvParameters)
 {
     GlobalState *gs = (GlobalState *)pvParameters;
 
-    s_primary_url = gs->SYSTEM_MODULE.pool_url;
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+    s_coordinator_task_started = true;
+#endif
+
+    if (gs->SYSTEM_MODULE.pool_url != NULL) {
+        strncpy(s_primary_url, gs->SYSTEM_MODULE.pool_url, sizeof(s_primary_url) - 1);
+        s_primary_url[sizeof(s_primary_url) - 1] = '\0';
+    } else {
+        s_primary_url[0] = '\0';
+    }
     s_primary_port = gs->SYSTEM_MODULE.pool_port;
     s_primary_protocol = gs->stratum_protocol;
     s_fallback_protocol = gs->SYSTEM_MODULE.fallback_pool_protocol;
@@ -558,3 +584,171 @@ void protocol_coordinator_task(void *pvParameters)
 
     vTaskDelete(NULL);
 }
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+/*
+ * NeuralAxe Gate B7 controlled protocol hooks.
+ *
+ * Single caller: the timed-session executor on the B6 runtime owner task,
+ * and ONLY while the coordinator task is not running (the boot barrier
+ * withheld it in every posture where the executor acts, and every hook
+ * re-checks). The hooks reuse the coordinator's internal start/stop/event
+ * machinery so exactly one protocol engine exists, and they log machine
+ * facts only — never a pool identity.
+ */
+
+static bool               s_ctrl_running  = false;
+static stratum_protocol_t s_ctrl_protocol = STRATUM_PROTOCOL_V1;
+/*
+ * Gate B7 reader contract (slot borrow/release): a controlled protocol
+ * instance reads the published identity pointers for its WHOLE lifetime, so
+ * it holds a reference on the exact slot from start to proven exit. A
+ * referenced slot is never reclaimed, so the instance's identity is stable
+ * and valid for as long as the instance exists. UINT32_MAX = no borrow.
+ */
+static uint32_t s_ctrl_identity_slot = UINT32_MAX;
+
+static void ctrl_release_identity(void)
+{
+    if (s_ctrl_identity_slot != UINT32_MAX) {
+        pool_session_execution_identity_release(s_ctrl_identity_slot);
+        s_ctrl_identity_slot = UINT32_MAX;
+    }
+}
+
+bool nx_protocol_ctrl_start(stratum_protocol_t protocol)
+{
+    GlobalState *gs = s_global_state;
+
+    if (gs == NULL || s_event_queue == NULL || s_coordinator_task_started ||
+        s_ctrl_running) {
+        return false;
+    }
+    if (protocol != STRATUM_PROTOCOL_V1 && protocol != STRATUM_PROTOCOL_V2) {
+        return false;
+    }
+
+    // Drain every stale event so anything polled afterwards belongs to the
+    // new controlled connection generation.
+    coordinator_event_t evt;
+    while (xQueueReceive(s_event_queue, &evt, 0) == pdTRUE) {
+    }
+
+    // Fresh-generation baselines: empty job queue, zeroed share/work stats.
+    queue_clear(&gs->stratum_queue);
+    reset_share_stats(gs);
+
+    // Controlled sessions pin the PRIMARY endpoint as the verified identity.
+    gs->SYSTEM_MODULE.is_using_fallback = false;
+    gs->stratum_protocol = protocol;
+    s_ctrl_protocol      = protocol;
+    s_running_protocol   = protocol;
+
+    // Gate B7: no autonomous restart may originate inside the protocol
+    // instance this session owns. Set BEFORE the task starts.
+    STRATUM_V1_set_restart_inhibited(true);
+
+    // Gate B7 reader contract: pin the identity slot this instance will read
+    // for its whole lifetime. Taken BEFORE the task starts so the reference
+    // exists before the first dereference.
+    ctrl_release_identity();
+    (void)pool_session_execution_identity_borrow(&s_ctrl_identity_slot);
+
+    start_protocol_task(gs, protocol);
+    s_ctrl_running = true;
+    ESP_LOGI(TAG, "Controlled session protocol start (%s)",
+             protocol == STRATUM_PROTOCOL_V2 ? STRATUM_V2 : STRATUM_V1);
+    return true;
+}
+
+bool nx_protocol_ctrl_stop(void)
+{
+    GlobalState *gs = s_global_state;
+    bool ok;
+
+    if (gs == NULL || !s_ctrl_running) {
+        return true; // nothing controlled is running
+    }
+    ok = (s_ctrl_protocol == STRATUM_PROTOCOL_V2) ? stop_v2_task(gs)
+                                                  : stop_v1_task(gs);
+    if (ok) {
+        s_ctrl_running = false;
+        queue_clear(&gs->stratum_queue);
+        // The controlled instance provably exited: it can no longer
+        // dereference the identity, so release its slot reference.
+        ctrl_release_identity();
+        // Restore the stock autonomous recovery behavior for any later
+        // production-owned instance.
+        STRATUM_V1_set_restart_inhibited(false);
+    }
+    return ok;
+}
+
+bool nx_protocol_ctrl_running(void)
+{
+    return s_ctrl_running;
+}
+
+uint32_t nx_protocol_ctrl_poll_events(void)
+{
+    uint32_t bits = 0u;
+    coordinator_event_t evt;
+
+    if (s_event_queue == NULL) {
+        return 0u;
+    }
+    while (xQueueReceive(s_event_queue, &evt, 0) == pdTRUE) {
+        switch (evt) {
+            case COORD_EVENT_PROTOCOL_FAILED:
+                // The stratum task deletes itself after reporting failure.
+                bits |= NX_PROTOCOL_EVT_FAILED | NX_PROTOCOL_EVT_TASK_EXITED;
+                s_ctrl_running = false;
+                ctrl_release_identity();
+                STRATUM_V1_set_restart_inhibited(false);
+                break;
+            case COORD_EVENT_PROTOCOL_SUCCESS:
+                bits |= NX_PROTOCOL_EVT_SETUP_SUCCESS;
+                break;
+            case COORD_EVENT_V1_TASK_EXITED:
+            case COORD_EVENT_V2_TASK_EXITED:
+                bits |= NX_PROTOCOL_EVT_TASK_EXITED;
+                s_ctrl_running = false;
+                break;
+        }
+    }
+    return bits;
+}
+
+void nx_protocol_ctrl_counters(nx_protocol_counters_t *out)
+{
+    GlobalState *gs = s_global_state;
+
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    if (gs == NULL) {
+        return;
+    }
+    out->work_received   = gs->SYSTEM_MODULE.work_received;
+    out->shares_accepted = gs->SYSTEM_MODULE.shares_accepted;
+    out->shares_rejected = gs->SYSTEM_MODULE.shares_rejected;
+    out->queue_depth     = (uint32_t)gs->stratum_queue.count;
+}
+
+bool nx_protocol_ctrl_handoff_to_coordinator(void)
+{
+    GlobalState *gs = s_global_state;
+
+    if (gs == NULL || s_coordinator_task_started || s_ctrl_running) {
+        return false;
+    }
+    if (xTaskCreate(protocol_coordinator_task, "protocol coord", 8192, (void *)gs,
+                    5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create protocol coordinator task (handoff)");
+        return false;
+    }
+    ESP_LOGI(TAG, "Protocol handed off to the production coordinator");
+    return true;
+}
+#endif // CONFIG_NX_TIMED_SESSIONS_EXECUTION

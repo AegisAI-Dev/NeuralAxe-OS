@@ -10,6 +10,9 @@
 #include "freertos/task.h"
 #include "frequency_transition_bmXX.h"
 #include "pll.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+#include "pool_session_execution.h"
+#endif
 
 #include <stdint.h>
 #include <string.h>
@@ -348,6 +351,26 @@ void BM1370_send_work(void * pvParameters, bm_job * next_bm_job)
     }
     GLOBAL_STATE->ASIC_TASK_MODULE.active_jobs[job.job_id] = next_bm_job;
     GLOBAL_STATE->valid_jobs[job.job_id] = 1;
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+    // NeuralAxe Gate B7: stamp this delivered work item with the exact
+    // protocol / configuration / work generation that produced it AND its
+    // canonical header facts, inside the same lock that publishes the
+    // active-job entry and BEFORE the job frame is written to the chip.
+    // The registry proves header uniqueness against every still-relevant
+    // prior-generation record by exact comparison, so a byte-identical
+    // header rebuilt after a reconnect can never be credited as fresh.
+    {
+        PoolExecWorkFacts facts;
+        facts.version = next_bm_job->version;
+        facts.ntime   = next_bm_job->ntime;
+        facts.nbits   = next_bm_job->target;
+        memcpy(facts.prev_block_hash, next_bm_job->prev_block_hash,
+               sizeof(facts.prev_block_hash));
+        memcpy(facts.merkle_root, next_bm_job->merkle_root,
+               sizeof(facts.merkle_root));
+        pool_session_execution_note_work_delivered(job.job_id, &facts);
+    }
+#endif
     pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
 
     //debug sent jobs - this can get crazy if the interval is short

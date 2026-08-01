@@ -5,6 +5,7 @@ SRCS
     "main.c"
     "log_buffer.c"
     "nvs_config.c"
+    "nx_execution_glue.c"
     "display.c"
     "screen.c"
     "input.c"
@@ -88,6 +89,7 @@ PRIV_REQUIRES
     "stratum_v2"
     "esp_mm"
     "pool_session_runtime"
+    "pool_session_execution"
 
 EMBED_FILES "http_server/recovery_page.html"
 )

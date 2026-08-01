@@ -114,7 +114,29 @@ void cleanup_stratum_buffer()
     free(json_rpc_buffer);
 }
 
-static void realloc_json_buffer(size_t len)
+/*
+ * NeuralAxe: set while a Gate B7 controlled session owns the protocol
+ * instance. An autonomous restart from inside the receive path would
+ * abandon an in-flight pool mutation or an owed source restoration, so the
+ * buffer-growth failure is reported to the caller as a receive failure
+ * instead — which the coordinator turns into a bounded B7 failure event.
+ * Written only by the controlled protocol start/stop hooks (single writer,
+ * the runtime owner task); read only here.
+ */
+static volatile bool s_restart_inhibited = false;
+
+void STRATUM_V1_set_restart_inhibited(bool inhibited)
+{
+    s_restart_inhibited = inhibited;
+}
+
+bool STRATUM_V1_restart_inhibited(void)
+{
+    return s_restart_inhibited;
+}
+
+/* Returns false when the buffer could not be grown. */
+static bool realloc_json_buffer(size_t len)
 {
     size_t old, new;
 
@@ -122,13 +144,19 @@ static void realloc_json_buffer(size_t len)
     new = old + len + 1;
 
     if (new < json_rpc_buffer_size) {
-        return;
+        return true;
     }
 
     new = new + (BUFFER_SIZE - (new % BUFFER_SIZE));
     void * new_sockbuf = realloc(json_rpc_buffer, new);
 
     if (new_sockbuf == NULL) {
+        if (s_restart_inhibited) {
+            // Controlled session: never restart autonomously. Report the
+            // failure upward so the bounded B7 failure path handles it.
+            ESP_LOGE(TAG, "realloc failed under session control — reporting receive failure");
+            return false;
+        }
         fprintf(stderr, "Error: realloc failed in recalloc_sock()\n");
         ESP_LOGI(TAG, "Restarting System because of ERROR: realloc failed in recalloc_sock");
         vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -138,6 +166,7 @@ static void realloc_json_buffer(size_t len)
     json_rpc_buffer = new_sockbuf;
     memset(json_rpc_buffer + old, 0, new - old);
     json_rpc_buffer_size = new;
+    return true;
 }
 
 char * STRATUM_V1_receive_jsonrpc_line(esp_transport_handle_t transport)
@@ -176,7 +205,16 @@ char * STRATUM_V1_receive_jsonrpc_line(esp_transport_handle_t transport)
             return NULL;
         }
         if (nbytes > 0) {
-            realloc_json_buffer(nbytes);
+            if (!realloc_json_buffer(nbytes)) {
+                // Buffer growth failed with autonomous restart inhibited
+                // (a controlled session owns this instance): surface it as a
+                // receive failure so the caller reconnects/reports instead.
+                if (json_rpc_buffer) {
+                    free(json_rpc_buffer);
+                    json_rpc_buffer = NULL;
+                }
+                return NULL;
+            }
             strncat(json_rpc_buffer, recv_buffer, nbytes);
         }
     }

@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "sdkconfig.h"
 #include "pool_session_runtime_core.h"
 #include "pool_session_store.h"
 #include "pool_session_recovery.h"
@@ -233,6 +234,22 @@ uint32_t pool_session_runtime_task_count(void);
 /* Nesting depth of in-progress B5 coordinator calls. Every NVS and SNTP op
  * asserts this is 0, proving contract 11 deterministically. */
 uint32_t pool_session_runtime_coordinator_depth(void);
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+/*
+ * Gate B7 executor hook (exists ONLY under the execution flag; with it off
+ * the B6 runtime is byte-for-byte the committed hold-only runtime).
+ *
+ * The single runtime owner task calls the hook once per loop iteration —
+ * AFTER any event-driven re-evaluation, so the executor always consumes a
+ * fresh B4 plan. The hook returns true while the executor OWNS the session
+ * flow; the task then defers its own plan-persistence and lease-reconcile
+ * machinery to the executor so exactly ONE mutating session owner exists.
+ * Registration is one-shot at boot, before the owner task starts stepping.
+ */
+typedef bool (*PoolRuntimeExecutorHook)(void *ctx);
+void pool_session_runtime_register_executor(PoolRuntimeExecutorHook hook, void *ctx);
+#endif /* CONFIG_NX_TIMED_SESSIONS_EXECUTION */
 
 /* ------------------------------------------------------------------ */
 /* Production singleton (feature-gated)                                */

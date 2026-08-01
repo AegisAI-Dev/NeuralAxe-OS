@@ -15,6 +15,9 @@
 #include "freertos/task.h"
 #include "scoreboard.h"
 #include "self_test.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+#include "pool_session_execution.h"
+#endif
 
 static const char *TAG = "asic_result";
 
@@ -38,6 +41,13 @@ void ASIC_result_task(void *pvParameters)
         }
 
         if (asic_result->register_type != REGISTER_INVALID) {
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+            // NeuralAxe Gate B7: the chip answered a register read. This is
+            // chip LIVENESS only — it does not prove that delivered work was
+            // processed, so it never satisfies a mining verification. It is
+            // recorded for diagnostics.
+            pool_session_execution_note_asic_register_read();
+#endif
             hashrate_monitor_register_read(GLOBAL_STATE, asic_result->register_type, asic_result->asic_nr, asic_result->value, asic_result->timestamp_us);
             continue;
         }
@@ -64,8 +74,40 @@ void ASIC_result_task(void *pvParameters)
         active_job_snapshot.extranonce2 = active_job_snapshot.extranonce2 ? strdup(active_job_snapshot.extranonce2) : NULL;
         pthread_mutex_unlock(&GLOBAL_STATE->valid_jobs_lock);
         bm_job *active_job = &active_job_snapshot;
+
         // check the nonce difficulty
         double nonce_diff = test_nonce_value(active_job, asic_result->nonce, asic_result->rolled_version);
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+        // NeuralAxe Gate B7 ASIC-SIDE PROCESSING EVIDENCE.
+        //
+        // The BM1370 reuses each of its 16 job ids every 16 deliveries, so a
+        // job-id match alone cannot tell a delayed result for older work from
+        // a genuine result for the work now in that slot. The hardware returns
+        // no sequence number or generation — but it does return a NONCE, and
+        // nonce_diff above is that nonce validated against the EXACT job
+        // currently registered in this slot. A nonce produced for a different
+        // header yields an essentially random hash, so requiring it to meet
+        // that job's own target (floored by the binding minimum) is a local
+        // cryptographic proof that the result belongs to this exact work item.
+        //
+        // No pool share is required and none is submitted here: the proof is
+        // computed entirely on-device, before and independently of the
+        // share-submission decision below.
+        //
+        // The threshold is the ASIC's OWN configured result difficulty
+        // (DEVICE_CONFIG.family.asic.difficulty — a compiled constant, 256
+        // for the BM1370, written once during init), clamped into a compiled
+        // band. The POOL difficulty is deliberately NOT used: local hardware
+        // liveness must not wait for a share-level nonce, and a high pool
+        // vardiff must never stall a healthy restoration.
+        {
+            double proof_target = pool_session_execution_work_proof_threshold(
+                GLOBAL_STATE->DEVICE_CONFIG.family.asic.difficulty);
+            (void)pool_session_execution_resolve_asic_result(
+                job_id, nonce_diff >= proof_target);
+        }
+#endif
 
         if (GLOBAL_STATE->SELF_TEST_MODULE.is_active) {
             self_test_record_nonce(GLOBAL_STATE, nonce_diff);
@@ -108,6 +150,25 @@ void ASIC_result_task(void *pvParameters)
             } else {
                 // V1: submit with JSON-RPC
                 char * user = GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback ? GLOBAL_STATE->SYSTEM_MODULE.fallback_pool_user : GLOBAL_STATE->SYSTEM_MODULE.pool_user;
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+                // NeuralAxe Gate B7 reader contract, stated precisely:
+                // identity_copy() acquires the gate lock, copies every
+                // field into `id`, and RELEASES the lock before it
+                // returns. Only the caller-owned COPY lives across the
+                // blocking socket write below — the lock is at depth
+                // zero for the entire write. No published pointer is
+                // retained at any time.
+                PoolExecIdentityCopy id;
+                char user_copy[POOL_SESSION_USER_MAX];
+                if (pool_session_execution_identity_copy(&id)) {
+                    memcpy(user_copy,
+                           GLOBAL_STATE->SYSTEM_MODULE.is_using_fallback
+                               ? id.fallback_user : id.primary_user,
+                           sizeof(user_copy));
+                    user_copy[sizeof(user_copy) - 1] = '\0';
+                    user = user_copy;
+                }
+#endif
 
                 taskENTER_CRITICAL(&GLOBAL_STATE->stratum_mux);
                 esp_transport_handle_t transport = GLOBAL_STATE->transport;

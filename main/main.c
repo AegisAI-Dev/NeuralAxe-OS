@@ -29,6 +29,9 @@
 #ifdef CONFIG_NX_TIMED_SESSIONS
 #include "pool_session_runtime_boot.h"
 #endif
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+#include "nx_execution_glue.h"
+#endif
 
 static GlobalState GLOBAL_STATE;
 
@@ -86,6 +89,16 @@ void app_main(void)
     // Mutates no pool configuration and touches no Stratum.
     if (!nx_timed_sessions_boot_init()) {
         ESP_LOGW(TAG, "Timed pool session bootstrap incomplete — holding protocol start");
+    }
+#endif
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+    // NeuralAxe Gate B7: bind the controlled-execution layer to the booted
+    // runtime (adapters + owner-task hook). Performs no pool mutation and no
+    // protocol action here; the executor acts only after the system-ready
+    // notification below and only in an authorized session posture.
+    if (!nx_pool_execution_boot_init(&GLOBAL_STATE)) {
+        ESP_LOGW(TAG, "Timed pool session execution layer not bound");
     }
 #endif
 
@@ -188,6 +201,24 @@ void app_main(void)
     }
 
     protocol_coordinator_init(&GLOBAL_STATE);
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+    // The mining runtime (NVS, Wi-Fi, ASIC init, job pipeline, coordinator
+    // init) is now available: the Gate B7 executor may begin controlled
+    // actions when — and only when — an authorized session posture exists.
+    //
+    // MUTUAL EXCLUSION WITH SELF-TEST: the self-test owns the device end to
+    // end and restarts autonomously when it finishes. Withholding the
+    // system-ready signal in that mode keeps the executor permanently in
+    // ENTRY_PENDING (it performs NO external action before system-ready), so
+    // the two self-test restart paths are unreachable while B7 could own
+    // execution.
+    if (!GLOBAL_STATE.SELF_TEST_MODULE.is_active) {
+        nx_pool_execution_notify_system_ready();
+    } else {
+        ESP_LOGW(TAG, "Self-test active — timed-session execution stays idle");
+    }
+#endif
 
     bool protocol_start_allowed = true;
 #ifdef CONFIG_NX_TIMED_SESSIONS

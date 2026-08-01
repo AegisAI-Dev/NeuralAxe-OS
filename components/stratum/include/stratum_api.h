@@ -84,6 +84,17 @@ esp_transport_handle_t STRATUM_V1_transport_init(tls_mode tls, char * cert);
 
 void STRATUM_V1_initialize_buffer();
 
+/*
+ * NeuralAxe Gate B7: inhibit the autonomous restart the receive path would
+ * otherwise perform when its JSON buffer cannot be grown. While a controlled
+ * timed session owns the protocol instance, the failure is reported to the
+ * caller as a receive failure instead, so an in-flight pool mutation or an
+ * owed source restoration is never abandoned by a reboot. Set only by the
+ * controlled protocol start/stop hooks.
+ */
+void STRATUM_V1_set_restart_inhibited(bool inhibited);
+bool STRATUM_V1_restart_inhibited(void);
+
 char *STRATUM_V1_receive_jsonrpc_line(esp_transport_handle_t transport);
 
 int STRATUM_V1_subscribe(esp_transport_handle_t transport, int send_uid, const char * model);

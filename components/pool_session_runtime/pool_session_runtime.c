@@ -29,8 +29,16 @@
  * stack only carries small locals, the FreeRTOS frame and ESP_LOG calls.
  * The module-wide single-task guard means exactly ONE stack buffer is ever
  * needed (production has one instance; tests serialize their own).
+ *
+ * Under the Gate B7 execution flag the same task additionally drives the
+ * executor (adapter calls: nvs_config staging, an independent NVS readback
+ * handle, controlled stratum task creation), so the static stack grows.
  */
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+#define POOL_RUNTIME_TASK_STACK_BYTES 8192
+#else
 #define POOL_RUNTIME_TASK_STACK_BYTES 4096
+#endif
 #define POOL_RUNTIME_TASK_PRIORITY    4
 #define POOL_RUNTIME_TASK_NAME        "nx_pool_rt"
 
@@ -75,6 +83,39 @@ static uint32_t     s_coord_depth  = 0u;
 
 static StaticTask_t s_task_tcb;
 static StackType_t  s_task_stack[POOL_RUNTIME_TASK_STACK_BYTES];
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+/*
+ * Gate B7 executor hook (see the header contract). Written once at boot
+ * before the owner task starts stepping; read only by the owner task.
+ * s_executor_owns_flow caches the hook's latest answer so the re-evaluation
+ * machinery on the SAME task can consult it without re-entering the hook.
+ */
+static PoolRuntimeExecutorHook s_executor_hook = NULL;
+static void                   *s_executor_hook_ctx = NULL;
+static bool                    s_executor_owns_flow = false;
+
+void pool_session_runtime_register_executor(PoolRuntimeExecutorHook hook, void *ctx)
+{
+    s_executor_hook     = hook;
+    s_executor_hook_ctx = ctx;
+}
+
+static bool runtime_executor_owns_flow(void)
+{
+    return s_executor_owns_flow;
+}
+
+static void runtime_step_executor(void)
+{
+    if (s_executor_hook != NULL) {
+        s_executor_owns_flow = s_executor_hook(s_executor_hook_ctx);
+    }
+}
+#else
+static bool runtime_executor_owns_flow(void) { return false; }
+static void runtime_step_executor(void) {}
+#endif /* CONFIG_NX_TIMED_SESSIONS_EXECUTION */
 
 uint32_t pool_session_runtime_task_count(void)
 {
@@ -565,10 +606,19 @@ static void runtime_reevaluate(PoolSessionRuntime *rt)
     runtime_build_boot_context(rt);
     (void)pool_session_recovery_plan(&rt->boot_ctx, &rt->plan);
 
-    ps = runtime_evaluate_persistence(rt);
-    if (ps == RUNTIME_OK && rt->persist_verified) {
-        /* Only a durably satisfied evaluation may tighten the owned phase. */
-        runtime_reconcile_lease(rt);
+    /*
+     * Gate B7: while the executor OWNS the session flow it is the ONE
+     * mutating owner — the freshly rebuilt plan above is its INPUT, and the
+     * B6 plan-persistence + lease-reconcile machinery must not compete with
+     * its action-boundary commits. Without the execution flag this branch
+     * compiles to the committed B6 behavior unchanged.
+     */
+    if (!runtime_executor_owns_flow()) {
+        ps = runtime_evaluate_persistence(rt);
+        if (ps == RUNTIME_OK && rt->persist_verified) {
+            /* Only a durably satisfied evaluation may tighten the owned phase. */
+            runtime_reconcile_lease(rt);
+        }
     }
     runtime_refresh_lease(rt);
     runtime_publish(rt);
@@ -883,6 +933,10 @@ static void runtime_task(void *arg)
         } else if (outcome.reevaluate_plan) {
             runtime_reevaluate(rt);
         }
+
+        /* Gate B7: step the executor LAST so it always consumes a fresh
+         * plan. A no-op without the execution flag / a registered hook. */
+        runtime_step_executor();
     }
 
     ESP_LOGI(TAG, "runtime owner task stopping (state=%s)",

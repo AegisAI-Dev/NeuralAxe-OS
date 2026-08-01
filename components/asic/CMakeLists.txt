@@ -14,11 +14,12 @@ SRCS
 INCLUDE_DIRS 
     "include"
 
-REQUIRES 
+REQUIRES
     "freertos"
     "driver"
     "stratum"
     "tcp_transport"
+    "pool_session_execution"
 )
 
 

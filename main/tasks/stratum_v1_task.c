@@ -236,6 +236,20 @@ void stratum_v1_task(void *pvParameters)
         if (GLOBAL_STATE->transport == NULL) {
             ESP_LOGE(TAG, "Transport initialization failed.");
             if (++retry_critical_attempts > MAX_CRITICAL_RETRY_ATTEMPTS) {
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+                // NeuralAxe Gate B7: while a controlled session owns this
+                // protocol instance an autonomous restart would abandon an
+                // in-flight pool mutation or an owed restoration. Emit the
+                // bounded failure event instead and exit; the executor turns
+                // it into a bounded retry or a source restoration.
+                if (nx_protocol_ctrl_running()) {
+                    ESP_LOGW(TAG, "Max retry attempts reached under session control — reporting failure");
+                    stratum_v1_close_connection(GLOBAL_STATE);
+                    protocol_coordinator_notify_failure();
+                    vTaskDelete(NULL);
+                    return;
+                }
+#endif
                 ESP_LOGE(TAG, "Max retry attempts reached, restarting...");
                 esp_restart();
             }

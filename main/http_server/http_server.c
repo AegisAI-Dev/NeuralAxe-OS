@@ -41,6 +41,9 @@
 #include "cjson_utils.h"
 #include "utils.h"
 #include "thermal_control.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS
+#include "pool_session_runtime_admission.h"
+#endif
 
 static const char * TAG = "http_server";
 static const char * CORS_TAG = "CORS";
@@ -708,6 +711,59 @@ bool check_settings_and_update(const cJSON * const root)
     return result;
 }
 
+#ifdef CONFIG_NX_TIMED_SESSIONS
+/*
+ * NeuralAxe Gate B7 production mutation fence.
+ *
+ * A timed-session / boot-recovery / source-restore owner (or the fail-closed
+ * recovery guard) makes concurrent manual mutation unsafe: the session owns
+ * the pool configuration, the Stratum lifecycle and, during restoration, the
+ * device's obligation to put the source pool back. These helpers deny the
+ * request BEFORE its first side effect — before any NVS queue entry, RAM
+ * cache change, OTA session or restart.
+ *
+ * The reply is a bare 409 with a stable machine token; the standardized
+ * conflict body and the complete user-facing mapping belong to Gate B8.
+ */
+static esp_err_t nx_send_conflict(httpd_req_t * req, NxAdmissionVerdict verdict)
+{
+    ESP_LOGW(TAG, "Request denied by timed-session ownership (%s)",
+             nx_admission_verdict_str(verdict));
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "text/plain");
+    return httpd_resp_sendstr(req, nx_admission_verdict_str(verdict));
+}
+
+/* The pool-identity settings a timed session owns. A PATCH touching ANY of
+ * them is a pool-configuration mutation and must yield to the session. */
+static bool nx_patch_touches_pool_identity(const cJSON * const root)
+{
+    static const NvsConfigKey POOL_KEYS[] = {
+        NVS_CONFIG_STRATUM_PROTOCOL, NVS_CONFIG_STRATUM_URL, NVS_CONFIG_STRATUM_PORT,
+        NVS_CONFIG_STRATUM_USER, NVS_CONFIG_STRATUM_PASS, NVS_CONFIG_STRATUM_DIFFICULTY,
+        NVS_CONFIG_STRATUM_EXTRANONCE_SUBSCRIBE, NVS_CONFIG_STRATUM_TLS,
+        NVS_CONFIG_STRATUM_CERT, NVS_CONFIG_SV2_CHANNEL_TYPE,
+        NVS_CONFIG_SV2_AUTHORITY_PUBKEY, NVS_CONFIG_STRATUM_DECODE_COINBASE_TX,
+        NVS_CONFIG_FALLBACK_STRATUM_PROTOCOL, NVS_CONFIG_FALLBACK_STRATUM_URL,
+        NVS_CONFIG_FALLBACK_STRATUM_PORT, NVS_CONFIG_FALLBACK_STRATUM_USER,
+        NVS_CONFIG_FALLBACK_STRATUM_PASS, NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY,
+        NVS_CONFIG_FALLBACK_STRATUM_EXTRANONCE_SUBSCRIBE, NVS_CONFIG_FALLBACK_STRATUM_TLS,
+        NVS_CONFIG_FALLBACK_STRATUM_CERT, NVS_CONFIG_FALLBACK_SV2_CHANNEL_TYPE,
+        NVS_CONFIG_FALLBACK_SV2_AUTHORITY_PUBKEY,
+        NVS_CONFIG_FALLBACK_STRATUM_DECODE_COINBASE_TX, NVS_CONFIG_USE_FALLBACK_STRATUM,
+    };
+
+    for (size_t i = 0; i < sizeof(POOL_KEYS) / sizeof(POOL_KEYS[0]); i++) {
+        const Settings *setting = nvs_config_get_settings(POOL_KEYS[i]);
+        if (setting == NULL || setting->rest_name == NULL) continue;
+        if (cJSON_GetObjectItem((cJSON *) root, setting->rest_name) != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif /* CONFIG_NX_TIMED_SESSIONS */
+
 static esp_err_t PATCH_update_settings(httpd_req_t * req)
 {
     if (is_network_allowed(req) != ESP_OK) {
@@ -745,6 +801,20 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
         return ESP_OK;
     }
+
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    // Gate B7 fence: refuse a pool-identity PATCH while a timed-session /
+    // boot-recovery / source-restore owner (or the recovery guard) exists —
+    // BEFORE check_settings_and_update() enqueues a single NVS write or
+    // touches the RAM configuration cache.
+    if (nx_patch_touches_pool_identity(root)) {
+        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
+        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_POOL_CONFIG, &verdict)) {
+            cJSON_Delete(root);
+            return nx_send_conflict(req, verdict);
+        }
+    }
+#endif
 
     cJSON *hostname_item = cJSON_GetObjectItem(root, "hostname");
     char *current_hostname = cJSON_IsString(hostname_item) ? nvs_config_get_string(NVS_CONFIG_HOSTNAME) : NULL;
@@ -818,6 +888,17 @@ static esp_err_t POST_restart(httpd_req_t * req)
         httpd_resp_send_500(req);
         return ESP_OK;
     }
+
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    // Gate B7 fence: a restart during a timed session or an owed restoration
+    // would interrupt a pool mutation in flight. Refuse before restarting.
+    {
+        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
+        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_DEVICE_RESTART, &verdict)) {
+            return nx_send_conflict(req, verdict);
+        }
+    }
+#endif
 
     ESP_LOGI(TAG, "Restarting System because of API Request");
 
@@ -1132,6 +1213,16 @@ esp_err_t POST_WWW_update(httpd_req_t * req)
         return ESP_OK;
     }
 
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    // Gate B7 fence: refuse before any web-asset OTA state is created.
+    {
+        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
+        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_OTA_UPDATE, &verdict)) {
+            return nx_send_conflict(req, verdict);
+        }
+    }
+#endif
+
     GLOBAL_STATE->SYSTEM_MODULE.is_firmware_update = true;
     snprintf(GLOBAL_STATE->SYSTEM_MODULE.firmware_update_filename, 20, "www.bin");
     snprintf(GLOBAL_STATE->SYSTEM_MODULE.firmware_update_status, 20, "Starting...");
@@ -1216,6 +1307,18 @@ esp_err_t POST_OTA_update(httpd_req_t * req)
         return ESP_OK;
     }
     
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    // Gate B7 fence: refuse BEFORE esp_ota_begin() creates an OTA session
+    // and before any flash write — a firmware OTA reboots the device and
+    // would abandon an in-flight pool mutation or an owed restoration.
+    {
+        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
+        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_OTA_UPDATE, &verdict)) {
+            return nx_send_conflict(req, verdict);
+        }
+    }
+#endif
+
     GLOBAL_STATE->SYSTEM_MODULE.is_firmware_update = true;
     snprintf(GLOBAL_STATE->SYSTEM_MODULE.firmware_update_filename, 20, "esp-miner.bin");
     snprintf(GLOBAL_STATE->SYSTEM_MODULE.firmware_update_status, 20, "Starting...");

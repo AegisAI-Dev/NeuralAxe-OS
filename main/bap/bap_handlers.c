@@ -17,6 +17,31 @@
 #include "bap_uart.h"
 #include "bap_subscription.h"
 #include "bap.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS
+#include "pool_session_runtime_admission.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+#include "pool_session_execution.h"
+#endif
+
+/*
+ * NeuralAxe Gate B7 fence for the BAP autonomous restart paths. A restart
+ * while a timed-session / boot-recovery / source-restore owner exists would
+ * abandon an in-flight pool mutation or an owed restoration, so the restart
+ * is refused and reported instead. The setting itself has already been
+ * stored (BAP applies Wi-Fi credentials, which a session does not own);
+ * only the RESTART is withheld, and it takes effect on the next boot.
+ */
+static bool nx_bap_restart_allowed(const char *parameter)
+{
+    NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
+
+    if (nx_timed_sessions_mutation_allowed(NX_MUTATION_DEVICE_RESTART, &verdict)) {
+        return true;
+    }
+    BAP_send_message(BAP_CMD_ERR, parameter, nx_admission_verdict_str(verdict));
+    return false;
+}
+#endif
 #include "asic.h"
 
 static const char *TAG = "BAP_HANDLERS";
@@ -233,9 +258,36 @@ void BAP_send_request(bap_parameter_t param, GlobalState *state) {
             BAP_send_message(BAP_CMD_RES, "asicModel", state->DEVICE_CONFIG.family.asic.name);
             char port_str[6];
             snprintf(port_str, sizeof(port_str),"%u", state->SYSTEM_MODULE.pool_port);
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+            // NeuralAxe Gate B7 reader contract (copy-under-lock): the BAP
+            // task is asynchronous to the executor, so it never dereferences
+            // a published identity pointer. It takes one consistent
+            // caller-owned copy and sends from that; the pointer is never
+            // retained past this statement.
+            {
+                PoolExecIdentityCopy id;
+                if (pool_session_execution_identity_copy(&id)) {
+                    BAP_send_message(BAP_CMD_RES, "pool", id.primary_host);
+                } else {
+                    BAP_send_message(BAP_CMD_RES, "pool", state->SYSTEM_MODULE.pool_url);
+                }
+            }
+#else
             BAP_send_message(BAP_CMD_RES, "pool", state->SYSTEM_MODULE.pool_url);
+#endif
             BAP_send_message(BAP_CMD_RES, "poolPort", port_str);
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+            {
+                PoolExecIdentityCopy id;
+                if (pool_session_execution_identity_copy(&id)) {
+                    BAP_send_message(BAP_CMD_RES, "poolUser", id.primary_user);
+                } else {
+                    BAP_send_message(BAP_CMD_RES, "poolUser", state->SYSTEM_MODULE.pool_user);
+                }
+            }
+#else
             BAP_send_message(BAP_CMD_RES, "poolUser", state->SYSTEM_MODULE.pool_user);
+#endif
             break;
         case BAP_PARAM_SHARES:
             {
@@ -366,6 +418,11 @@ void BAP_handle_settings(const char *parameter, const char *value) {
                     char *existing_pass = nvs_config_get_string(NVS_CONFIG_WIFI_PASS);
                     if (existing_pass && strlen(existing_pass) > 0) {
                         free(existing_pass);
+#ifdef CONFIG_NX_TIMED_SESSIONS
+                        if (!nx_bap_restart_allowed(parameter)) {
+                            return; // Gate B7: restart withheld; applies next boot
+                        }
+#endif
                         vTaskDelay(pdMS_TO_TICKS(100));
                         BAP_send_message(BAP_CMD_STA, "status", "restarting");
                         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -394,6 +451,11 @@ void BAP_handle_settings(const char *parameter, const char *value) {
                     nvs_config_set_string(NVS_CONFIG_WIFI_PASS, value);
                     //ESP_LOGI(TAG, "WiFi password set");
                     BAP_send_message(BAP_CMD_ACK, parameter, "password_set");
+#ifdef CONFIG_NX_TIMED_SESSIONS
+                    if (!nx_bap_restart_allowed(parameter)) {
+                        return; // Gate B7: restart withheld; applies next boot
+                    }
+#endif
                     vTaskDelay(pdMS_TO_TICKS(100));
                     //ESP_LOGI(TAG, "Restarting to apply new WiFi settings");
                     BAP_send_message(BAP_CMD_STA, "status", "restarting");
