@@ -93,4 +93,13 @@ PoolOperationStatus pool_operation_coordinator_release_manual(
     PoolOperationCoordinator *c, const PoolOperationLeaseToken *token,
     PoolOperationOutcome outcome);
 
+/* Atomic Gate B8 no-mutation aborts (see pool_operation_policy.h for the
+ * exact admissibility and evidence rules). */
+PoolOperationStatus pool_operation_coordinator_abort_reservation(
+    PoolOperationCoordinator *c, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence);
+PoolOperationStatus pool_operation_coordinator_abort_acknowledge(
+    PoolOperationCoordinator *c, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence);
+
 #endif /* POOL_OPERATION_COORDINATOR_H_ */

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "pool_operation_coordinator.h"
+#include "pool_operation_http_policy.h"
 
 /*
  * NeuralAxe timed pool sessions — PRODUCTION MUTATION FENCE
@@ -87,6 +88,35 @@ const char *nx_admission_verdict_str(NxAdmissionVerdict v);
  */
 bool nx_timed_sessions_mutation_allowed(NxMutationKind kind,
                                         NxAdmissionVerdict *out_verdict);
+
+/*
+ * Gate B8 addition: the SAME read-only admission decision, additionally
+ * mapped through the committed B5 HTTP conflict mapper so every denied
+ * production mutation can answer with ONE standardized sanitized body.
+ *
+ * Returns true when the mutation may proceed (out_conflict is zeroed with
+ * http_status 0 / OP_HTTP_NONE). On a denial out_conflict carries ONLY the
+ * committed sanitized surface: HTTP 409, a stable machine code, the
+ * retryable flag, the owner CLASS and the two safe booleans — never a lease
+ * token, lease generation, record generation, session id, hostname, port,
+ * account, worker, wallet, password, raw record or raw NVS byte.
+ *
+ * This does NOT weaken the Gate B7 admission fence: it is the same
+ * evaluation, taken at the same point, BEFORE the first side effect. With
+ * CONFIG_NX_TIMED_SESSIONS disabled it always admits, exactly as before.
+ */
+bool nx_timed_sessions_mutation_conflict(NxMutationKind kind,
+                                         NxAdmissionVerdict *out_verdict,
+                                         PoolOperationHttpConflict *out_conflict);
+
+/*
+ * Testable core of the above against an EXPLICIT coordinator. Read-only: no
+ * lease is acquired and no state changes. A NULL or unbootstrapped
+ * coordinator fails closed with OP_HTTP_OPERATION_BOOTSTRAP_REQUIRED.
+ */
+NxAdmissionVerdict nx_admission_conflict(PoolOperationCoordinator *coord,
+                                         NxMutationKind kind,
+                                         PoolOperationHttpConflict *out_conflict);
 
 _Static_assert(NX_MUTATION__COUNT == 3, "mutation class count changed — review call sites");
 _Static_assert(NX_ADMIT__COUNT == 6, "verdict count changed — review tokens/tests");

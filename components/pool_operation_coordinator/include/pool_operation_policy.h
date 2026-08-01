@@ -144,4 +144,93 @@ PoolOperationStatus pool_operation_release_manual(PoolOperationState *s,
                                                   const PoolOperationLeaseToken *token,
                                                   PoolOperationOutcome outcome);
 
+/* ------------------------------------------------------------------ */
+/* Gate B8 correction — audited no-mutation aborts                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * WHY THESE EXIST. Before Gate B8 a session-class lease could only dissolve
+ * through a DURABLE terminal proof, and the manual release explicitly
+ * refuses session owners ("session leases need durable proof"). That is
+ * right for every lease that may have mutated something — but it left two
+ * holes:
+ *
+ *  - a create whose FIRST record commit definitely failed holds a
+ *    RESERVED_PENDING_PERSISTENCE lease that nothing can dissolve, even
+ *    though it provably changed nothing at all;
+ *  - an acknowledgement whose tombstone definitely did not commit holds a
+ *    short-lived SESSION_ACKNOWLEDGE lease with the same problem.
+ *
+ * Both would block every later mutation until a reboot. The two functions
+ * below are the NARROW, token-verified, evidence-demanding answer. They are
+ * NOT a general release: each is admissible from exactly one owner in
+ * exactly one phase, each demands positive proof that NOTHING was mutated,
+ * and each refuses (leaving the lease exactly as it was) when any part of
+ * that proof is missing.
+ */
+
+/*
+ * Positive evidence that an operation mutated NOTHING. Bounded scalars and
+ * booleans only — no identity, secret, record byte or NVS key. Every field
+ * must be independently established by the caller BEFORE calling; a claim
+ * that cannot be proven must be reported as false, which refuses the abort.
+ */
+typedef struct {
+    /* Result of the INDEPENDENT reload performed after the failed write. */
+    PoolStoreResult store_result;
+    /* The reload proved the committed state is EXACTLY the pre-operation
+     * state (same kind, same content, same committed generation). */
+    bool store_unchanged;
+    /* No pool-configuration key was written or staged. */
+    bool pool_config_untouched;
+    /* No protocol/Stratum operation was started, stopped or reconnected. */
+    bool protocol_untouched;
+    /* The monotonic restore obligation was never established. */
+    bool restore_required_never_set;
+} PoolOperationNoMutationEvidence;
+
+/*
+ * Abort an UNCOMMITTED timed-session reservation.
+ *
+ * Admissible ONLY for owner OP_OWNER_TIMED_SESSION in phase
+ * RESERVED_PENDING_PERSISTENCE with `durable_claim == false` — the exact
+ * posture in which B5 itself knows no SESSION_COMMITTED proof was ever
+ * accepted (a committed session would already be ACTIVE). A reconstructed
+ * OP_OWNER_BOOT_RECOVERY reservation is a DURABLE claim and is never
+ * abortable.
+ *
+ * Evidence rules:
+ *  - STORE_COMMIT_UNCERTAIN enters the RECOVERY_GUARD and never releases;
+ *  - `store_result` must be one of EMPTY / CLEARED / OK (any other result
+ *    is not proof that the old state survived) and `store_unchanged` must
+ *    be true;
+ *  - the three untouched/never-set booleans must all be true.
+ * Anything else returns OP_ERR_UNSAFE_RELEASE and changes NOTHING.
+ *
+ * On success: the generation rotates (every prior token becomes stale),
+ * ownership becomes FREE, the session binding is cleared, and NO terminal
+ * result is invented — `terminal_pending` is left exactly as it was.
+ */
+PoolOperationStatus pool_operation_abort_reservation(
+    PoolOperationState *s, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence);
+
+/*
+ * Abort a SESSION_ACKNOWLEDGE lease whose tombstone definitely did not
+ * commit.
+ *
+ * Admissible ONLY for owner OP_OWNER_SESSION_ACKNOWLEDGE. Requires
+ * `store_result == STORE_OK` together with `store_unchanged` — i.e. an
+ * independent reload proved the ORIGINAL safe terminal record is still the
+ * committed state. STORE_COMMIT_UNCERTAIN enters the RECOVERY_GUARD and
+ * never releases; anything else returns OP_ERR_UNSAFE_RELEASE unchanged.
+ *
+ * On success: the generation rotates, ownership becomes FREE and
+ * `terminal_pending` STAYS TRUE, so the retained terminal result survives
+ * and a later acknowledgement may retry.
+ */
+PoolOperationStatus pool_operation_abort_acknowledge(
+    PoolOperationState *s, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence);
+
 #endif /* POOL_OPERATION_POLICY_H_ */

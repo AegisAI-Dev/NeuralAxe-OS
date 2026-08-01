@@ -944,6 +944,113 @@ PoolOperationStatus pool_operation_release_manual(PoolOperationState *s,
 }
 
 /* ------------------------------------------------------------------ */
+/* Gate B8 correction — audited no-mutation aborts                     */
+/* ------------------------------------------------------------------ */
+
+/* The three "nothing happened outside the store" claims, all required. */
+static bool evidence_untouched(const PoolOperationNoMutationEvidence *ev)
+{
+    return ev->store_unchanged && ev->pool_config_untouched &&
+           ev->protocol_untouched && ev->restore_required_never_set;
+}
+
+PoolOperationStatus pool_operation_abort_reservation(
+    PoolOperationState *s, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence)
+{
+    PoolOperationStatus ts;
+
+    if (s == NULL || evidence == NULL) {
+        return OP_ERR_INVALID_ARGUMENT;
+    }
+    ts = check_token(s, token);
+    if (ts != OP_OK) {
+        return ts;
+    }
+    /*
+     * ONLY an uncommitted create reservation. A reconstructed
+     * OP_OWNER_BOOT_RECOVERY reservation represents a DURABLE record and is
+     * never abortable, and any other owner is simply not this operation.
+     */
+    if (s->owner != OP_OWNER_TIMED_SESSION) {
+        return OP_ERR_NOT_OWNER;
+    }
+    if (s->phase != OP_PHASE_RESERVED_PENDING_PERSISTENCE) {
+        return OP_ERR_INVALID_TRANSITION;
+    }
+    /* B5's OWN knowledge that no commit was ever proven under this lease. */
+    if (s->durable_claim || s->bound_record_generation != 0u || s->restore_required) {
+        return OP_ERR_UNSAFE_RELEASE;
+    }
+    /* Uncertainty NEVER releases — it escalates. */
+    if (evidence->store_result == STORE_COMMIT_UNCERTAIN) {
+        enter_recovery_guard(s);
+        return OP_ERR_PERSISTENCE_UNCERTAIN;
+    }
+    /* Only these three results can prove the old committed state survived. */
+    if (evidence->store_result != STORE_EMPTY &&
+        evidence->store_result != STORE_CLEARED &&
+        evidence->store_result != STORE_OK) {
+        return OP_ERR_UNSAFE_RELEASE;
+    }
+    if (!evidence_untouched(evidence)) {
+        return OP_ERR_UNSAFE_RELEASE;
+    }
+    if (!bump_generation(s)) {
+        return OP_ERR_GENERATION_EXHAUSTED;
+    }
+    /* Ownership dissolves; NO terminal result is invented. */
+    s->owner = OP_OWNER_NONE;
+    s->phase = OP_PHASE_FREE;
+    s->bound_session_id = 0u;
+    s->bound_record_generation = 0u;
+    s->resource_scopes = 0u;
+    s->persistence_required_before_action = false;
+    s->durable_claim = false;
+    /* terminal_pending is deliberately left untouched: a retained terminal
+     * result from an earlier session is not this reservation's business. */
+    return OP_OK;
+}
+
+PoolOperationStatus pool_operation_abort_acknowledge(
+    PoolOperationState *s, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence)
+{
+    PoolOperationStatus ts;
+
+    if (s == NULL || evidence == NULL) {
+        return OP_ERR_INVALID_ARGUMENT;
+    }
+    ts = check_token(s, token);
+    if (ts != OP_OK) {
+        return ts;
+    }
+    if (s->owner != OP_OWNER_SESSION_ACKNOWLEDGE) {
+        return OP_ERR_NOT_OWNER;
+    }
+    if (evidence->store_result == STORE_COMMIT_UNCERTAIN) {
+        enter_recovery_guard(s);
+        return OP_ERR_PERSISTENCE_UNCERTAIN;
+    }
+    /* The ORIGINAL terminal record must provably still be the committed
+     * state: a tombstone that landed would read back as STORE_CLEARED. */
+    if (evidence->store_result != STORE_OK || !evidence_untouched(evidence)) {
+        return OP_ERR_UNSAFE_RELEASE;
+    }
+    if (!bump_generation(s)) {
+        return OP_ERR_GENERATION_EXHAUSTED;
+    }
+    s->owner = OP_OWNER_NONE;
+    s->phase = OP_PHASE_FREE;
+    s->resource_scopes = 0u;
+    s->persistence_required_before_action = false;
+    /* THE point of this abort: the retained terminal result survives, so a
+     * later acknowledgement may retry and a new session stays blocked. */
+    s->terminal_pending = true;
+    return OP_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /* Stable machine tokens                                               */
 /* ------------------------------------------------------------------ */
 

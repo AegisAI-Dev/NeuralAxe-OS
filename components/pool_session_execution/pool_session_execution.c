@@ -2271,6 +2271,138 @@ bool pool_session_executor_owns_flow(const PoolSessionExecutor *ex)
     return pool_exec_state_owns_flow(ex->state);
 }
 
+bool pool_session_executor_grant_active(const PoolSessionExecutor *ex)
+{
+    if (ex == NULL || !ex->initialized || !ex->bound || ex->rt == NULL) {
+        return false;
+    }
+    return exec_grant_currently_valid(ex);
+}
+
+/* ------------------------------------------------------------------ */
+/* Gate B8 — same-boot adoption of a freshly created session           */
+/* ------------------------------------------------------------------ */
+
+PoolExecReason pool_session_executor_adopt_created_session(PoolSessionExecutor *ex)
+{
+    PoolSessionRuntime *rt;
+    PoolExecReason      why;
+    PoolExecTlsVerdict  tls;
+
+    if (ex == NULL || !ex->initialized || !ex->bound || ex->rt == NULL) {
+        return EXEC_REASON_NOT_BOUND;
+    }
+    if (!ex->system_ready) {
+        return EXEC_REASON_SYSTEM_NOT_READY;
+    }
+    /* Exactly one flow: adoption is admissible only from a quiescent
+     * executor, so it can never race an in-flight execution. */
+    if (ex->state != EXEC_STATE_IDLE) {
+        return EXEC_REASON_OWNERSHIP_MISMATCH;
+    }
+    rt = ex->rt;
+    if (!exec_device_supported(ex, &why)) {
+        return why;
+    }
+
+    /* The durable truth must be EXACTLY a fresh pre-mutation snapshot. */
+    if (!rt->record_present || rt->store_result != STORE_OK ||
+        rt->record.kind != (uint8_t)POOL_RECORD_KIND_SESSION ||
+        rt->record.session_id == 0u ||
+        rt->record.state != POOL_STATE_TARGET_SNAPSHOT_COMMITTED ||
+        rt->record.restore_required ||
+        rt->record.password_policy != POOL_SESSION_PW_KEEP_CURRENT) {
+        return EXEC_REASON_RECORD_INCOMPATIBLE;
+    }
+    /* The B5 lease must still be the one the SESSION_COMMITTED proof
+     * activated, under the CURRENT token. */
+    if (!rt->token.valid || !pool_exec_state_ownership_compatible(
+                                EXEC_STATE_TARGET_APPLYING, rt->lease.owner,
+                                rt->lease.phase)) {
+        return EXEC_REASON_OWNERSHIP_MISMATCH;
+    }
+
+    /* Same TLS representability gate as the committed entry path, applied
+     * BEFORE any mutation intent: the source is still the live pool. */
+    ex->config_ops->read_effective(ex->config_ctx, &ex->cfg_now);
+    tls = pool_exec_tls_representable(&ex->cfg_now);
+    if (tls != EXEC_TLS_OK) {
+        return (tls == EXEC_TLS_UNREADABLE) ? EXEC_REASON_CONFIG_UNCERTAIN
+                                            : EXEC_REASON_TLS_MODE_UNSUPPORTED;
+    }
+
+    if (pool_session_record_to_session(&rt->record, &ex->session) != RECORD_OK) {
+        return EXEC_REASON_RECORD_INCOMPATIBLE;
+    }
+    ex->session_loaded = true;
+
+    /* Ride the target-verification phase, exactly like the resume path. */
+    why = exec_require_phase(ex, OP_PHASE_VERIFYING_TARGET);
+    if (why != EXEC_REASON_NONE) {
+        ex->session_loaded = false;
+        return why;
+    }
+
+    /*
+     * THE pre-mutation action boundary. The committed B1 rule sets the
+     * monotonic restore obligation together with this first
+     * APPLY_TARGET_CONFIGURATION intent, and exec_apply_event commits
+     * APPLYING_TARGET, reloads it independently, verifies it exactly and
+     * proves it to B5 before returning. NOTHING has touched a pool key yet
+     * — the transaction is only ARMED below and first stages on the next
+     * executor step.
+     */
+    if (!exec_event_or_guard(ex, POOL_EVT_TARGET_APPLY_REQUESTED, &why)) {
+        return (why == EXEC_REASON_NONE) ? EXEC_REASON_PERSIST_FAILED : why;
+    }
+    if (ex->session.state != POOL_STATE_APPLYING_TARGET ||
+        !ex->session.restore_required || !rt->record.restore_required) {
+        /* The obligation is not durable: refuse to arm anything. */
+        exec_enter_guard(ex, EXEC_REASON_INTERNAL);
+        return EXEC_REASON_INTERNAL;
+    }
+
+    ex->apply_role    = 1u;
+    ex->stop_attempts = 0u;
+    exec_set_state(ex, EXEC_STATE_TARGET_APPLYING, EXEC_REASON_CONFIG_VERIFIED);
+    exec_publish(ex);
+    return EXEC_REASON_NONE;
+}
+
+/* ------------------------------------------------------------------ */
+/* Gate B8 — externally caused restoration (heartbeat fail-safe)       */
+/* ------------------------------------------------------------------ */
+
+PoolExecReason pool_session_executor_request_restore(PoolSessionExecutor *ex,
+                                                     PoolExecReason cause)
+{
+    PoolSessionEventType b1_cause;
+
+    if (ex == NULL || !ex->initialized || !ex->bound || ex->rt == NULL) {
+        return EXEC_REASON_NOT_BOUND;
+    }
+    if (!pool_exec_state_owns_flow(ex->state) || !ex->session_loaded) {
+        return EXEC_REASON_OWNERSHIP_MISMATCH;
+    }
+    if (pool_state_is_restore_side(ex->session.state) ||
+        ex->state == EXEC_STATE_RECOVERY_GUARD) {
+        return EXEC_REASON_NONE; /* already restoring or guarded: idempotent */
+    }
+    if (!pool_state_allows_restore_now(ex->session.state)) {
+        return EXEC_REASON_TRANSITION_REJECTED;
+    }
+
+    /* The committed restore entry closes the ASIC gate FIRST, then revokes
+     * the grant, then drives the B1 cause — that exact order. */
+    b1_cause = (ex->session.state == POOL_STATE_TARGET_ACTIVE)
+                   ? POOL_EVT_RESTORE_NOW_REQUESTED
+                   : POOL_EVT__COUNT;
+    ex->apply_role = 2u;
+    exec_begin_restore(ex, cause, b1_cause);
+    exec_publish(ex);
+    return EXEC_REASON_NONE;
+}
+
 PoolExecReason pool_session_executor_snapshot(const PoolSessionExecutor *ex,
                                               PoolExecutionSnapshot *out)
 {

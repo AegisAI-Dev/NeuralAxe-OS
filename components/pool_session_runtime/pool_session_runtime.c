@@ -117,6 +117,40 @@ static bool runtime_executor_owns_flow(void) { return false; }
 static void runtime_step_executor(void) {}
 #endif /* CONFIG_NX_TIMED_SESSIONS_EXECUTION */
 
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+/*
+ * Gate B8 API command hook (see the header contract). Registered once at
+ * boot before the owner task starts stepping; consumed ONLY by that task,
+ * so the API command processor is not a second mutating owner. The cached
+ * answer tells the re-evaluation machinery on the SAME task that the API
+ * owns the flow of a freshly created pre-mutation session.
+ */
+static PoolRuntimeApiCommandHook s_api_hook = NULL;
+static void                     *s_api_hook_ctx = NULL;
+static bool                      s_api_owns_flow = false;
+
+void pool_session_runtime_register_api_commands(PoolRuntimeApiCommandHook hook, void *ctx)
+{
+    s_api_hook     = hook;
+    s_api_hook_ctx = ctx;
+}
+
+static bool runtime_api_owns_flow(void)
+{
+    return s_api_owns_flow;
+}
+
+static void runtime_step_api_commands(void)
+{
+    if (s_api_hook != NULL) {
+        s_api_owns_flow = s_api_hook(s_api_hook_ctx);
+    }
+}
+#else
+static bool runtime_api_owns_flow(void) { return false; }
+static void runtime_step_api_commands(void) {}
+#endif /* CONFIG_NX_TIMED_SESSIONS_API */
+
 uint32_t pool_session_runtime_task_count(void)
 {
     uint32_t n;
@@ -613,7 +647,16 @@ static void runtime_reevaluate(PoolSessionRuntime *rt)
      * its action-boundary commits. Without the execution flag this branch
      * compiles to the committed B6 behavior unchanged.
      */
-    if (!runtime_executor_owns_flow()) {
+    /*
+     * Gate B8 extends the SAME rule to the API command processor: it reports
+     * the flow as owned while a command transaction is in progress AND while
+     * the executor it handed the session to still owns it, so there is never
+     * a window in which the BOOT-time B4 table could re-plan over an in-boot
+     * creation. The plan itself is still rebuilt above, because the executor
+     * consumes it as INPUT. Without the API flag this is the committed B7
+     * condition unchanged.
+     */
+    if (!runtime_executor_owns_flow() && !runtime_api_owns_flow()) {
         ps = runtime_evaluate_persistence(rt);
         if (ps == RUNTIME_OK && rt->persist_verified) {
             /* Only a durably satisfied evaluation may tighten the owned phase. */
@@ -844,6 +887,55 @@ PoolRuntimeStatus pool_session_runtime_boot(PoolSessionRuntime *rt)
     return rt->decision.status;
 }
 
+PoolRuntimeStatus pool_session_runtime_commit_epoch_heartbeat(PoolSessionRuntime *rt,
+                                                              uint64_t epoch_s)
+{
+    PoolSessionRecoveryPlan neutral;
+
+    if (rt == NULL || !rt->initialized || !rt->booted) {
+        return RUNTIME_ERR_NOT_INITIALIZED;
+    }
+    if (!rt->record_present || rt->store_result != STORE_OK ||
+        rt->record.kind != (uint8_t)POOL_RECORD_KIND_SESSION) {
+        return RUNTIME_ERR_INTERNAL_CONSISTENCY;
+    }
+
+    /*
+     * A NEUTRAL plan: every counter equals the CURRENTLY COMMITTED value and
+     * no record proposal is requested, so pool_runtime_proposal_build()
+     * derives an EPOCH-FLOOR-ONLY proposal. The heartbeat therefore touches
+     * exactly one persisted field — the monotonically-advancing trusted
+     * epoch floor — and structurally cannot change the state, the failure
+     * code, any counter, the duration or ANY deadline field.
+     */
+    memset(&neutral, 0, sizeof(neutral));
+    neutral.counters.reboot_count                  = rt->record.reboot_count;
+    neutral.counters.recovery_attempt_count        = rt->record.recovery_attempt_count;
+    neutral.counters.consecutive_recovery_failures = rt->record.consecutive_recovery_failures;
+    neutral.counters.reset_class_for_record        = rt->record.last_reset_class;
+
+    (void)pool_runtime_proposal_build(&neutral, &rt->record, &rt->tracker,
+                                      rt->committed_generation, true, epoch_s,
+                                      &rt->proposal);
+    if (rt->proposal.kind == RUNTIME_PROPOSAL_NONE) {
+        /* Nothing would change in flash: not an error and NOT a write. */
+        return RUNTIME_ERR_PERSIST_DUPLICATE;
+    }
+    if (rt->proposal.kind != RUNTIME_PROPOSAL_EPOCH_FLOOR) {
+        /* Defensive: a heartbeat may never carry a plan part. */
+        return RUNTIME_ERR_INTERNAL_CONSISTENCY;
+    }
+    if (pool_runtime_proposal_already_proven(&rt->tracker, &rt->proposal)) {
+        return RUNTIME_ERR_PERSIST_DUPLICATE;
+    }
+
+    /* The committed generation-aware engine: commit -> independent reload ->
+     * exact readback verification -> B5 proof. */
+    rt->persist_attempted = false;
+    rt->persist_verified  = false;
+    return runtime_persist_proposal(rt);
+}
+
 PoolRuntimeProtocolPermission pool_session_runtime_protocol_permission(
     const PoolSessionRuntime *rt)
 {
@@ -895,6 +987,16 @@ static void runtime_task(void *arg)
         if (outcome.stop_task) {
             break;
         }
+
+        /*
+         * Gate B8: drain at most one bounded API command FIRST, so the flow
+         * ownership answer below is fresh on every path (including the
+         * store-reload branch that continues the loop). A no-op without the
+         * API flag or a registered hook. This is the ONLY consumer of the
+         * command mailbox: no second mutating task exists.
+         */
+        runtime_step_api_commands();
+
         if (outcome.start_time_provider) {
             (void)runtime_start_time_provider(rt);
         }

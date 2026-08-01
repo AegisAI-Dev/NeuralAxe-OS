@@ -2265,3 +2265,236 @@ TEST_CASE("exec_rt: property — no restore path silently returns to the target"
     TEST_ASSERT_EQUAL(EXEC_STATE_RESTORE_FAILED_HELD, g_ex.state);
     teardown_all();
 }
+
+/* ================================================================= */
+/* Gate B8 additions — same-boot adoption and ordered fail-safe        */
+/* ================================================================= */
+
+/*
+ * Reproduce EXACTLY what the Gate B8 create command leaves behind: a
+ * durable TARGET_SNAPSHOT_COMMITTED record with restore_required == false,
+ * an activated B5 lease in OP_PHASE_ACTIVE and a current token.
+ */
+static void posture_fresh_create(void)
+{
+    PoolOperationRequest          req;
+    PoolOperationDecision         dec;
+    PoolOperationPersistenceProof proof;
+    PoolSessionRequest            r;
+    PoolSessionEvent              ev;
+    PoolSession                   s;
+
+    memset(&r, 0, sizeof(r));
+    r.model_version   = POOL_SESSION_MODEL_VERSION;
+    r.session_id      = SESSION_ID;
+    r.duration_s      = 3600u;
+    r.password_policy = POOL_SESSION_PW_KEEP_CURRENT;
+    fill_identity(&r.source, POOL_CHAIN_CUSTOM_UNKNOWN, "btc.example", 3333,
+                  "acct.worker");
+    fill_identity(&r.target, POOL_CHAIN_BITCOIN_CASH, "bch.example", 3334,
+                  "acct.worker");
+    strncpy(r.board_version, "601", sizeof(r.board_version) - 1);
+    strncpy(r.asic_model, "BM1370", sizeof(r.asic_model) - 1);
+    TEST_ASSERT_EQUAL(ERR_NONE, pool_session_validate_request(&r));
+
+    pool_session_init(&s);
+    memset(&ev, 0, sizeof(ev));
+    ev.type       = POOL_EVT_CREATE_REQUESTED;
+    ev.session_id = SESSION_ID;
+    ev.request    = &r;
+    (void)pool_session_transition(&s, &ev, &s);
+    memset(&ev, 0, sizeof(ev));
+    ev.type       = POOL_EVT_SOURCE_SNAPSHOT_COMMITTED;
+    ev.session_id = SESSION_ID;
+    (void)pool_session_transition(&s, &ev, &s);
+    TEST_ASSERT_EQUAL(POOL_STATE_TARGET_SNAPSHOT_COMMITTED, s.state);
+    TEST_ASSERT_FALSE(s.restore_required);
+
+    memset(&req, 0, sizeof(req));
+    req.kind       = OP_REQUEST_TIMED_SESSION_START;
+    req.session_id = SESSION_ID;
+    memset(&dec, 0, sizeof(dec));
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_coordinator_try_acquire(
+                                 &g_rt.coord, &req, &g_rt.token, &dec));
+
+    TEST_ASSERT_EQUAL(RECORD_OK, pool_session_record_from_session(&s, &g_rec));
+    TEST_ASSERT_EQUAL(STORE_OK, pool_session_store_commit_record(&g_rt.store, &g_rec));
+    TEST_ASSERT_EQUAL(STORE_OK,
+                      pool_session_store_load(&g_rt.store, &g_rt.record, &g_rt.load_info));
+    g_rt.record_present = true;
+    g_rt.store_result   = STORE_OK;
+    (void)pool_session_store_committed_generation(&g_rt.store, &g_rt.committed_generation);
+
+    memset(&proof, 0, sizeof(proof));
+    proof.kind                        = OP_PROOF_SESSION_COMMITTED;
+    proof.store_result                = STORE_OK;
+    proof.committed_record_generation = g_rt.record.generation;
+    proof.session_id                  = g_rt.record.session_id;
+    proof.persisted_state             = POOL_STATE_TARGET_SNAPSHOT_COMMITTED;
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_coordinator_apply_persistence_proof(
+                                 &g_rt.coord, &g_rt.token, &proof, &g_rt.token));
+    (void)pool_operation_coordinator_snapshot(&g_rt.coord, &g_rt.lease);
+    TEST_ASSERT_EQUAL(OP_PHASE_ACTIVE, g_rt.lease.phase);
+    TEST_ASSERT_TRUE(g_rt.token.valid);
+}
+
+static void setup_fresh_create(void)
+{
+    fake_store_reset();
+    fakes_reset();
+    boot_runtime();
+    posture_fresh_create();
+    /* Before adoption the device is still on its SOURCE configuration. */
+    pool_exec_desired_from_identity(&g_rt.record.source, &g_cfg.effective);
+    bind_executor();
+}
+
+TEST_CASE("b8-adopt: a session created this boot is adopted by the executor",
+          "[pool_exec_rt]")
+{
+    PoolSessionRecord after;
+
+    setup_fresh_create();
+    TEST_ASSERT_EQUAL(EXEC_STATE_IDLE, g_ex.state);
+    TEST_ASSERT_FALSE(pool_session_executor_owns_flow(&g_ex));
+    TEST_ASSERT_EQUAL_INT(0, g_cfg.stage_calls);
+
+    TEST_ASSERT_EQUAL(EXEC_REASON_NONE,
+                      pool_session_executor_adopt_created_session(&g_ex));
+
+    /* The pre-mutation action boundary is DURABLE before anything is armed. */
+    TEST_ASSERT_EQUAL(STORE_OK, reload_committed(&after));
+    TEST_ASSERT_EQUAL(POOL_STATE_APPLYING_TARGET, after.state);
+    TEST_ASSERT_TRUE(after.restore_required);
+    TEST_ASSERT_EQUAL(POOL_SESSION_PW_KEEP_CURRENT, after.password_policy);
+    TEST_ASSERT_EQUAL_UINT32(SESSION_ID, after.session_id);
+    TEST_ASSERT_TRUE(after.generation > 1u);
+    /* Target mutation is IMPOSSIBLE before that: not one pool key staged. */
+    TEST_ASSERT_EQUAL_INT(0, g_cfg.stage_calls);
+    TEST_ASSERT_EQUAL_INT(0, g_proto.start_calls);
+
+    /* Ownership transferred exactly once; the executor is authoritative. */
+    TEST_ASSERT_EQUAL(EXEC_STATE_TARGET_APPLYING, g_ex.state);
+    TEST_ASSERT_TRUE(pool_session_executor_owns_flow(&g_ex));
+    TEST_ASSERT_EQUAL(OP_PHASE_VERIFYING_TARGET, g_rt.lease.phase);
+    TEST_ASSERT_FALSE(pool_session_execution_asic_work_allowed());
+
+    /* Only the NEXT step arms the configuration transaction. */
+    (void)step1();
+    TEST_ASSERT_EQUAL_INT(1, g_cfg.stage_calls);
+    teardown_all();
+}
+
+TEST_CASE("b8-adopt: adoption is refused without side effects when unusable",
+          "[pool_exec_rt]")
+{
+    PoolSessionRecord after;
+
+    /* Not system-ready. */
+    setup_fresh_create();
+    pool_session_executor_set_system_ready(&g_ex, false);
+    TEST_ASSERT_EQUAL(EXEC_REASON_SYSTEM_NOT_READY,
+                      pool_session_executor_adopt_created_session(&g_ex));
+    TEST_ASSERT_EQUAL(STORE_OK, reload_committed(&after));
+    TEST_ASSERT_EQUAL(POOL_STATE_TARGET_SNAPSHOT_COMMITTED, after.state);
+    TEST_ASSERT_FALSE(after.restore_required);
+    TEST_ASSERT_EQUAL_INT(0, g_cfg.stage_calls);
+    TEST_ASSERT_FALSE(pool_session_executor_owns_flow(&g_ex));
+    teardown_all();
+
+    /* Unsupported hardware. */
+    setup_fresh_create();
+    strncpy(g_cfg.board, "203", sizeof(g_cfg.board) - 1);
+    TEST_ASSERT_EQUAL(EXEC_REASON_BOARD_UNSUPPORTED,
+                      pool_session_executor_adopt_created_session(&g_ex));
+    TEST_ASSERT_EQUAL(STORE_OK, reload_committed(&after));
+    TEST_ASSERT_EQUAL(POOL_STATE_TARGET_SNAPSHOT_COMMITTED, after.state);
+    TEST_ASSERT_EQUAL_INT(0, g_cfg.stage_calls);
+    teardown_all();
+
+    /* A custom-certificate source cannot be restored exactly. */
+    setup_fresh_create();
+    g_cfg.effective.primary_tls_mode = POOL_EXEC_TLS_MODE_CUSTOM;
+    TEST_ASSERT_EQUAL(EXEC_REASON_TLS_MODE_UNSUPPORTED,
+                      pool_session_executor_adopt_created_session(&g_ex));
+    TEST_ASSERT_EQUAL(STORE_OK, reload_committed(&after));
+    TEST_ASSERT_EQUAL(POOL_STATE_TARGET_SNAPSHOT_COMMITTED, after.state);
+    TEST_ASSERT_EQUAL_INT(0, g_cfg.stage_calls);
+    teardown_all();
+
+    /* A wrong durable state is never adoptable. */
+    setup_resume(); /* TARGET_ACTIVE resume posture, not a fresh create */
+    TEST_ASSERT_EQUAL(EXEC_REASON_RECORD_INCOMPATIBLE,
+                      pool_session_executor_adopt_created_session(&g_ex));
+    TEST_ASSERT_EQUAL_INT(0, g_cfg.stage_calls);
+    teardown_all();
+}
+
+TEST_CASE("b8-adopt: adoption never creates a second owner", "[pool_exec_rt]")
+{
+    setup_fresh_create();
+    TEST_ASSERT_EQUAL(EXEC_REASON_NONE,
+                      pool_session_executor_adopt_created_session(&g_ex));
+    TEST_ASSERT_TRUE(pool_session_executor_owns_flow(&g_ex));
+
+    /* A second adoption is refused: the executor is no longer quiescent. */
+    TEST_ASSERT_EQUAL(EXEC_REASON_OWNERSHIP_MISMATCH,
+                      pool_session_executor_adopt_created_session(&g_ex));
+    TEST_ASSERT_EQUAL(EXEC_STATE_TARGET_APPLYING, g_ex.state);
+    TEST_ASSERT_EQUAL(OP_OWNER_TIMED_SESSION, g_rt.lease.owner);
+    teardown_all();
+}
+
+TEST_CASE("b8-failsafe: an ordered restore inhibits, revokes, then restores",
+          "[pool_exec_rt]")
+{
+    PoolSessionRecord after;
+
+    setup_resume();
+    step_until(EXEC_STATE_TARGET_CONNECTING, 8);
+    feed_connection_and_job();
+    step_until(EXEC_STATE_TARGET_MINING, 6);
+    TEST_ASSERT_TRUE(pool_session_execution_asic_work_allowed());
+    TEST_ASSERT_TRUE(pool_session_executor_grant_active(&g_ex));
+
+    /* THE fail-safe order: gate inhibited, grant revoked, restore driven. */
+    TEST_ASSERT_EQUAL(EXEC_REASON_NONE,
+                      pool_session_executor_request_restore(&g_ex,
+                                                            EXEC_REASON_PERSIST_FAILED));
+    TEST_ASSERT_FALSE(pool_session_execution_asic_work_allowed());
+    TEST_ASSERT_FALSE(pool_session_executor_grant_active(&g_ex));
+    (void)pool_session_executor_snapshot(&g_ex, &g_snap);
+    TEST_ASSERT_FALSE(g_snap.mining_grant_active);
+    TEST_ASSERT_EQUAL(EXEC_STATE_RESTORE_PENDING, g_ex.state);
+
+    /* The restoration intent is durable and the obligation is retained. */
+    TEST_ASSERT_EQUAL(STORE_OK, reload_committed(&after));
+    TEST_ASSERT_EQUAL(POOL_STATE_RESTORE_DUE, after.state);
+    TEST_ASSERT_TRUE(after.restore_required);
+    /* The deadline and duration are untouched by the fail-safe. */
+    TEST_ASSERT_EQUAL_UINT32(3600u, after.duration_s);
+
+    /* Idempotent: a repeat order changes nothing and never re-revokes. */
+    TEST_ASSERT_EQUAL(EXEC_REASON_NONE,
+                      pool_session_executor_request_restore(&g_ex,
+                                                            EXEC_REASON_PERSIST_FAILED));
+    TEST_ASSERT_EQUAL(EXEC_STATE_RESTORE_PENDING, g_ex.state);
+    TEST_ASSERT_FALSE(pool_session_execution_asic_work_allowed());
+    teardown_all();
+}
+
+TEST_CASE("b8-failsafe: an ordered restore is refused from a non-owning posture",
+          "[pool_exec_rt]")
+{
+    setup_fresh_create();
+    /* IDLE owns nothing: the order is refused with no side effects. */
+    TEST_ASSERT_EQUAL(EXEC_REASON_OWNERSHIP_MISMATCH,
+                      pool_session_executor_request_restore(&g_ex,
+                                                            EXEC_REASON_PERSIST_FAILED));
+    TEST_ASSERT_EQUAL(EXEC_STATE_IDLE, g_ex.state);
+    TEST_ASSERT_EQUAL_INT(0, g_cfg.stage_calls);
+    TEST_ASSERT_EQUAL(EXEC_REASON_NOT_BOUND,
+                      pool_session_executor_request_restore(NULL,
+                                                            EXEC_REASON_PERSIST_FAILED));
+    teardown_all();
+}

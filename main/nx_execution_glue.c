@@ -38,12 +38,18 @@
 #include "pool_session_execution.h"
 #include "pool_session_runtime.h"
 #include "pool_session_runtime_boot.h"
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+#include "pool_session_command.h"
+#endif
 
 static const char *TAG = "nx_pool_glue";
 
 static PoolSessionExecutor s_executor;
 static GlobalState        *s_gs;
 static bool                s_bound;
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+static bool                s_api_bound;
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Configuration adapter                                               */
@@ -468,6 +474,87 @@ void nx_pool_execution_notify_system_ready(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Gate B8 API command processor binding                               */
+/* ------------------------------------------------------------------ */
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+
+/*
+ * Keep-current-password probe. It answers ONE boolean: will the currently
+ * stored pool password survive a timed session exactly as it is? It reads
+ * only the VALUE LENGTH through nvs_get_str(..., NULL, &len) and NEVER
+ * copies, returns, logs or compares a single password byte. A timed session
+ * never writes either password key (the Gate B7 configuration contract), so
+ * a present key and an absent key with an audited default are equally
+ * retained; only a hard I/O error fails closed.
+ */
+static bool glue_source_password_retained(void *ctx)
+{
+    const Settings *setting = nvs_config_get_settings(NVS_CONFIG_STRATUM_PASS);
+    nvs_handle_t    h;
+    size_t          len = 0;
+    esp_err_t       err;
+
+    (void)ctx;
+    if (setting == NULL || setting->nvs_key_name == NULL) {
+        return false;
+    }
+    if (nvs_open("main", NVS_READONLY, &h) != ESP_OK) {
+        /* The namespace does not exist yet: the audited default is in force
+         * and a timed session leaves it untouched. */
+        return true;
+    }
+    err = nvs_get_str(h, setting->nvs_key_name, NULL, &len);
+    nvs_close(h);
+    return (err == ESP_OK) || (err == ESP_ERR_NVS_NOT_FOUND);
+}
+
+static const PoolApiSourceOps s_api_source_ops = {
+    .device_identity           = glue_device_identity,
+    .read_effective            = glue_read_effective,
+    .source_password_retained  = glue_source_password_retained,
+};
+
+/* Driven by the SINGLE B6 owner task, first in each loop iteration. */
+static bool glue_api_command_hook(void *ctx)
+{
+    return pool_api_processor_step((PoolSessionApiProcessor *)ctx);
+}
+
+bool nx_pool_session_api_boot_init(void)
+{
+    PoolSessionRuntime      *rt = pool_session_runtime_default_instance();
+    PoolSessionApiProcessor *ap = pool_api_default_processor();
+
+    if (s_api_bound) {
+        return true; /* exactly one bind per boot */
+    }
+    if (rt == NULL || ap == NULL || !s_bound) {
+        ESP_LOGW(TAG, "API not bound (runtime or executor unavailable)");
+        return false;
+    }
+    pool_api_processor_init(ap);
+    if (pool_api_processor_bind(ap, rt, &s_api_source_ops, NULL, &s_executor) !=
+        API_SUBMIT_ACCEPTED) {
+        ESP_LOGE(TAG, "API processor bind refused");
+        return false;
+    }
+    pool_session_runtime_register_api_commands(glue_api_command_hook, ap);
+    s_api_bound = true;
+    ESP_LOGI(TAG, "Gate B8 API command processor bound (API flag enabled)");
+    return true;
+}
+
+#else /* !CONFIG_NX_TIMED_SESSIONS_API */
+
+bool nx_pool_session_api_boot_init(void)
+{
+    return false; /* no processor storage, no command queue, no hook */
+}
+
+#endif /* CONFIG_NX_TIMED_SESSIONS_API */
+
 #else /* !CONFIG_NX_TIMED_SESSIONS_EXECUTION — hold-only or fully disabled */
 
 bool nx_pool_execution_boot_init(void *gs)
@@ -478,6 +565,11 @@ bool nx_pool_execution_boot_init(void *gs)
 
 void nx_pool_execution_notify_system_ready(void)
 {
+}
+
+bool nx_pool_session_api_boot_init(void)
+{
+    return false; /* the API flag depends on the execution flag */
 }
 
 #endif /* CONFIG_NX_TIMED_SESSIONS_EXECUTION */

@@ -239,6 +239,51 @@ PoolExecState pool_session_executor_step(PoolSessionExecutor *ex);
  * its plan-persistence/lease-reconcile machinery). */
 bool pool_session_executor_owns_flow(const PoolSessionExecutor *ex);
 
+/* ------------------------------------------------------------------ */
+/* Gate B8 additions — same-boot adoption and externally caused restore */
+/* ------------------------------------------------------------------ */
+
+/*
+ * ADOPT A SESSION CREATED DURING THIS BOOT.
+ *
+ * The committed entry path (exec_handle_entry) is BOOT-shaped: it always
+ * applies DEVICE_RESTART_OBSERVED first and enters only from the B4 resume
+ * or restore postures. A session created by the Gate B8 API in the SAME
+ * boot has neither, so it needs this explicit, narrowly scoped entry.
+ *
+ * Preconditions (all fail closed, none mutate anything):
+ *  - the executor is bound, system-ready and IDLE;
+ *  - the durable record is a SESSION in TARGET_SNAPSHOT_COMMITTED with
+ *    restore_required == false and Keep-current-password policy;
+ *  - the current B5 token owns a session-class lease in ACTIVE;
+ *  - board 601 / BM1370 and a representable effective TLS mode.
+ *
+ * On success it drives the committed B1 TARGET_APPLY_REQUESTED boundary —
+ * committing APPLYING_TARGET with restore_required == true, reloading it
+ * independently, verifying it exactly and proving it to B5 — and only THEN
+ * arms the configuration transaction. No pool key is written by this call:
+ * the first staging happens on the NEXT executor step, strictly after the
+ * obligation is durable.
+ *
+ * Returns EXEC_REASON_NONE when the executor now owns the flow.
+ */
+PoolExecReason pool_session_executor_adopt_created_session(PoolSessionExecutor *ex);
+
+/*
+ * Externally caused restoration (Gate B8 heartbeat fail-safe).
+ *
+ * Closes the ASIC delivery gate FIRST, revokes the target-mining grant,
+ * then drives the committed restore entry with the given cause. Admissible
+ * only while the executor owns a target-side flow; every other posture is
+ * refused without side effects. The restoration itself then proceeds
+ * through the ordinary committed bounded restore path.
+ */
+PoolExecReason pool_session_executor_request_restore(PoolSessionExecutor *ex,
+                                                     PoolExecReason cause);
+
+/* True while a valid target-mining grant is currently issued. */
+bool pool_session_executor_grant_active(const PoolSessionExecutor *ex);
+
 /* Copy the sanitized execution snapshot (string-free by construction). */
 PoolExecReason pool_session_executor_snapshot(const PoolSessionExecutor *ex,
                                               PoolExecutionSnapshot *out);

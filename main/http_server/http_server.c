@@ -44,6 +44,7 @@
 #ifdef CONFIG_NX_TIMED_SESSIONS
 #include "pool_session_runtime_admission.h"
 #endif
+#include "pool_session_api.h"
 
 static const char * TAG = "http_server";
 static const char * CORS_TAG = "CORS";
@@ -722,16 +723,19 @@ bool check_settings_and_update(const cJSON * const root)
  * request BEFORE its first side effect — before any NVS queue entry, RAM
  * cache change, OTA session or restart.
  *
- * The reply is a bare 409 with a stable machine token; the standardized
- * conflict body and the complete user-facing mapping belong to Gate B8.
+ * Gate B8 standardizes the REPRESENTATION only: with the API flag enabled
+ * the reply carries the committed B5 sanitized conflict body (stable code,
+ * retryable, owner CLASS, two safe booleans); with the API flag disabled it
+ * remains the committed Gate B7 bare machine token, byte-for-byte. The
+ * admission barrier itself is unchanged and still runs BEFORE the first
+ * side effect.
  */
-static esp_err_t nx_send_conflict(httpd_req_t * req, NxAdmissionVerdict verdict)
+static esp_err_t nx_send_conflict(httpd_req_t * req, NxAdmissionVerdict verdict,
+                                  const PoolOperationHttpConflict * conflict)
 {
     ESP_LOGW(TAG, "Request denied by timed-session ownership (%s)",
              nx_admission_verdict_str(verdict));
-    httpd_resp_set_status(req, "409 Conflict");
-    httpd_resp_set_type(req, "text/plain");
-    return httpd_resp_sendstr(req, nx_admission_verdict_str(verdict));
+    return nx_pool_session_api_send_conflict(req, verdict, conflict);
 }
 
 /* The pool-identity settings a timed session owns. A PATCH touching ANY of
@@ -808,10 +812,13 @@ static esp_err_t PATCH_update_settings(httpd_req_t * req)
     // BEFORE check_settings_and_update() enqueues a single NVS write or
     // touches the RAM configuration cache.
     if (nx_patch_touches_pool_identity(root)) {
-        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
-        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_POOL_CONFIG, &verdict)) {
+        NxAdmissionVerdict        verdict = NX_ADMIT_ALLOW;
+        PoolOperationHttpConflict conflict;
+        memset(&conflict, 0, sizeof(conflict));
+        if (!nx_timed_sessions_mutation_conflict(NX_MUTATION_POOL_CONFIG, &verdict,
+                                                 &conflict)) {
             cJSON_Delete(root);
-            return nx_send_conflict(req, verdict);
+            return nx_send_conflict(req, verdict, &conflict);
         }
     }
 #endif
@@ -893,9 +900,12 @@ static esp_err_t POST_restart(httpd_req_t * req)
     // Gate B7 fence: a restart during a timed session or an owed restoration
     // would interrupt a pool mutation in flight. Refuse before restarting.
     {
-        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
-        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_DEVICE_RESTART, &verdict)) {
-            return nx_send_conflict(req, verdict);
+        NxAdmissionVerdict        verdict = NX_ADMIT_ALLOW;
+        PoolOperationHttpConflict conflict;
+        memset(&conflict, 0, sizeof(conflict));
+        if (!nx_timed_sessions_mutation_conflict(NX_MUTATION_DEVICE_RESTART, &verdict,
+                                                 &conflict)) {
+            return nx_send_conflict(req, verdict, &conflict);
         }
     }
 #endif
@@ -1216,9 +1226,12 @@ esp_err_t POST_WWW_update(httpd_req_t * req)
 #ifdef CONFIG_NX_TIMED_SESSIONS
     // Gate B7 fence: refuse before any web-asset OTA state is created.
     {
-        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
-        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_OTA_UPDATE, &verdict)) {
-            return nx_send_conflict(req, verdict);
+        NxAdmissionVerdict        verdict = NX_ADMIT_ALLOW;
+        PoolOperationHttpConflict conflict;
+        memset(&conflict, 0, sizeof(conflict));
+        if (!nx_timed_sessions_mutation_conflict(NX_MUTATION_OTA_UPDATE, &verdict,
+                                                 &conflict)) {
+            return nx_send_conflict(req, verdict, &conflict);
         }
     }
 #endif
@@ -1312,9 +1325,12 @@ esp_err_t POST_OTA_update(httpd_req_t * req)
     // and before any flash write — a firmware OTA reboots the device and
     // would abandon an in-flight pool mutation or an owed restoration.
     {
-        NxAdmissionVerdict verdict = NX_ADMIT_ALLOW;
-        if (!nx_timed_sessions_mutation_allowed(NX_MUTATION_OTA_UPDATE, &verdict)) {
-            return nx_send_conflict(req, verdict);
+        NxAdmissionVerdict        verdict = NX_ADMIT_ALLOW;
+        PoolOperationHttpConflict conflict;
+        memset(&conflict, 0, sizeof(conflict));
+        if (!nx_timed_sessions_mutation_conflict(NX_MUTATION_OTA_UPDATE, &verdict,
+                                                 &conflict)) {
+            return nx_send_conflict(req, verdict, &conflict);
         }
     }
 #endif
@@ -1414,7 +1430,16 @@ esp_err_t start_rest_server(void * pvParameters)
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 8192;
     config.max_open_sockets = 20;
-    config.max_uri_handlers = 25;
+    /*
+     * Measured budget: 22 handlers are registered today (1 OPTIONS + 1
+     * /recovery + 2 theme + 13 /api/system routes + 2 websockets + the
+     * 1-or-2 trailing wildcards), so 25 leaves 3 free slots — one short of
+     * the 4 Gate B8 handlers. The bump is bounded and applies ONLY when the
+     * API flag is enabled: esp_http_server allocates max_uri_handlers
+     * POINTERS (4 B each), so the whole cost is 16 additional bytes of heap.
+     * With the flag off the value stays exactly 25.
+     */
+    config.max_uri_handlers = 25 + NX_POOL_SESSION_API_URI_HANDLERS;
     config.close_fn = websocket_close_fn;
     config.lru_purge_enable = true;
 
@@ -1558,8 +1583,13 @@ esp_err_t start_rest_server(void * pvParameters)
     };
     httpd_register_uri_handler(server, &update_post_ota_www);
 
+    /* Gate B8 timed-session control plane. Registered BEFORE the broad
+     * "/api" and root wildcard handlers below, because the ESP-IDF server
+     * matches handlers in registration order. No-op with the API flag off. */
+    ESP_ERROR_CHECK(nx_pool_session_api_register_routes(server, rest_context));
+
     httpd_uri_t ws = {
-        .uri = "/api/ws", 
+        .uri = "/api/ws",
         .method = HTTP_GET, 
         .handler = websocket_handler, 
         .user_ctx = (void *)WS_TYPE_LOGS, 

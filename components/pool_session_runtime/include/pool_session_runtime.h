@@ -251,6 +251,43 @@ typedef bool (*PoolRuntimeExecutorHook)(void *ctx);
 void pool_session_runtime_register_executor(PoolRuntimeExecutorHook hook, void *ctx);
 #endif /* CONFIG_NX_TIMED_SESSIONS_EXECUTION */
 
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+/*
+ * Gate B8 API command hook (exists ONLY under the API flag; with it off the
+ * runtime is byte-for-byte the committed B6/B7 runtime).
+ *
+ * The single runtime owner task calls the hook once per loop iteration —
+ * FIRST, so the flow-ownership answer is fresh on every path — and it is
+ * the ONLY consumer of the bounded API command mailbox. No second mutating
+ * task is created. The hook returns true while the API owns the flow of a
+ * session it CREATED this boot; the task then withholds its BOOT-time B4
+ * re-planning and B6 re-classification from that in-boot creation (see
+ * runtime_reevaluate). Registration is one-shot at boot.
+ */
+typedef bool (*PoolRuntimeApiCommandHook)(void *ctx);
+void pool_session_runtime_register_api_commands(PoolRuntimeApiCommandHook hook, void *ctx);
+#endif /* CONFIG_NX_TIMED_SESSIONS_API */
+
+/*
+ * Commit ONE bounded TARGET_ACTIVE liveness heartbeat: raise the persisted
+ * latest-accepted trusted-epoch floor to `epoch_s` through the COMMITTED
+ * generation-aware Gate B6 persistence engine (normalized proposal ->
+ * dedupe -> commit -> independent reload -> exact readback verification ->
+ * B5 proof).
+ *
+ * It builds an EPOCH-FLOOR-ONLY proposal from a neutral plan, so it cannot
+ * change the persisted state, failure code, counters, duration or ANY
+ * deadline field — extending a deadline is structurally impossible.
+ *
+ * Returns RUNTIME_OK when a commit was performed AND durably proven,
+ * RUNTIME_ERR_PERSIST_DUPLICATE when nothing needed writing (already
+ * durable — not a write), RUNTIME_ERR_STORE_UNCERTAIN when the outcome is
+ * unknowable (the B5 recovery guard is entered), and a bounded failure
+ * status otherwise. Callable ONLY from the single owner task.
+ */
+PoolRuntimeStatus pool_session_runtime_commit_epoch_heartbeat(PoolSessionRuntime *rt,
+                                                              uint64_t epoch_s);
+
 /* ------------------------------------------------------------------ */
 /* Production singleton (feature-gated)                                */
 /* ------------------------------------------------------------------ */

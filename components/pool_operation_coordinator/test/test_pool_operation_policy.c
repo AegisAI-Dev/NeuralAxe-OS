@@ -1119,3 +1119,250 @@ TEST_CASE("op-property: pure calls are deterministic and input-immutable", "[poo
     TEST_ASSERT_EQUAL(0, memcmp(&d1, &d2, sizeof(d1)));
     TEST_ASSERT_EQUAL(0, memcmp(&r_copy, &r, sizeof(r)));
 }
+
+/* ================================================================= */
+/* H. Gate B8 correction — audited no-mutation aborts                 */
+/* ================================================================= */
+
+static PoolOperationNoMutationEvidence good_ev(PoolStoreResult r)
+{
+    PoolOperationNoMutationEvidence e;
+    memset(&e, 0, sizeof(e));
+    e.store_result               = r;
+    e.store_unchanged            = true;
+    e.pool_config_untouched      = true;
+    e.protocol_untouched         = true;
+    e.restore_required_never_set = true;
+    return e;
+}
+
+/* Acquire an uncommitted timed-session reservation from a clean FREE. */
+static void reserve_session(void)
+{
+    PoolOperationRequest r = req_of(OP_REQUEST_TIMED_SESSION_START, SESSION_ID);
+    TEST_ASSERT_EQUAL(OP_OK, boot(STORE_EMPTY, NULL, false));
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_acquire(&g_st, &r, &g_tok, &g_dec));
+    TEST_ASSERT_EQUAL(OP_OWNER_TIMED_SESSION, g_st.owner);
+    TEST_ASSERT_EQUAL(OP_PHASE_RESERVED_PENDING_PERSISTENCE, g_st.phase);
+    TEST_ASSERT_FALSE(g_st.durable_claim);
+}
+
+TEST_CASE("op-abort: a proven no-mutation reservation releases to FREE", "[pool_op]")
+{
+    PoolOperationNoMutationEvidence ev = good_ev(STORE_EMPTY);
+    PoolOperationLeaseToken stale;
+    uint32_t gen_before;
+    PoolOperationRequest start;
+
+    reserve_session();
+    stale      = g_tok;
+    gen_before = g_st.lease_generation;
+
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    /* Ownership is gone, the generation rotated and no terminal was invented. */
+    TEST_ASSERT_EQUAL(OP_OWNER_NONE, g_st.owner);
+    TEST_ASSERT_EQUAL(OP_PHASE_FREE, g_st.phase);
+    TEST_ASSERT_TRUE(g_st.lease_generation > gen_before);
+    TEST_ASSERT_FALSE(g_st.terminal_pending);
+    TEST_ASSERT_FALSE(g_st.durable_claim);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_st.bound_session_id);
+    TEST_ASSERT_EQUAL_UINT32(0u, g_st.resource_scopes);
+
+    /* The old token no longer works for anything (the exact refusal code
+     * depends on the committed check_token ordering; what matters is that
+     * it is refused and nothing changes). */
+    TEST_ASSERT_NOT_EQUAL(OP_OK,
+                          pool_operation_abort_reservation(&g_st, &stale, &ev));
+    TEST_ASSERT_EQUAL(OP_OWNER_NONE, g_st.owner);
+    TEST_ASSERT_EQUAL(OP_PHASE_FREE, g_st.phase);
+
+    /* A later create acquires normally — no client retry cleaned anything. */
+    start = req_of(OP_REQUEST_TIMED_SESSION_START, SESSION_ID + 1u);
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_acquire(&g_st, &start, &g_tok2, &g_dec));
+    TEST_ASSERT_EQUAL(OP_OWNER_TIMED_SESSION, g_st.owner);
+    TEST_ASSERT_EQUAL(OP_PHASE_RESERVED_PENDING_PERSISTENCE, g_st.phase);
+}
+
+TEST_CASE("op-abort: a CLEARED or OK store also proves an unchanged state", "[pool_op]")
+{
+    PoolOperationNoMutationEvidence ev;
+
+    reserve_session();
+    ev = good_ev(STORE_CLEARED);
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_PHASE_FREE, g_st.phase);
+
+    reserve_session();
+    ev = good_ev(STORE_OK);
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_PHASE_FREE, g_st.phase);
+}
+
+TEST_CASE("op-abort: incomplete evidence never releases a reservation", "[pool_op]")
+{
+    PoolOperationNoMutationEvidence ev;
+    unsigned i;
+
+    /* Each missing claim, one at a time. */
+    for (i = 0; i < 4u; i++) {
+        reserve_session();
+        ev = good_ev(STORE_EMPTY);
+        switch (i) {
+        case 0: ev.store_unchanged = false; break;
+        case 1: ev.pool_config_untouched = false; break;
+        case 2: ev.protocol_untouched = false; break;
+        default: ev.restore_required_never_set = false; break;
+        }
+        TEST_ASSERT_EQUAL(OP_ERR_UNSAFE_RELEASE,
+                          pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+        TEST_ASSERT_EQUAL(OP_OWNER_TIMED_SESSION, g_st.owner);
+        TEST_ASSERT_EQUAL(OP_PHASE_RESERVED_PENDING_PERSISTENCE, g_st.phase);
+    }
+
+    /* A store result that proves nothing about the old state. */
+    reserve_session();
+    ev = good_ev(STORE_IO_ERROR);
+    TEST_ASSERT_EQUAL(OP_ERR_UNSAFE_RELEASE,
+                      pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_PHASE_RESERVED_PENDING_PERSISTENCE, g_st.phase);
+
+    reserve_session();
+    ev = good_ev(STORE_READBACK_MISMATCH);
+    TEST_ASSERT_EQUAL(OP_ERR_UNSAFE_RELEASE,
+                      pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_PHASE_RESERVED_PENDING_PERSISTENCE, g_st.phase);
+
+    TEST_ASSERT_EQUAL(OP_ERR_INVALID_ARGUMENT,
+                      pool_operation_abort_reservation(&g_st, &g_tok, NULL));
+    TEST_ASSERT_EQUAL(OP_ERR_INVALID_ARGUMENT,
+                      pool_operation_abort_reservation(NULL, &g_tok, &ev));
+}
+
+TEST_CASE("op-abort: an uncertain commit guards and never releases", "[pool_op]")
+{
+    PoolOperationNoMutationEvidence ev;
+    PoolOperationRequest r;
+
+    reserve_session();
+    ev = good_ev(STORE_COMMIT_UNCERTAIN);
+    TEST_ASSERT_EQUAL(OP_ERR_PERSISTENCE_UNCERTAIN,
+                      pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_PHASE_RECOVERY_GUARD, g_st.phase);
+    /* A guarded device admits only operator recovery. */
+    r = req_of(OP_REQUEST_TIMED_SESSION_START, SESSION_ID);
+    g_dec = pool_operation_evaluate(&g_st, &r);
+    TEST_ASSERT_FALSE(g_dec.allowed);
+    TEST_ASSERT_EQUAL(OP_ERR_RECOVERY_LOCKED, g_dec.status);
+}
+
+TEST_CASE("op-abort: only an uncommitted TIMED_SESSION reservation is abortable",
+          "[pool_op]")
+{
+    PoolOperationNoMutationEvidence ev = good_ev(STORE_EMPTY);
+    PoolOperationPersistenceProof pr;
+    PoolOperationRequest r;
+
+    /* A durable BOOT_RECOVERY reservation is never abortable. */
+    make_state_rec(&g_rec, POOL_STATE_TARGET_ACTIVE, true);
+    TEST_ASSERT_EQUAL(OP_OK, boot(STORE_OK, &g_rec, false));
+    if (g_st.phase == OP_PHASE_RESERVED_PENDING_PERSISTENCE) {
+        TEST_ASSERT_EQUAL(OP_ERR_NOT_OWNER,
+                          pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    }
+
+    /* A manual lease is not this operation. */
+    TEST_ASSERT_EQUAL(OP_OK, boot(STORE_EMPTY, NULL, false));
+    r = req_of(OP_REQUEST_MANUAL_POOL_PATCH, 0u);
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_acquire(&g_st, &r, &g_tok, &g_dec));
+    TEST_ASSERT_EQUAL(OP_ERR_NOT_OWNER,
+                      pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_OWNER_MANUAL_POOL_PATCH, g_st.owner);
+
+    /* An ACTIVATED session (proof accepted) is past the abortable window. */
+    reserve_session();
+    memset(&pr, 0, sizeof(pr));
+    pr.kind = OP_PROOF_SESSION_COMMITTED;
+    pr.store_result = STORE_OK;
+    pr.committed_record_generation = 7u;
+    pr.session_id = SESSION_ID;
+    pr.persisted_state = POOL_STATE_TARGET_SNAPSHOT_COMMITTED;
+    TEST_ASSERT_EQUAL(OP_OK,
+                      pool_operation_apply_persistence_proof(&g_st, &g_tok, &pr, &g_tok));
+    TEST_ASSERT_EQUAL(OP_PHASE_ACTIVE, g_st.phase);
+    TEST_ASSERT_EQUAL(OP_ERR_INVALID_TRANSITION,
+                      pool_operation_abort_reservation(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_PHASE_ACTIVE, g_st.phase);
+}
+
+TEST_CASE("op-abort: an acknowledgement releases with the terminal retained",
+          "[pool_op]")
+{
+    PoolOperationNoMutationEvidence ev;
+    PoolOperationRequest r;
+    PoolOperationRequest start;
+    uint32_t gen_before;
+
+    make_state_rec(&g_rec, POOL_STATE_COMPLETE, false);
+    TEST_ASSERT_EQUAL(OP_OK, boot(STORE_OK, &g_rec, false));
+    TEST_ASSERT_TRUE(g_st.terminal_pending);
+
+    r = req_of(OP_REQUEST_SESSION_ACKNOWLEDGE, SESSION_ID);
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_acquire(&g_st, &r, &g_tok, &g_dec));
+    TEST_ASSERT_EQUAL(OP_OWNER_SESSION_ACKNOWLEDGE, g_st.owner);
+    gen_before = g_st.lease_generation;
+
+    /* The tombstone definitely did not commit; the original record stands. */
+    ev = good_ev(STORE_OK);
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_abort_acknowledge(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_OWNER_NONE, g_st.owner);
+    TEST_ASSERT_EQUAL(OP_PHASE_FREE, g_st.phase);
+    TEST_ASSERT_TRUE(g_st.lease_generation > gen_before);
+    /* THE point: the retained terminal result survives for a later retry. */
+    TEST_ASSERT_TRUE(g_st.terminal_pending);
+
+    /* A later acknowledgement may retry and acquire normally. */
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_acquire(&g_st, &r, &g_tok2, &g_dec));
+    TEST_ASSERT_EQUAL(OP_OWNER_SESSION_ACKNOWLEDGE, g_st.owner);
+    /* ... but a NEW session still cannot start while the terminal is retained. */
+    start = req_of(OP_REQUEST_TIMED_SESSION_START, 99u);
+    g_dec = pool_operation_evaluate(&g_st, &start);
+    TEST_ASSERT_FALSE(g_dec.allowed);
+}
+
+TEST_CASE("op-abort: an acknowledgement abort demands the unchanged terminal",
+          "[pool_op]")
+{
+    PoolOperationNoMutationEvidence ev;
+    PoolOperationRequest r;
+
+    make_state_rec(&g_rec, POOL_STATE_COMPLETE, false);
+    TEST_ASSERT_EQUAL(OP_OK, boot(STORE_OK, &g_rec, false));
+    r = req_of(OP_REQUEST_SESSION_ACKNOWLEDGE, SESSION_ID);
+    TEST_ASSERT_EQUAL(OP_OK, pool_operation_acquire(&g_st, &r, &g_tok, &g_dec));
+
+    /* STORE_CLEARED means the tombstone DID land: not a no-mutation abort. */
+    ev = good_ev(STORE_CLEARED);
+    TEST_ASSERT_EQUAL(OP_ERR_UNSAFE_RELEASE,
+                      pool_operation_abort_acknowledge(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_OWNER_SESSION_ACKNOWLEDGE, g_st.owner);
+
+    ev = good_ev(STORE_OK);
+    ev.store_unchanged = false;
+    TEST_ASSERT_EQUAL(OP_ERR_UNSAFE_RELEASE,
+                      pool_operation_abort_acknowledge(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_OWNER_SESSION_ACKNOWLEDGE, g_st.owner);
+
+    /* Uncertainty guards and keeps the terminal pending. */
+    ev = good_ev(STORE_COMMIT_UNCERTAIN);
+    TEST_ASSERT_EQUAL(OP_ERR_PERSISTENCE_UNCERTAIN,
+                      pool_operation_abort_acknowledge(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_PHASE_RECOVERY_GUARD, g_st.phase);
+    TEST_ASSERT_TRUE(g_st.terminal_pending);
+
+    /* A wrong owner is refused outright. */
+    reserve_session();
+    ev = good_ev(STORE_OK);
+    TEST_ASSERT_EQUAL(OP_ERR_NOT_OWNER,
+                      pool_operation_abort_acknowledge(&g_st, &g_tok, &ev));
+    TEST_ASSERT_EQUAL(OP_OWNER_TIMED_SESSION, g_st.owner);
+}

@@ -959,12 +959,339 @@ components:
             - 120
       additionalProperties: true
 
+    # ---------------------------------------------------------------
+    # NeuralAxe timed pool sessions — Gate B8 control plane.
+    # Available ONLY when the firmware is built with
+    # CONFIG_NX_TIMED_SESSIONS_API (depends on CONFIG_NX_TIMED_SESSIONS
+    # and CONFIG_NX_TIMED_SESSIONS_EXECUTION; all three default to n).
+    # No request carries a password, a source identity, a session id or a
+    # lease token, and no response exposes a pool host, port, account,
+    # worker, wallet, session id, generation or lease token.
+    # ---------------------------------------------------------------
+
+    TimedSessionCreateRequest:
+      type: object
+      description: |
+        Bounded request for ONE unattended timed pool session.
+
+        The SOURCE pool configuration is captured internally by the device
+        and is immutable after durable session creation — a client can
+        neither supply nor change it. Timed sessions are
+        Keep-current-password only: a request carrying any password-like
+        field is rejected before the command is queued.
+      additionalProperties: false
+      required:
+        - duration_seconds
+        - target_host
+        - target_port
+        - target_account
+        - target_protocol
+        - target_tls_mode
+        - target_chain
+      properties:
+        duration_seconds:
+          type: integer
+          minimum: 900
+          maximum: 86400
+          description: Session duration in seconds (15 minutes to 24 hours)
+          examples:
+            - 3600
+        target_host:
+          type: string
+          minLength: 1
+          maxLength: 79
+          description: Target pool hostname
+        target_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Target pool port
+        target_account:
+          type: string
+          minLength: 1
+          maxLength: 127
+          description: Target pool account/worker (never a password)
+        target_protocol:
+          type: string
+          enum: [stratum_v1, stratum_v2]
+          description: Target Stratum protocol
+        target_tls_mode:
+          type: string
+          enum: [disabled, bundled]
+          description: |
+            Target TLS mode. A custom-certificate mode is rejected: it
+            cannot be restored exactly by the committed execution layer.
+        target_chain:
+          type: string
+          enum: [bitcoin, bitcoin_cash, custom_unknown]
+          description: Explicit chain label — never inferred from a hostname
+        client_request_id:
+          type: integer
+          minimum: 1
+          maximum: 4294967295
+          description: Optional bounded diagnostics identifier echoed back
+
+    TimedSessionActionRequest:
+      type: object
+      description: Bounded action body for Restore Now and acknowledgement
+      additionalProperties: false
+      properties:
+        client_request_id:
+          type: integer
+          minimum: 1
+          maximum: 4294967295
+          description: Optional bounded diagnostics identifier echoed back
+
+    TimedSessionAccepted:
+      type: object
+      description: |
+        The command was queued for the single runtime owner task.
+        Submission is NOT completion — the authoritative result becomes
+        visible through GET /api/system/timed-session.
+      required:
+        - accepted
+        - requestSequence
+      properties:
+        accepted:
+          type: boolean
+        requestSequence:
+          type: integer
+          description: Monotonic per-boot submission sequence
+        clientRequestId:
+          type: integer
+          description: The client identifier echoed back (0 when absent)
+
+    TimedSessionValidationError:
+      type: object
+      description: |
+        Strict validation failure. The body carries a stable machine code
+        only; the rejected value is never echoed back.
+      required:
+        - code
+      properties:
+        code:
+          type: string
+          enum:
+            - BODY_TOO_LARGE
+            - BODY_MALFORMED
+            - BODY_NOT_OBJECT
+            - UNKNOWN_FIELD
+            - DUPLICATE_FIELD
+            - MISSING_FIELD
+            - NULL_FIELD
+            - TYPE_MISMATCH
+            - TOO_MANY_FIELDS
+            - PASSWORD_FIELD_REJECTED
+            - SOURCE_FIELD_REJECTED
+            - SESSION_ID_REJECTED
+            - INTERNAL_FIELD_REJECTED
+            - DURATION_OUT_OF_RANGE
+            - HOST_EMPTY
+            - HOST_TOO_LONG
+            - PORT_INVALID
+            - ACCOUNT_EMPTY
+            - ACCOUNT_TOO_LONG
+            - PROTOCOL_UNSUPPORTED
+            - TLS_MODE_UNSUPPORTED
+            - TLS_CUSTOM_REJECTED
+            - CHAIN_UNSUPPORTED
+            - REQUEST_ID_INVALID
+
+    TimedSessionUnavailable:
+      type: object
+      description: The bounded command queue or the runtime is unavailable
+      required:
+        - accepted
+        - code
+      properties:
+        accepted:
+          type: boolean
+        code:
+          type: string
+          enum: [QUEUE_FULL, NOT_READY]
+        retryable:
+          type: boolean
+
+    OperationConflict:
+      type: object
+      description: |
+        Sanitized ownership-conflict body. HTTP 409 is CONFLICT REPORTING
+        for cooperating clients, not authentication or access control. It
+        never carries a lease token, lease generation, record generation,
+        session id, pool hostname, port, account, worker, wallet, password
+        or raw record byte.
+      required:
+        - code
+        - retryable
+        - activeOwner
+        - restoreRequired
+        - terminalAckRequired
+      properties:
+        code:
+          type: string
+          enum:
+            - OPERATION_ALLOWED
+            - OPERATION_BUSY_TIMED_SESSION
+            - OPERATION_BUSY_RESTORE
+            - OPERATION_BUSY_MANUAL_POOL_CHANGE
+            - OPERATION_BUSY_OTA
+            - OPERATION_RECOVERY_LOCKED
+            - OPERATION_BOOTSTRAP_REQUIRED
+            - OPERATION_TERMINAL_ACK_REQUIRED
+            - OPERATION_PERSISTENCE_UNCERTAIN
+            - OPERATION_NOT_OWNER
+            - OPERATION_STALE_LEASE
+            - OPERATION_NO_ACTIVE_SESSION
+            - OPERATION_UNSAFE_RELEASE
+            - OPERATION_INVALID_REQUEST
+        retryable:
+          type: boolean
+        activeOwner:
+          type: string
+          description: Sanitized owner CLASS only
+          enum:
+            - OWNER_NONE
+            - OWNER_TIMED_SESSION
+            - OWNER_BOOT_RECOVERY
+            - OWNER_SOURCE_RESTORE
+            - OWNER_MANUAL_POOL_PATCH
+            - OWNER_OTA_UPDATE
+            - OWNER_SESSION_ACKNOWLEDGE
+            - OWNER_OPERATOR_RECOVERY
+            - OWNER_RECOVERY_GUARD
+        restoreRequired:
+          type: boolean
+        terminalAckRequired:
+          type: boolean
+
+    TimedSessionStatus:
+      type: object
+      description: |
+        Read-only sanitized timed-session status. Stable machine tokens,
+        booleans and bounded numbers only — no pool host, port, account,
+        worker, wallet, password, session id, lease token, lease
+        generation, record generation or raw record can appear here.
+      required:
+        - apiEnabled
+        - runtimeInitialized
+        - executionEnabled
+        - sessionPresent
+        - terminalResultPending
+        - durableState
+        - runtimeState
+        - leaseOwner
+        - leasePhase
+        - protocolStartPermitted
+        - targetMiningGrantActive
+        - restoreRequired
+        - operatorRecoveryRequired
+        - deadlineStatus
+        - heartbeatStatus
+        - statusSequence
+      properties:
+        apiEnabled:
+          type: boolean
+        runtimeInitialized:
+          type: boolean
+        executionEnabled:
+          type: boolean
+        sessionPresent:
+          type: boolean
+        terminalResultPending:
+          type: boolean
+        durableState:
+          type: string
+          description: Durable B1 session state token (e.g. IDLE, TARGET_ACTIVE)
+        durableFailure:
+          type: string
+          description: Stable machine failure token (e.g. ERR_NONE)
+        runtimeState:
+          type: string
+          description: Runtime posture token (e.g. RUNTIME_FREE)
+        executionState:
+          type: string
+          description: Execution substate token (EXEC_STATE_DISABLED when off)
+        executionReason:
+          type: string
+          description: Stable machine execution reason token
+        leaseOwner:
+          type: string
+          description: Sanitized ownership CLASS token
+        leasePhase:
+          type: string
+          description: Ownership phase token
+        protocolStartPermitted:
+          type: boolean
+          description: False means protocol startup is held
+        asicGate:
+          type: string
+          description: ASIC job-delivery gate posture token
+        targetMiningGrantActive:
+          type: boolean
+        restoreRequired:
+          type: boolean
+        operatorRecoveryRequired:
+          type: boolean
+        trustedTimeRequired:
+          type: boolean
+        trustedTimeAvailable:
+          type: boolean
+        deadlineStatus:
+          type: string
+          enum: [UNKNOWN, ACTIVE, EXPIRED, RESTORE_PENDING]
+        remainingSecondsValid:
+          type: boolean
+        remainingSeconds:
+          type: integer
+          description: Meaningful only when remainingSecondsValid is true
+        commandPending:
+          type: boolean
+        pendingCommand:
+          type: string
+          enum: [NONE, CREATE_SESSION, RESTORE_NOW, ACKNOWLEDGE_TERMINAL]
+        lastCommand:
+          type: string
+          enum: [NONE, CREATE_SESSION, RESTORE_NOW, ACKNOWLEDGE_TERMINAL]
+        lastCommandResult:
+          type: string
+          description: Authoritative outcome of the last processed command
+        lastClientRequestId:
+          type: integer
+        heartbeatStatus:
+          type: string
+          enum:
+            - NOT_APPLICABLE
+            - WAITING
+            - DUE
+            - COMMITTED
+            - TIME_UNTRUSTED
+            - PERSIST_FAILED
+            - RECOVERY_GUARD
+        heartbeatCommits:
+          type: integer
+        apiConflictCode:
+          type: string
+          description: Stable code of the last denied API mutation
+        statusSequence:
+          type: integer
+          description: Bounded monotonic status sequence
+
   responses:
     UnauthorizedError:
       description: Unauthorized - Client not in allowed network range
 
     InternalError:
       description: Internal server error
+
+    OperationConflictError:
+      description: |
+        Ownership conflict — a timed session, boot recovery, source
+        restoration, manual pool change, OTA or the fail-closed recovery
+        guard owns the resource. Conflict reporting, not authentication.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/OperationConflict'
 
 paths:
   /api/system/wifi/scan:
@@ -1154,6 +1481,8 @@ paths:
                 $ref: '#/components/schemas/GenericResponse'
         '401':
           description: Unauthorized - Client not in allowed network range
+        '409':
+          $ref: '#/components/responses/OperationConflictError'
         '500':
           description: Internal server error
 
@@ -1224,6 +1553,8 @@ paths:
           description: Invalid settings provided
         '401':
           description: Unauthorized - Client not in allowed network range
+        '409':
+          $ref: '#/components/responses/OperationConflictError'
         '500':
           description: Internal server error
 
@@ -1252,6 +1583,8 @@ paths:
           description: Invalid firmware file
         '401':
           description: Unauthorized - Client not in allowed network range
+        '409':
+          $ref: '#/components/responses/OperationConflictError'
         '500':
           description: Internal server error
 
@@ -1280,5 +1613,163 @@ paths:
           description: Invalid web interface file
         '401':
           description: Unauthorized - Client not in allowed network range
+        '409':
+          $ref: '#/components/responses/OperationConflictError'
         '500':
           description: Internal server error
+
+  # ---------------------------------------------------------------
+  # NeuralAxe timed pool sessions — Gate B8 control plane.
+  # Present ONLY in firmware built with CONFIG_NX_TIMED_SESSIONS_API
+  # (default n). The handlers validate and submit BOUNDED COMMANDS to the
+  # single runtime owner task: no handler applies pool configuration,
+  # controls Stratum, grants ASIC mining, restarts the device or writes the
+  # session store. Reachable only through the existing private-network
+  # admission check; NOT user-authenticated.
+  # ---------------------------------------------------------------
+
+  /api/system/timed-session:
+    get:
+      summary: Get timed pool session status
+      description: |
+        Returns the sanitized, read-only timed-session status. It calls no
+        external operation and exposes no pool identity, session id, lease
+        token or generation.
+      operationId: getTimedSession
+      tags:
+        - timed-session
+      responses:
+        '200':
+          description: Sanitized timed-session status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionStatus'
+        '401':
+          description: Unauthorized - Client not in allowed network range
+        '500':
+          description: Internal server error
+    post:
+      summary: Create one unattended timed pool session
+      description: |
+        Validates the request strictly (unknown fields, duplicate keys,
+        password-like fields, client-supplied source identities, session
+        ids and custom-certificate TLS all fail closed) and submits ONE
+        bounded command to the runtime owner task. Acceptance means the
+        command was queued, NOT that the session was created — poll the GET
+        route for the authoritative result. Only one session can exist, so
+        no route accepts a session id.
+      operationId: createTimedSession
+      tags:
+        - timed-session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TimedSessionCreateRequest'
+      responses:
+        '202':
+          description: Command accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionAccepted'
+        '400':
+          description: Strict validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionValidationError'
+        '401':
+          description: Unauthorized - Client not in allowed network range
+        '409':
+          $ref: '#/components/responses/OperationConflictError'
+        '503':
+          description: Command queue or runtime temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionUnavailable'
+
+  /api/system/timed-session/restore:
+    post:
+      summary: Request immediate restoration of the source pool
+      description: |
+        Submits a Restore Now command to the EXISTING session owner. It
+        never acquires a second lease, and repeating it while restoration
+        is already in progress is idempotent.
+      operationId: restoreTimedSession
+      tags:
+        - timed-session
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TimedSessionActionRequest'
+      responses:
+        '202':
+          description: Command accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionAccepted'
+        '400':
+          description: Strict validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionValidationError'
+        '401':
+          description: Unauthorized - Client not in allowed network range
+        '409':
+          $ref: '#/components/responses/OperationConflictError'
+        '503':
+          description: Command queue or runtime temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionUnavailable'
+
+  /api/system/timed-session/acknowledge:
+    post:
+      summary: Acknowledge a retained safe terminal result
+      description: |
+        Submits an acknowledgement command. Only a COMPLETE result, or a
+        safe pre-mutation CANCELLED result, with no outstanding restoration
+        obligation may ever be acknowledged; the terminal state is cleared
+        only after a committed tombstone has been independently read back.
+        Acknowledgement never starts another session.
+      operationId: acknowledgeTimedSession
+      tags:
+        - timed-session
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TimedSessionActionRequest'
+      responses:
+        '202':
+          description: Command accepted for processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionAccepted'
+        '400':
+          description: Strict validation failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionValidationError'
+        '401':
+          description: Unauthorized - Client not in allowed network range
+        '409':
+          $ref: '#/components/responses/OperationConflictError'
+        '503':
+          description: Command queue or runtime temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimedSessionUnavailable'

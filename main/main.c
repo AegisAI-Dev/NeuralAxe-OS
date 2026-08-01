@@ -102,6 +102,16 @@ void app_main(void)
     }
 #endif
 
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+    // NeuralAxe Gate B8: bind the timed-session control-plane command
+    // processor to the single owner task. It registers no route here (the
+    // HTTP server does that later) and performs no pool, protocol, ASIC,
+    // restart or store mutation — it only makes the mailbox reachable.
+    if (!nx_pool_session_api_boot_init()) {
+        ESP_LOGW(TAG, "Timed pool session API command processor not bound");
+    }
+#endif
+
     // Ensure SSID is initialized before any screen/self-test uses it.
     GLOBAL_STATE.SYSTEM_MODULE.ssid = nvs_config_get_string(NVS_CONFIG_WIFI_SSID);
     if (GLOBAL_STATE.SYSTEM_MODULE.ssid == NULL) {

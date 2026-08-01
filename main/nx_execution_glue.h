@@ -36,4 +36,18 @@ bool nx_pool_execution_boot_init(void *gs);
  */
 void nx_pool_execution_notify_system_ready(void);
 
+/*
+ * Gate B8: bind the timed-session API command processor to the booted B6
+ * runtime, reusing the SAME audited configuration adapter this file already
+ * owns (a second, unaudited source-capture path would be a real safety
+ * regression). MUST be called after nx_pool_execution_boot_init() and
+ * before the protocol-start barrier.
+ *
+ * Returns true when the processor is bound. It is compiled unconditionally
+ * but does real work ONLY under CONFIG_NX_TIMED_SESSIONS_API; with that
+ * flag off no processor storage, no command queue and no runtime hook
+ * exists, and Gates B6/B7 behave exactly as committed.
+ */
+bool nx_pool_session_api_boot_init(void);
+
 #endif /* NX_EXECUTION_GLUE_H_ */

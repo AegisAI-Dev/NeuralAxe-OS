@@ -8,6 +8,7 @@
  * wrapper adds only the singleton lookup and the feature posture.
  */
 
+#include <string.h>
 #include "sdkconfig.h"
 #include "pool_session_runtime_admission.h"
 #include "pool_session_runtime.h"
@@ -45,19 +46,46 @@ const char *nx_admission_verdict_str(NxAdmissionVerdict v)
     }
 }
 
-NxAdmissionVerdict nx_admission_evaluate(PoolOperationCoordinator *coord,
-                                         NxMutationKind kind)
+/* Fill the sanitized fail-closed conflict used when ownership is unknown. */
+static void admission_bootstrap_conflict(PoolOperationHttpConflict *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    out->http_status  = 409;
+    out->code         = OP_HTTP_OPERATION_BOOTSTRAP_REQUIRED;
+    out->retryable    = true; /* bootstrap completes shortly after boot */
+    out->active_owner = OP_OWNER_NONE;
+}
+
+/*
+ * The ONE read-only evaluation shared by the verdict and the standardized
+ * HTTP conflict surface. It acquires nothing and mutates nothing.
+ */
+static NxAdmissionVerdict admission_core(PoolOperationCoordinator *coord,
+                                         NxMutationKind kind,
+                                         PoolOperationHttpConflict *out_conflict)
 {
     PoolOperationRequest  req;
     PoolOperationDecision dec;
     PoolOperationState    snap;
 
+    if (out_conflict != NULL) {
+        memset(out_conflict, 0, sizeof(*out_conflict));
+    }
     if (coord == NULL || (unsigned)kind >= (unsigned)NX_MUTATION__COUNT) {
+        if (out_conflict != NULL) {
+            memset(out_conflict, 0, sizeof(*out_conflict));
+            out_conflict->http_status = 409;
+            out_conflict->code        = OP_HTTP_OPERATION_INVALID_REQUEST;
+        }
         return NX_ADMIT_DENY_INVALID; /* fail closed */
     }
     if (pool_operation_coordinator_snapshot(coord, &snap) != OP_OK ||
         !snap.bootstrapped) {
         /* Ownership is unknown — never assume the device is free. */
+        admission_bootstrap_conflict(out_conflict);
         return NX_ADMIT_DENY_UNBOOTSTRAPPED;
     }
 
@@ -68,6 +96,9 @@ NxAdmissionVerdict nx_admission_evaluate(PoolOperationCoordinator *coord,
     req.token.lease_generation = 0u;
 
     dec = pool_operation_coordinator_evaluate(coord, &req);
+    /* The committed B5 mapper is the ONLY conflict-body authority: every
+     * denial becomes 409 with a stable code and no identity. */
+    pool_operation_http_map(&dec, &snap, out_conflict);
     if (dec.allowed) {
         return NX_ADMIT_ALLOW;
     }
@@ -87,8 +118,28 @@ NxAdmissionVerdict nx_admission_evaluate(PoolOperationCoordinator *coord,
     return NX_ADMIT_DENY_SESSION_OWNER; /* denied for an ownership reason */
 }
 
+NxAdmissionVerdict nx_admission_evaluate(PoolOperationCoordinator *coord,
+                                         NxMutationKind kind)
+{
+    return admission_core(coord, kind, NULL);
+}
+
+NxAdmissionVerdict nx_admission_conflict(PoolOperationCoordinator *coord,
+                                         NxMutationKind kind,
+                                         PoolOperationHttpConflict *out_conflict)
+{
+    return admission_core(coord, kind, out_conflict);
+}
+
 bool nx_timed_sessions_mutation_allowed(NxMutationKind kind,
                                         NxAdmissionVerdict *out_verdict)
+{
+    return nx_timed_sessions_mutation_conflict(kind, out_verdict, NULL);
+}
+
+bool nx_timed_sessions_mutation_conflict(NxMutationKind kind,
+                                         NxAdmissionVerdict *out_verdict,
+                                         PoolOperationHttpConflict *out_conflict)
 {
 #ifdef CONFIG_NX_TIMED_SESSIONS
     PoolSessionRuntime *rt = pool_session_runtime_default_instance();
@@ -101,8 +152,9 @@ bool nx_timed_sessions_mutation_allowed(NxMutationKind kind,
          * closed rather than let a writer race the bootstrap.
          */
         v = NX_ADMIT_DENY_UNBOOTSTRAPPED;
+        admission_bootstrap_conflict(out_conflict);
     } else {
-        v = nx_admission_evaluate(&rt->coord, kind);
+        v = admission_core(&rt->coord, kind, out_conflict);
     }
     if (out_verdict != NULL) {
         *out_verdict = v;
@@ -114,6 +166,10 @@ bool nx_timed_sessions_mutation_allowed(NxMutationKind kind,
     (void)kind;
     if (out_verdict != NULL) {
         *out_verdict = NX_ADMIT_ALLOW;
+    }
+    if (out_conflict != NULL) {
+        memset(out_conflict, 0, sizeof(*out_conflict));
+        out_conflict->code = OP_HTTP_NONE;
     }
     return true;
 #endif

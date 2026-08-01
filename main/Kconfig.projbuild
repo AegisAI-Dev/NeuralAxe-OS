@@ -263,7 +263,38 @@ menu "Stratum Configuration"
             exists at all.
 
             Session creation over HTTP remains out of scope even with this
-            flag enabled (a later gate owns the API surface). Leave disabled
+            flag enabled (Gate B8 owns the API surface). Leave disabled
             for production.
+
+    config NX_TIMED_SESSIONS_API
+        bool "Timed pool session HTTP control API (EXPERIMENTAL, Gate B8)"
+        depends on NX_TIMED_SESSIONS && NX_TIMED_SESSIONS_EXECUTION
+        default n
+        help
+            EXPERIMENTAL. Enables the Gate B8 timed-session control-plane API:
+            a sanitized read-only status route, bounded session creation,
+            Restore Now, terminal acknowledgement, and the standardized
+            HTTP 409 conflict body for the existing pool PATCH / restart /
+            OTA ownership fences. Board 601 / BM1370 only. Disabled by
+            default and never auto-enabled.
+
+            This is a THIRD, independent safety flag. HTTP handlers only
+            VALIDATE requests and submit bounded commands to the single
+            Gate B6 runtime owner task: no handler applies pool
+            configuration, starts or stops Stratum, grants ASIC mining,
+            restarts the device or writes the session store. No request may
+            carry a password (Keep-current-password only), a source
+            identity, a session id or a lease token, and no response
+            exposes a pool host, account, worker, wallet, session id,
+            generation or lease token.
+
+            With this flag disabled no API route is registered, no command
+            queue or API singleton exists and Gates B6/B7 behave exactly as
+            committed. Leave disabled for production.
+
+            The API is reachable only through the existing private-network
+            admission check; it is NOT user-authenticated, and HTTP 409 is
+            conflict reporting rather than access control. See
+            docs/NEURALAXE_PHASE_2M1A_TIMED_POOL_SESSIONS_SECURITY.md.
 
 endmenu

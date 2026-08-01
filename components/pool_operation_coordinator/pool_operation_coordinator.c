@@ -234,3 +234,39 @@ PoolOperationStatus pool_operation_coordinator_release_manual(
     portEXIT_CRITICAL(&s_op_lock);
     return st;
 }
+
+PoolOperationStatus pool_operation_coordinator_abort_reservation(
+    PoolOperationCoordinator *c, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence)
+{
+    PoolOperationStatus st;
+    if (c == NULL) {
+        return OP_ERR_INVALID_ARGUMENT;
+    }
+    portENTER_CRITICAL(&s_op_lock);
+    if (!c->initialized) {
+        portEXIT_CRITICAL(&s_op_lock);
+        return OP_ERR_NOT_INITIALIZED;
+    }
+    st = pool_operation_abort_reservation(&c->state, token, evidence);
+    portEXIT_CRITICAL(&s_op_lock);
+    return st;
+}
+
+PoolOperationStatus pool_operation_coordinator_abort_acknowledge(
+    PoolOperationCoordinator *c, const PoolOperationLeaseToken *token,
+    const PoolOperationNoMutationEvidence *evidence)
+{
+    PoolOperationStatus st;
+    if (c == NULL) {
+        return OP_ERR_INVALID_ARGUMENT;
+    }
+    portENTER_CRITICAL(&s_op_lock);
+    if (!c->initialized) {
+        portEXIT_CRITICAL(&s_op_lock);
+        return OP_ERR_NOT_INITIALIZED;
+    }
+    st = pool_operation_abort_acknowledge(&c->state, token, evidence);
+    portEXIT_CRITICAL(&s_op_lock);
+    return st;
+}
