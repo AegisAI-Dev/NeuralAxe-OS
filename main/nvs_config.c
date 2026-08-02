@@ -305,11 +305,32 @@ static void nvs_task(void *pvParameters)
 
 esp_err_t nvs_config_init(void)
 {
+#ifdef CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT
+    /*
+     * Gate B10.2 preflight posture: the DESTRUCTIVE NVS recovery below does not
+     * exist in this build.
+     *
+     * The default path answers ESP_ERR_NVS_NO_FREE_PAGES / NEW_VERSION_FOUND by
+     * calling nvs_flash_erase(), which erases the WHOLE nvs partition — the
+     * timed-session store, the Wi-Fi credentials and the pool configuration
+     * along with it. An image whose entire purpose is to INSPECT that store
+     * must never be able to destroy it first, so the branch is compiled out
+     * rather than merely avoided.
+     *
+     * The preflight boot gate has already called nvs_flash_init() itself,
+     * WITHOUT recovery, and refuses to reach this function at all unless that
+     * succeeded — so NVS is known-good here and re-initializing is unnecessary.
+     */
+    esp_err_t err;
+#else
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        /* This erases the ENTIRE nvs partition — every namespace, not just
+         * "main". Anything another subsystem had stored is gone from here on. */
         nvs_flash_erase();
         nvs_flash_init();
     }
+#endif
 
     err = nvs_open(NVS_CONFIG_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {

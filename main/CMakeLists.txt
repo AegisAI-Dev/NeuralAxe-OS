@@ -92,6 +92,7 @@ PRIV_REQUIRES
     "pool_session_runtime"
     "pool_session_execution"
     "pool_session_api"
+    "pool_session_preflight"
 
 EMBED_FILES "http_server/recovery_page.html"
 )

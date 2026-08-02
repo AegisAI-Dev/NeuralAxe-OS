@@ -32,6 +32,9 @@
 #ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
 #include "nx_execution_glue.h"
 #endif
+#ifdef CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT
+#include "pool_session_preflight.h"
+#endif
 
 static GlobalState GLOBAL_STATE;
 
@@ -74,6 +77,24 @@ void app_main(void)
 
     // Init ADC
     ADC_init();
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT
+    // NeuralAxe Gate B10.2 boot gate. This runs BEFORE nvs_config_init() on
+    // purpose: it initializes NVS *without* destructive recovery and performs
+    // EXACTLY ONE strictly read-only classification of "nx_tps", so the
+    // inspection happens before anything can create a namespace, migrate a
+    // schema or commit a setting.
+    //
+    // On any NVS initialization failure it does NOT erase to recover. It emits
+    // TPS_PREFLIGHT_BLOCKED_NVS_INIT and returns false, and boot stops here:
+    // configuration integrity is unknown, so no configuration init, no Wi-Fi,
+    // no pool, no protocol and no mining may start. The device is left inert
+    // for owner recovery.
+    if (!nx_tps_preflight_boot_gate()) {
+        ESP_LOGE(TAG, "Store preflight blocked: NVS integrity unknown — halting boot");
+        return;
+    }
+#endif
 
     // initialize the ESP32 NVS
     if (nvs_config_init() != ESP_OK) {

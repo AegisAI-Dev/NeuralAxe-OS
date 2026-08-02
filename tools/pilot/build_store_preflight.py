@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""NeuralAxe OS — Gate B10.2 READ-ONLY store-preflight build helper.
+
+Builds a reproducible, generic preflight firmware from the exact committed
+HEAD with exactly this posture:
+
+    CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT                 = y
+    CONFIG_NX_TIMED_SESSIONS_EXECUTION                       = n
+    CONFIG_NX_TIMED_SESSIONS_API                             = n
+    CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE                    = n
+    CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS  = n
+
+Unlike the Gate B10.1 trusted-time pilot build, this artifact needs NO private
+input: it selects no NTP source, resolves nothing and contacts nothing. It
+boots, performs exactly one read-only classification of the timed-session NVS
+namespace, prints one bounded token, and otherwise behaves like the normal
+firmware.
+
+It performs no hardware access: no serial port, no COM enumeration, no
+esptool, no bitaxetool, no OTA upload, no device restart, no DNS and no NTP
+request. It builds, verifies and stages files. Flashing is owner-executed.
+
+Usage:
+    python tools/pilot/build_store_preflight.py --out-dir '<external-artifact-directory>'
+    NX_PREFLIGHT_ARTIFACT_ROOT='<external-artifact-directory>' python tools/pilot/build_store_preflight.py
+    python tools/pilot/build_store_preflight.py --print-flags
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SCHEMA_VERSION = 1
+ARTIFACT_ROOT_ENV = "NX_PREFLIGHT_ARTIFACT_ROOT"
+
+DEFAULT_IDF_IMAGE = "espressif/idf:v5.5.3"
+CONTAINER_REPO = "/nx/repo"
+CONTAINER_WORK = "/nx/work"
+
+PREFLIGHT_FLAGS_ON = ("CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT",)
+PREFLIGHT_FLAGS_OFF = (
+    # The PARENT flag is in this list deliberately: the four sub-flags all
+    # depend on it, so excluding only them would still permit
+    # CONFIG_NX_TIMED_SESSIONS=y, whose Gate B6 bootstrap opens nx_tps with
+    # NVS_READWRITE and CREATES the namespace the preflight must only read.
+    "CONFIG_NX_TIMED_SESSIONS",
+    "CONFIG_NX_TIMED_SESSIONS_EXECUTION",
+    "CONFIG_NX_TIMED_SESSIONS_API",
+    "CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE",
+    "CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS",
+)
+
+APP_SLOT_BYTES = 4 * 1024 * 1024
+WWW_SLOT_BYTES = 3 * 1024 * 1024
+
+# Nothing that can act on the store, the pool, the protocol or the clock may
+# be linked into a preflight image.
+FORBIDDEN_SYMBOL_PREFIXES = (
+    "pool_session_execution",
+    "pool_exec_",
+    "nx_pool_execution_",
+    "pool_session_api_",
+    "pool_session_command",
+    "nx_pool_session_api_",
+    "pool_api_command_",
+    "pool_pilot_",            # Gate B10.1 observation diagnostics
+    "pool_time_sntp_",        # trusted-time provider
+    "pool_time_source_",      # trusted-time source policy
+)
+# The preflight itself must really be there.
+REQUIRED_SYMBOL_PREFIXES = ("nx_tps_preflight_",)
+
+# The committed Gate B3 mutation entry points must be unreachable: a preflight
+# image has no caller for them, so the linker must not pull them in.
+FORBIDDEN_STORE_WRITE_SYMBOLS = (
+    "pool_session_store_commit_record",
+    "pool_session_store_commit_clear",
+)
+
+EXPECTED_TOKENS = [
+    "TPS_PREFLIGHT_BOOT",
+    "TPS_PREFLIGHT_EMPTY",
+    "TPS_PREFLIGHT_CLEARED",
+    "TPS_PREFLIGHT_BLOCKED_RECORD",
+    "TPS_PREFLIGHT_BLOCKED_TERMINAL",
+    "TPS_PREFLIGHT_BLOCKED_UNCERTAIN",
+    "TPS_PREFLIGHT_BLOCKED_CORRUPT",
+    "TPS_PREFLIGHT_BLOCKED_SCHEMA",
+    "TPS_PREFLIGHT_BLOCKED_IO",
+    "TPS_PREFLIGHT_BLOCKED_NVS_INIT",
+    "TPS_PREFLIGHT_INTERNAL_ERROR",
+    "TPS_PREFLIGHT_COMPLETE",
+]
+ACCEPTABLE_TOKENS = ["TPS_PREFLIGHT_EMPTY", "TPS_PREFLIGHT_CLEARED"]
+BLOCKING_TOKENS = [t for t in EXPECTED_TOKENS
+                   if t not in ACCEPTABLE_TOKENS and t not in
+                   ("TPS_PREFLIGHT_BOOT", "TPS_PREFLIGHT_COMPLETE")]
+
+
+class PreflightError(Exception):
+    """A fatal failure. Messages never contain a local path or private value."""
+
+
+def fail(msg: str) -> None:
+    raise PreflightError(msg)
+
+
+# --------------------------------------------------------------------------
+# Repository state
+# --------------------------------------------------------------------------
+
+def git(repo: Path, *args: str) -> str:
+    out = subprocess.run(["git", *args], cwd=str(repo), text=True, capture_output=True)
+    if out.returncode != 0:
+        fail(f"git {' '.join(args)} failed: {out.stderr.strip()}")
+    return out.stdout.strip()
+
+
+def repo_state(repo: Path) -> dict:
+    if git(repo, "status", "--porcelain"):
+        fail("the working tree is not clean — a preflight artifact must be built from "
+             "an exact committed HEAD. Commit or stash first.")
+    describe = git(repo, "describe", "--tags", "--always", "--dirty")
+    if "-dirty" in describe:
+        fail(f"refusing to build a dirty revision ({describe}).")
+    return {
+        "commit": git(repo, "rev-parse", "HEAD"),
+        "describe": describe,
+        "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
+    }
+
+
+def tracked_tree_digest(repo: Path) -> str:
+    return hashlib.sha256(git(repo, "ls-files", "-s").encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Output location — always caller-supplied, never hardcoded
+# --------------------------------------------------------------------------
+
+def resolve_out_dir(arg_out_dir: str | None, env: dict | None = None) -> Path:
+    env = os.environ if env is None else env
+    chosen = arg_out_dir or env.get(ARTIFACT_ROOT_ENV) or ""
+    if not chosen.strip():
+        fail(f"no output directory: pass --out-dir <external-artifact-directory> or set "
+             f"{ARTIFACT_ROOT_ENV}. The package location is never hardcoded.")
+    return Path(chosen).expanduser().resolve()
+
+
+# --------------------------------------------------------------------------
+# Temporary configuration (never inside the repository)
+# --------------------------------------------------------------------------
+
+def preflight_defaults_text() -> str:
+    lines = [
+        "# NeuralAxe OS Gate B10.2 read-only store preflight.",
+        "# TEMPORARY, OWNER-LOCAL, NEVER COMMITTED. Deleted when the build ends.",
+        "CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT=y",
+        "# CONFIG_NX_TIMED_SESSIONS is not set",
+        "# CONFIG_NX_TIMED_SESSIONS_EXECUTION is not set",
+        "# CONFIG_NX_TIMED_SESSIONS_API is not set",
+        "# CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE is not set",
+        "# CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS is not set",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def write_preflight_defaults(work: Path) -> Path:
+    path = work / "preflight.sdkconfig.defaults"
+    path.write_text(preflight_defaults_text(), encoding="utf-8")
+    return path
+
+
+# --------------------------------------------------------------------------
+# Build execution
+# --------------------------------------------------------------------------
+
+def find_container_runtime() -> str:
+    for runtime in ("docker", "podman"):
+        if shutil.which(runtime):
+            return runtime
+    fail("neither docker nor podman was found in PATH, and IDF_PATH is not set.")
+    raise AssertionError("unreachable")
+
+
+def build_command(repo_path: str, work_path: str) -> str:
+    defaults = f"{repo_path}/sdkconfig.defaults;{work_path}/preflight.sdkconfig.defaults"
+    return (f"idf.py -B {work_path}/build -DSDKCONFIG={work_path}/sdkconfig "
+            f'-DSDKCONFIG_DEFAULTS="{defaults}" set-target esp32s3 build')
+
+
+def run_build(repo: Path, work: Path, image: str, native: bool) -> None:
+    if native:
+        proc = subprocess.run(["bash", "-lc", build_command(str(repo), str(work))],
+                              cwd=str(repo), env={**os.environ, "GITHUB_ACTIONS": "true"})
+        if proc.returncode != 0:
+            fail(f"preflight build failed (exit {proc.returncode})")
+        return
+
+    runtime = find_container_runtime()
+    inner = (f"git config --global --add safe.directory {CONTAINER_REPO} && "
+             "git config --global core.autocrlf true && "
+             "git config --global core.filemode false && "
+             + build_command(CONTAINER_REPO, CONTAINER_WORK))
+    cmd = [runtime, "run", "--rm",
+           "-v", f"{repo}:{CONTAINER_REPO}:rw",
+           "-v", f"{work}:{CONTAINER_WORK}:rw",
+           "-w", CONTAINER_REPO, "-e", "GITHUB_ACTIONS=true", image,
+           "bash", "-lc", inner]
+    print(f"building in {runtime} image {image}")
+    if subprocess.run(cmd).returncode != 0:
+        fail("preflight build failed")
+
+
+# --------------------------------------------------------------------------
+# Verification
+# --------------------------------------------------------------------------
+
+def parse_sdkconfig_h(path: Path) -> dict:
+    if not path.is_file():
+        fail("generated sdkconfig.h not found")
+    defines: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        m = re.match(r"#define\s+(\S+)\s*(.*)$", line.strip())
+        if m:
+            defines[m.group(1)] = m.group(2).strip()
+    return defines
+
+
+def verify_build_config(defines: dict) -> dict:
+    for flag in PREFLIGHT_FLAGS_ON:
+        if defines.get(flag) != "1":
+            fail(f"{flag} is not enabled in the generated configuration")
+    for flag in PREFLIGHT_FLAGS_OFF:
+        if flag in defines:
+            fail(f"{flag} IS enabled — refusing to stage a preflight artifact that can "
+                 "execute, expose an API, observe trusted time or emit pilot diagnostics")
+    # A preflight must not carry a trusted-time source either.
+    src = defines.get("CONFIG_NX_TIMED_SESSIONS_NTP_SERVER", '""').strip()
+    if src not in ('""', ""):
+        fail("the generated configuration carries a trusted-time source — a preflight "
+             "build must select none")
+    summary = {flag: True for flag in PREFLIGHT_FLAGS_ON}
+    summary.update({flag: False for flag in PREFLIGHT_FLAGS_OFF})
+    return summary
+
+
+def list_symbols(elf: Path, work: Path, image: str, native: bool) -> list[str]:
+    nm = "xtensa-esp32s3-elf-nm"
+    if native:
+        proc = subprocess.run([nm, str(elf)], text=True, capture_output=True)
+    else:
+        runtime = find_container_runtime()
+        proc = subprocess.run(
+            [runtime, "run", "--rm", "-v", f"{work}:{CONTAINER_WORK}:ro", image, nm,
+             f"{CONTAINER_WORK}/{elf.relative_to(work).as_posix()}"],
+            text=True, capture_output=True)
+    if proc.returncode != 0:
+        fail("symbol listing failed")
+    return [ln.split()[-1] for ln in proc.stdout.splitlines() if ln.split()]
+
+
+def verify_symbols(names: list[str]) -> dict:
+    forbidden = sorted({n for n in names
+                        if any(n.startswith(p) for p in FORBIDDEN_SYMBOL_PREFIXES)})
+    if forbidden:
+        fail("the preflight image links forbidden execution/API/trusted-time symbols: "
+             + ", ".join(forbidden[:10]))
+    writers = sorted({n for n in names if n in FORBIDDEN_STORE_WRITE_SYMBOLS})
+    if writers:
+        fail("the preflight image links a Gate B3 store MUTATION entry point: "
+             + ", ".join(writers))
+    found = {}
+    for prefix in REQUIRED_SYMBOL_PREFIXES:
+        hits = sorted({n for n in names if n.startswith(prefix)})
+        if not hits:
+            fail(f"the preflight image links no '{prefix}*' symbol — the read-only "
+                 "inspector is not actually in this build")
+        found[prefix] = len(hits)
+    return found
+
+
+def verify_sizes(build: Path) -> dict:
+    app, www = build / "esp-miner.bin", build / "www.bin"
+    for path in (app, www):
+        if not path.is_file():
+            fail(f"expected build output missing: {path.name}")
+    a, w = app.stat().st_size, www.stat().st_size
+    if a >= APP_SLOT_BYTES:
+        fail(f"esp-miner.bin ({a} B) does not fit a 4 MiB app slot")
+    if w > WWW_SLOT_BYTES:
+        fail(f"www.bin ({w} B) does not fit the 3 MiB www partition")
+    return {"espMinerBinBytes": a, "espMinerBinFreeBytes": APP_SLOT_BYTES - a,
+            "wwwBinBytes": w, "wwwBinFreeBytes": WWW_SLOT_BYTES - w}
+
+
+APP_DESC_MAGIC = b"\x32\x54\xcd\xab"
+
+
+def read_app_desc_version(path: Path) -> str:
+    with path.open("rb") as h:
+        header = h.read(0x60)
+    if len(header) < 0x60 or header[0x20:0x24] != APP_DESC_MAGIC:
+        fail(f"{path.name}: esp_app_desc_t magic not found")
+    return header[0x30:0x50].split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Staging and manifest
+# --------------------------------------------------------------------------
+
+def stage_artifacts(build: Path, out_dir: Path, prefix: str) -> list[dict]:
+    plan = [
+        (build / "esp-miner.bin", f"{prefix}-preflight-ota.bin", "ota-application",
+         "AxeOS Update page / POST /api/system/OTA (inactive OTA slot + otadata)"),
+        (build / "www.bin", f"{prefix}-preflight-www.bin", "www-update",
+         "AxeOS Update page / POST /api/system/OTAWWW (www partition only)"),
+    ]
+    out_dir.mkdir(parents=True, exist_ok=True)
+    artifacts = []
+    for src, name, kind, method in plan:
+        dst = out_dir / name
+        shutil.copyfile(src, dst)
+        artifacts.append({"filename": name, "artifactType": kind,
+                          "sizeBytes": dst.stat().st_size, "sha256": sha256_of(dst),
+                          "flashMethod": method, "settingsPreserved": True,
+                          "destructive": False})
+        print(f"staged {name} ({dst.stat().st_size} bytes)")
+    return artifacts
+
+
+def build_manifest(state: dict, flags: dict, sizes: dict, symbols: dict,
+                   fw_version: str, artifacts: list[dict], build_timestamp: str) -> dict:
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "package": "NeuralAxe OS Gate B10.2 read-only store preflight",
+        "productName": "NeuralAxe OS",
+        "productVersion": "0.1.0-dev",
+        "buildChannel": "development",
+        "vendor": "NeuralShield",
+        "targetDevice": "Gamma",
+        "targetBoard": "601",
+        "targetAsic": "BM1370",
+        "gitCommit": state["commit"],
+        "gitDescribe": state["describe"],
+        "firmwareVersion": fw_version,
+        "buildTimestampUtc": build_timestamp,
+        "storePreflightEnabled": True,
+        "executionEnabled": False,
+        "apiEnabled": False,
+        "timeObservationEnabled": False,
+        "pilotDiagnosticsEnabled": False,
+        "trustedTimeSourceConfigured": False,
+        "trustedTimeSourceValue": "<none: a preflight build selects no NTP source>",
+        "readOnlyStoreAccess": True,
+        "timedSessionStoreWritesPossible": False,
+        "wholeImageNvsWriteFree": False,
+        "destructiveNvsRecoveryDisabled": True,
+        "wholeImageNvsWriteNote": (
+            "The dedicated inspector never writes nx_tps, and the classification "
+            "happens BEFORE any write-capable configuration path runs. The IMAGE is "
+            "still not NVS write-free: after classification, nvs_config_init() may "
+            "write the 'main' namespace (schema migrations, first-boot defaults, the "
+            "settings queue). DESTRUCTIVE NVS RECOVERY IS COMPILED OUT in this "
+            "posture: nvs_flash_erase() has no call site, and any NVS init failure "
+            "emits TPS_PREFLIGHT_BLOCKED_NVS_INIT and halts boot inert."
+        ),
+        "flags": flags,
+        "sizes": sizes,
+        "linkedSymbolGroups": symbols,
+        "expectedSerialTokens": EXPECTED_TOKENS,
+        "acceptableResults": ACCEPTABLE_TOKENS,
+        "blockingResults": BLOCKING_TOKENS,
+        "flashMethod": (
+            "AxeOS Update page (POST /api/system/OTAWWW then POST /api/system/OTA). "
+            "Writes the www partition and the inactive OTA slot + otadata only; NVS "
+            "settings (Wi-Fi, pools, tuning, fan) are preserved. Owner-executed."
+        ),
+        "recoveryMethod": (
+            "Re-upload the previous known-good www.bin and esp-miner.bin through the "
+            "same Update page. No factory/merged image is included: a full flash at 0x0 "
+            "would ERASE NVS, which would destroy the very store this image inspects."
+        ),
+        "factoryImageIncluded": False,
+        "privateArtifactsExcluded": True,
+        "artifacts": artifacts,
+    }
+
+
+# --------------------------------------------------------------------------
+# Entry point
+# --------------------------------------------------------------------------
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--repo-root", default=None)
+    parser.add_argument("--out-dir", default=None,
+                        help="<external-artifact-directory>; falls back to "
+                             f"${ARTIFACT_ROOT_ENV}. Never hardcoded.")
+    parser.add_argument("--work-dir", default=None)
+    parser.add_argument("--idf-image", default=DEFAULT_IDF_IMAGE)
+    parser.add_argument("--build-timestamp", default=None)
+    parser.add_argument("--print-flags", action="store_true")
+    parser.add_argument("--keep-work-dir", action="store_true")
+    args = parser.parse_args()
+
+    if args.print_flags:
+        for flag in PREFLIGHT_FLAGS_ON:
+            print(f"{flag}=y")
+        for flag in PREFLIGHT_FLAGS_OFF:
+            print(f"{flag}=n")
+        return 0
+
+    repo = Path(args.repo_root).resolve() if args.repo_root else Path(
+        subprocess.check_output(["git", "rev-parse", "--show-toplevel"],
+                                cwd=str(Path(__file__).resolve().parent),
+                                text=True).strip()).resolve()
+
+    out_dir = resolve_out_dir(args.out_dir)
+    state = repo_state(repo)
+    before_digest = tracked_tree_digest(repo)
+    print(f"building from {state['describe']} ({state['commit'][:12]}) on {state['branch']}")
+
+    native = bool(os.environ.get("IDF_PATH"))
+    work = Path(args.work_dir).resolve() if args.work_dir else Path(
+        tempfile.mkdtemp(prefix="nx-b102-preflight-")).resolve()
+    try:
+        work.relative_to(repo)
+    except ValueError:
+        pass
+    else:
+        fail("the temporary build tree must live OUTSIDE the repository")
+
+    config_path = write_preflight_defaults(work)
+    try:
+        run_build(repo, work, args.idf_image, native)
+        build = work / "build"
+        flags = verify_build_config(parse_sdkconfig_h(build / "config" / "sdkconfig.h"))
+        symbols = verify_symbols(list_symbols(build / "esp-miner.elf", work,
+                                              args.idf_image, native))
+        sizes = verify_sizes(build)
+        fw_version = read_app_desc_version(build / "esp-miner.bin")
+        if "-dirty" in fw_version:
+            fail(f"the built image embeds a dirty identity ({fw_version})")
+        print(f"preflight posture verified; firmware identity {fw_version}")
+
+        prefix = f"NeuralAxe-OS-v0.1.0-dev-Gamma-601-{state['describe']}"
+        artifacts = stage_artifacts(build, out_dir, prefix)
+        manifest = build_manifest(state, flags, sizes, symbols, fw_version, artifacts,
+                                  args.build_timestamp or "<not recorded>")
+        manifest_path = out_dir / f"{prefix}-preflight-manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        sums = "\n".join(f"{a['sha256']}  {a['filename']}" for a in artifacts) + "\n"
+        (out_dir / f"{prefix}-preflight-SHA256SUMS.txt").write_text(sums, encoding="utf-8")
+
+        blob = manifest_path.read_text(encoding="utf-8")
+        for leak in (str(repo), str(work), str(out_dir)):
+            if leak and leak in blob:
+                fail("the manifest would record a local filesystem path — refusing")
+        print(f"wrote {manifest_path.name}")
+    finally:
+        try:
+            config_path.unlink()
+        except OSError:
+            pass
+        if not args.keep_work_dir and args.work_dir is None:
+            shutil.rmtree(work, ignore_errors=True)
+
+    if before_digest != tracked_tree_digest(repo):
+        fail("the build modified tracked files")
+    if git(repo, "status", "--porcelain"):
+        fail("the build left the working tree dirty")
+    print("tracked tree unchanged; temporary configuration removed")
+    print("PREFLIGHT BUILD OK — no hardware was touched and no flash was performed")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except PreflightError as exc:
+        print(f"PREFLIGHT BUILD FAIL: {exc}", file=sys.stderr)
+        sys.exit(1)

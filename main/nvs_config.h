@@ -121,6 +121,20 @@ typedef struct {
 
 esp_err_t nvs_config_init(void);
 
+/*
+ * NVS INITIALIZATION CONTRACT.
+ *
+ * Default build: nvs_config_init() calls nvs_flash_init() and, on
+ * ESP_ERR_NVS_NO_FREE_PAGES / ESP_ERR_NVS_NEW_VERSION_FOUND, recovers by
+ * calling nvs_flash_erase() — which erases the WHOLE nvs partition. Unchanged.
+ *
+ * Gate B10.2 preflight build (CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT): that
+ * destructive recovery is COMPILED OUT. nvs_config_init() assumes NVS is
+ * already initialized, because the preflight boot gate initializes it without
+ * recovery and refuses to let boot proceed when that fails. An image whose
+ * purpose is to inspect the timed-session store must not be able to erase it.
+ */
+
 char *nvs_config_get_string(NvsConfigKey key);
 char *nvs_config_get_string_indexed(NvsConfigKey key, int index);
 void nvs_config_set_string(NvsConfigKey key, const char * value);

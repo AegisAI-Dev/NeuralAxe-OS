@@ -293,7 +293,8 @@ menu "Stratum Configuration"
             trusted-time source lifecycle, network/link readiness, the
             observation summary, and an invariant report of the healthy
             empty-store posture. It creates no task, registers no event
-            handler, opens no socket, writes no NVS, changes no public schema,
+            handler, opens no socket, writes no nx_tps key, changes no public
+            schema,
             never runs from an interrupt and never holds a lock across a log
             call or an external call.
 
@@ -311,6 +312,55 @@ menu "Stratum Configuration"
             Gate B10 build: no pilot symbol is linked and no pilot line is
             emitted. Leave disabled for production; enable it only for an
             owner-built, owner-flashed pilot artifact.
+
+    config NX_TIMED_SESSIONS_STORE_PREFLIGHT
+        bool "Timed pool session READ-ONLY store preflight (EXPERIMENTAL, Gate B10.2)"
+        depends on !NX_TIMED_SESSIONS && !NX_TIMED_SESSIONS_EXECUTION && \
+                   !NX_TIMED_SESSIONS_API && !NX_TIMED_SESSIONS_TIME_OBSERVE && \
+                   !NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS
+        default n
+        help
+            EXPERIMENTAL. Performs EXACTLY ONE strictly read-only inspection of
+            the timed-session NVS namespace during boot and reports a single
+            bounded classification token on the serial console. Board 601 /
+            BM1370 only. Disabled by default and never auto-enabled.
+
+            WHY IT EXISTS. Gate B10.1 established that the timed-session store
+            could not be classified before flashing an observation-pilot image:
+            the only sanitized read surface is the Gate B8 API that a pilot
+            build must keep disabled, and the only alternative was dumping the
+            whole NVS partition, which carries Wi-Fi and pool credentials.
+
+            This flag does NOT REQUIRE NX_TIMED_SESSIONS: the store and record
+            components compile unconditionally, so the preflight reads the
+            committed schema without bringing the timed-session runtime into
+            existence. No runtime instance, no owner task, no operation
+            coordinator, no recovery plan, no SNTP.
+
+            It is MUTUALLY EXCLUSIVE with NX_TIMED_SESSIONS ITSELF and with
+            timed-session execution, the control API, trusted-time observation
+            and pilot diagnostics. The parent flag matters as much as its
+            children: the four sub-flags all depend on NX_TIMED_SESSIONS, so
+            excluding only them would still allow NX_TIMED_SESSIONS=y, and the
+            Gate B6 bootstrap would then open nx_tps with NVS_READWRITE on the
+            same boot - CREATING the very namespace this posture exists to
+            inspect without creating. A C-level #error enforces the same rule.
+
+            The inspection opens ONE namespace with NVS_READONLY, which per
+            ESP-IDF never creates it, and drives the committed Gate B3 loader
+            through an operations table whose write and commit entries are
+            unconditional refusals that count the attempt. No nvs_set_*, no
+            nvs_erase_*, no nvs_commit exists on any path, and the classifier
+            fails closed if a counter is ever non-zero.
+
+            Only TPS_PREFLIGHT_EMPTY and TPS_PREFLIGHT_CLEARED permit a later
+            pilot. Unknown, truncated or corrupt data can never produce either.
+            No log line carries a namespace, key name, record size, generation,
+            session id, trusted epoch, pool identity, credential, raw payload
+            or NVS error string.
+
+            With this flag disabled no preflight symbol is linked, no NVS read
+            occurs and no token is emitted. Leave disabled for production.
 
     config NX_TIMED_SESSIONS_EXECUTION
         bool "Timed pool session controlled execution (EXPERIMENTAL, Gate B7)"
