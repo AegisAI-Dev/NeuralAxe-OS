@@ -1144,6 +1144,10 @@ components:
             - OPERATION_NO_ACTIVE_SESSION
             - OPERATION_UNSAFE_RELEASE
             - OPERATION_INVALID_REQUEST
+            # Emitted by pool_operation_http_code_str()'s defensive
+            # default branch. Declared here so the firmware can never
+            # return a conflict code its own published schema rejects.
+            - OPERATION_CODE_UNKNOWN
         retryable:
           type: boolean
         activeOwner:

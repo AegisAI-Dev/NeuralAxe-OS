@@ -20,10 +20,11 @@ import { CommandDeckComponent } from './components/command-deck/command-deck.com
 import { StabilityLabComponent } from './components/stability-lab/stability-lab.component';
 import { BlockIntelligenceComponent } from './components/block-intelligence/block-intelligence.component';
 import { PoolStrategyComponent } from './components/pool-strategy/pool-strategy.component';
+import { TimedSessionComponent } from './components/timed-session/timed-session.component';
 
 const TITLE_PREFIX = 'NeuralAxe OS';
 
-const routes: Routes = [
+export const routes: Routes = [
   {
       path: 'ap',
       component: AppLayoutComponent,
@@ -111,6 +112,11 @@ const routes: Routes = [
         component: PoolStrategyComponent,
         title: `${TITLE_PREFIX} Pool Strategy`,
         canDeactivate: [PoolSwitchGuard],
+      },
+      {
+        path: 'timed-session',
+        component: TimedSessionComponent,
+        title: `${TITLE_PREFIX} Timed Pool Session`,
       },
       {
         path: 'about',

@@ -21,6 +21,7 @@ import { CommandDeckComponent } from './components/command-deck/command-deck.com
 import { StabilityLabComponent } from './components/stability-lab/stability-lab.component';
 import { BlockIntelligenceComponent } from './components/block-intelligence/block-intelligence.component';
 import { PoolStrategyComponent } from './components/pool-strategy/pool-strategy.component';
+import { TimedSessionComponent } from './components/timed-session/timed-session.component';
 import { ModalComponent } from './components/modal/modal.component';
 import { TooltipIconComponent } from './components/tooltip-icon/tooltip-icon.component';
 import { TooltipTextIconComponent } from './components/tooltip-text-icon/tooltip-text-icon.component';
@@ -59,6 +60,7 @@ const components = [
   StabilityLabComponent,
   BlockIntelligenceComponent,
   PoolStrategyComponent,
+  TimedSessionComponent,
   ModalComponent,
   TooltipIconComponent,
   TooltipTextIconComponent,

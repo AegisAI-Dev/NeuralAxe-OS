@@ -1,0 +1,301 @@
+/* NeuralAxe Timed Pool Session (Phase 2M.1B, Gate B9).
+   Imported globally from src/styles.scss: component styles have a hard 4 KB
+   budget and this page needs a little more, exactly like the Command Deck,
+   Fleet, Stability Lab and Block Intelligence pages.
+   Display only — no page logic depends on these classes. */
+
+.nx-ts {
+  --nx-ts-gap: 1rem;
+}
+
+/* Visually hidden but readable by screen readers. */
+.nx-ts .nx-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.nx-ts .nx-ts-detail {
+  font-size: 0.8rem;
+  line-height: 1.55;
+  color: var(--nx-text);
+  margin: 0 0 0.5rem;
+  max-width: 82ch;
+}
+
+.nx-ts .nx-ts-detail.nx-dim { color: var(--nx-text-dim); }
+
+.nx-ts .nx-ts-hint {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--nx-text-dim);
+  margin: 0.25rem 0 0;
+}
+
+.nx-ts .nx-ts-error {
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: var(--nx-red);
+  margin: 0.25rem 0 0;
+}
+
+/* ---------- availability ---------- */
+
+.nx-ts .nx-ts-avail-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+
+.nx-ts .nx-ts-avail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.nx-ts .nx-ts-avail-state,
+.nx-ts .nx-ts-state {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+
+/* Severity accents — never the ONLY indicator; every state also has text. */
+.nx-ts .nx-ts-ok { border-left: 3px solid var(--nx-sem-ok); }
+.nx-ts .nx-ts-info { border-left: 3px solid var(--nx-sem-info); }
+.nx-ts .nx-ts-warn { border-left: 3px solid var(--nx-sem-warn); }
+.nx-ts .nx-ts-danger { border-left: 3px solid var(--nx-sem-danger); }
+.nx-ts .nx-ts-neutral { border-left: 3px solid var(--nx-line-bright); }
+
+/* ---------- command banner ---------- */
+
+.nx-ts .nx-ts-cmd-head {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  margin-bottom: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.nx-ts .nx-ts-conflict-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+
+/* ---------- status grid ---------- */
+
+.nx-ts .nx-ts-top,
+.nx-ts .nx-ts-pair {
+  display: grid;
+  gap: var(--nx-ts-gap);
+  margin-bottom: var(--nx-ts-gap);
+}
+
+.nx-ts .nx-ts-top { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.nx-ts .nx-ts-pair { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.nx-ts .nx-ts-card { margin: 0; }
+
+.nx-ts .nx-ts-countdown b {
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--nx-cyan);
+  display: block;
+  margin-bottom: 0.4rem;
+}
+
+.nx-ts .nx-ts-recovery { border-left: 3px solid var(--nx-sem-danger); }
+
+/* ---------- timeline ---------- */
+
+.nx-ts .nx-ts-timeline {
+  list-style: none;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.nx-ts .nx-ts-timeline li {
+  display: grid;
+  grid-template-columns: 1.2rem minmax(0, 1fr) auto;
+  gap: 0.6rem;
+  align-items: center;
+  font-size: 0.78rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid transparent;
+}
+
+.nx-ts .nx-ts-stage-label { overflow-wrap: anywhere; }
+
+.nx-ts .nx-ts-stage-state {
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--nx-text-dim);
+}
+
+.nx-ts .nx-ts-stage-pending { color: var(--nx-text-dim); }
+.nx-ts .nx-ts-stage-skipped { color: var(--nx-text-dim); opacity: 0.75; }
+.nx-ts .nx-ts-stage-done { color: var(--nx-text); }
+.nx-ts .nx-ts-stage-done i { color: var(--nx-sem-ok); }
+.nx-ts .nx-ts-stage-active {
+  color: var(--nx-text);
+  border-color: rgba(53, 195, 230, 0.4);
+  background: var(--nx-cyan-dim);
+}
+.nx-ts .nx-ts-stage-active i { color: var(--nx-cyan); }
+.nx-ts .nx-ts-stage-failed { color: var(--nx-text); }
+.nx-ts .nx-ts-stage-failed i { color: var(--nx-sem-danger); }
+
+/* ---------- form ---------- */
+
+.nx-ts .nx-ts-form {
+  display: grid;
+  gap: var(--nx-ts-gap);
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin: 0.8rem 0 1rem;
+}
+
+.nx-ts .nx-ts-fieldset {
+  border: 1px solid var(--nx-line);
+  border-radius: 8px;
+  padding: 0.8rem 0.9rem 1rem;
+  margin: 0;
+  min-width: 0;
+}
+
+.nx-ts .nx-ts-fieldset legend {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--nx-text-dim);
+  padding: 0 0.4rem;
+}
+
+.nx-ts .nx-ts-field { margin-bottom: 0.8rem; min-width: 0; }
+.nx-ts .nx-ts-field:last-child { margin-bottom: 0; }
+
+.nx-ts .nx-ts-field label {
+  display: block;
+  font-size: 0.62rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--nx-text-dim);
+  margin-bottom: 0.3rem;
+}
+
+.nx-ts .nx-ts-field input,
+.nx-ts .nx-ts-select {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.nx-ts .nx-ts-select {
+  background: var(--nx-panel-2);
+  color: var(--nx-text);
+  border: 1px solid var(--nx-line-bright);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.82rem;
+}
+
+.nx-ts .nx-ts-duration {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 0.6rem;
+}
+
+.nx-ts .nx-ts-computed b {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--nx-cyan);
+}
+
+.nx-ts .nx-ts-presets,
+.nx-ts .nx-ts-mockbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.7rem;
+}
+
+.nx-ts .nx-chip-on {
+  border-color: var(--nx-cyan);
+  background: var(--nx-cyan-dim);
+  color: var(--nx-cyan);
+}
+
+/* ---------- dialogs ---------- */
+
+.nx-ts-subhead { margin: 0.9rem 0 0.3rem; }
+
+.nx-ts-statements {
+  list-style: none;
+  margin: 0.4rem 0 0.8rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--nx-text);
+}
+
+.nx-ts-statements li {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr);
+  gap: 0.4rem;
+  align-items: start;
+}
+
+.nx-ts-statements i { color: var(--nx-cyan); margin-top: 0.2rem; }
+
+.nx-ts-ack {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: start;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--nx-text);
+  margin-top: 0.6rem;
+}
+
+.nx-ts-ack input[type="checkbox"] { width: 1rem; height: 1rem; margin-top: 0.15rem; }
+.nx-ts-ack label { cursor: pointer; }
+.nx-ts-ack input[type="checkbox"]:focus-visible { outline: 2px solid var(--nx-cyan); outline-offset: 2px; }
+
+/* ---------- focus + motion ---------- */
+
+.nx-ts button:focus-visible,
+.nx-ts input:focus-visible,
+.nx-ts select:focus-visible {
+  outline: 2px solid var(--nx-cyan);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nx-ts .pi-spin { animation: none; }
+}
+
+@media (max-width: 640px) {
+  .nx-ts .nx-ts-avail-head { flex-direction: column; }
+  .nx-ts .nx-ts-timeline li { grid-template-columns: 1.2rem minmax(0, 1fr); }
+  .nx-ts .nx-ts-stage-state { grid-column: 2; }
+}

@@ -1,0 +1,371 @@
+<div class="layout-main nx-ts">
+  <h2 class="nx-page-title">Timed Pool Session</h2>
+  <p class="nx-page-desc">
+    Run one unattended, time-boxed session on a different pool and come back automatically. The device captures its own
+    current pool configuration, applies the target transactionally, verifies it live before authorising any mining on it,
+    and treats the return to your original pool as mandatory. Your existing pool password is never read, sent or changed.
+  </p>
+  <p class="nx-page-desc nx-dim">
+    <i class="pi pi-info-circle" aria-hidden="true"></i>
+    This dashboard only submits requests and reads back what the device reports. The device decides everything, and its
+    status is the only proof of what actually happened.
+  </p>
+
+  <!-- Screen-reader announcements for state changes. -->
+  <div class="nx-sr-only" aria-live="polite" role="status">{{ liveAnnouncement }}</div>
+
+  <!-- =============== DEVELOPMENT MOCK SWITCH (never in production) ========= -->
+  <div class="card nx-note" *ngIf="mocked">
+    <b>Development mocks</b>
+    <p class="nx-ts-hint">Synthetic postures only — no device is contacted.</p>
+    <div class="nx-ts-mockbar">
+      <button type="button" class="nx-chip" *ngFor="let p of mockPostures"
+              [class.nx-chip-on]="p === mockPosture" (click)="setMockPosture(p)">{{ p }}</button>
+    </div>
+  </div>
+
+  <!-- =============== AVAILABILITY ========================================= -->
+  <div class="card nx-ts-avail" [ngClass]="'nx-ts-' + availabilityInfo.severity">
+    <div class="nx-ts-avail-head">
+      <div>
+        <div class="nx-card-title nx-cyan">Device support</div>
+        <div class="nx-ts-avail-state">
+          <span class="nx-pill" [ngClass]="pillClass(availabilityInfo.severity)">{{ availabilityInfo.label }}</span>
+        </div>
+      </div>
+      <div class="nx-ts-avail-actions">
+        <button pButton type="button" class="p-button-secondary p-button-sm" *ngIf="availabilityInfo.retryable"
+                (click)="checkAgain()">Check again</button>
+        <button pButton type="button" class="p-button-text p-button-sm" *ngIf="availabilityInfo.operable"
+                (click)="refreshNow()" aria-label="Refresh device status now">
+          <i class="pi pi-refresh" aria-hidden="true"></i>&nbsp;Refresh
+        </button>
+      </div>
+    </div>
+    <p class="nx-ts-detail">{{ availabilityInfo.detail }}</p>
+    <p class="nx-ts-detail nx-dim" *ngIf="availabilityInfo.pollingStopped">
+      Automatic checking is stopped so the device is not asked repeatedly for something it does not have.
+    </p>
+  </div>
+
+  <!-- =============== COMMAND BANNER ====================================== -->
+  <div class="card nx-ts-cmd" *ngIf="command.phase !== 'idle'" [ngClass]="'nx-ts-' + command.severity" role="status">
+    <div class="nx-ts-cmd-head">
+      <i class="pi" aria-hidden="true" [ngClass]="command.severity === 'ok' ? 'pi-check-circle' : (command.severity === 'danger' ? 'pi-times-circle' : 'pi-info-circle')"></i>
+      <b>{{ command.title }}</b>
+    </div>
+    <p class="nx-ts-detail">{{ command.detail }}</p>
+    <p class="nx-ts-detail" *ngIf="command.validationLabel">{{ command.validationLabel }}</p>
+    <div class="nx-ts-conflict" *ngIf="command.conflict as c">
+      <div class="nx-ts-conflict-flags">
+        <span class="nx-pill nx-pill-neutral" *ngIf="c.ownerLabel">Held by: {{ c.ownerLabel }}</span>
+        <span class="nx-pill" [ngClass]="c.retryable ? 'nx-pill-info' : 'nx-pill-warn'">
+          {{ c.retryable ? 'May succeed later' : 'Will not succeed by retrying' }}
+        </span>
+        <span class="nx-pill nx-pill-warn" *ngIf="c.restoreRequired">Return to original pool owed</span>
+        <span class="nx-pill nx-pill-info" *ngIf="c.terminalAckRequired">Previous result awaiting acknowledgement</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- =============== STATUS =============================================== -->
+  <ng-container *ngIf="view as v">
+    <div class="nx-ts-top">
+      <div class="card nx-ts-card">
+        <div class="nx-card-title nx-cyan">Session</div>
+        <div class="nx-ts-state">
+          <span class="nx-pill" [ngClass]="pillClass(v.durable.severity)">{{ v.durable.label }}</span>
+        </div>
+        <p class="nx-ts-detail">{{ v.durable.detail }}</p>
+        <div class="nx-kv-row"><label>Runtime</label><b>{{ v.runtime.label }}</b></div>
+        <div class="nx-kv-row"><label>Execution</label><b>{{ v.execution.label }}</b></div>
+        <div class="nx-kv-row"><label>Status seq</label><b>{{ v.statusSequence }}</b></div>
+      </div>
+
+      <div class="card nx-ts-card">
+        <div class="nx-card-title nx-cyan">Mining authorisation</div>
+        <div class="nx-ts-state">
+          <span class="nx-pill" [ngClass]="pillClass(v.grant.severity)">{{ v.grant.label }}</span>
+        </div>
+        <p class="nx-ts-detail">{{ v.grant.detail }}</p>
+        <div class="nx-kv-row"><label>ASIC work</label><b>{{ v.asicGate.label }}</b></div>
+        <div class="nx-kv-row"><label>Pool startup</label><b>{{ v.protocol.label }}</b></div>
+        <div class="nx-kv-row"><label>Return owed</label><b>{{ v.obligation.label }}</b></div>
+      </div>
+
+      <div class="card nx-ts-card">
+        <div class="nx-card-title nx-cyan">Ownership</div>
+        <div class="nx-ts-state">
+          <span class="nx-pill" [ngClass]="pillClass(v.owner.severity)">{{ v.owner.label }}</span>
+          <span class="nx-pill nx-pill-neutral">{{ v.phase.label }}</span>
+        </div>
+        <p class="nx-ts-detail">{{ v.owner.detail }}</p>
+        <p class="nx-ts-detail nx-dim">{{ v.phase.detail }}</p>
+      </div>
+
+      <div class="card nx-ts-card">
+        <div class="nx-card-title nx-cyan">Time remaining</div>
+        <div class="nx-ts-state">
+          <span class="nx-pill" [ngClass]="pillClass(v.deadline.severity)">{{ v.deadline.label }}</span>
+        </div>
+        <div class="nx-ts-countdown" *ngIf="v.deadline.remainingKnown"><b>{{ v.deadline.remainingText }}</b></div>
+        <p class="nx-ts-detail">{{ v.deadline.detail }}</p>
+      </div>
+    </div>
+
+    <!-- Operator-recovery banner -->
+    <div class="card nx-note nx-note-warn nx-ts-recovery" *ngIf="v.operatorRecoveryRequired" role="alert">
+      <i class="pi pi-exclamation-triangle" aria-hidden="true"></i>
+      <b>Operator recovery required.</b>
+      <p class="nx-ts-detail">
+        The device could not trust its stored session state and locked further changes. It will not clear this by
+        itself and nothing here can force it. Review the device logs, then power-cycle or reflash as your procedure
+        requires.
+      </p>
+    </div>
+
+    <!-- =============== TIMELINE ========================================== -->
+    <div class="card" *ngIf="timeline as tl">
+      <div class="nx-card-title nx-cyan">Progress</div>
+      <p class="nx-ts-detail nx-dim">
+        A description of what the device has reported so far — never a prediction. No stage is marked complete because
+        time has passed.
+      </p>
+      <p class="nx-ts-detail nx-warn-text" *ngIf="tl.interrupted">{{ tl.interruptionDetail }}</p>
+      <ol class="nx-ts-timeline">
+        <li *ngFor="let stage of tl.stages" [ngClass]="'nx-ts-stage-' + stage.state">
+          <i [ngClass]="stageIcon(stage.state)" aria-hidden="true"></i>
+          <span class="nx-ts-stage-label">{{ stage.label }}</span>
+          <span class="nx-ts-stage-state">{{ stage.state }}</span>
+        </li>
+      </ol>
+    </div>
+
+    <!-- =============== TRUSTED TIME + HEARTBEAT ========================== -->
+    <div class="nx-ts-pair">
+      <div class="card nx-ts-card">
+        <div class="nx-card-title nx-cyan">Trusted time</div>
+        <div class="nx-ts-state">
+          <span class="nx-pill" [ngClass]="pillClass(v.trustedTime.severity)">{{ v.trustedTime.label }}</span>
+        </div>
+        <p class="nx-ts-detail">{{ v.trustedTime.detail }}</p>
+        <p class="nx-ts-detail nx-warn-text" *ngIf="v.trustedTime.warn">
+          This dashboard never estimates a deadline from your browser clock.
+        </p>
+      </div>
+
+      <div class="card nx-ts-card">
+        <div class="nx-card-title nx-cyan">Liveness heartbeat</div>
+        <div class="nx-ts-state">
+          <span class="nx-pill" [ngClass]="pillClass(v.heartbeat.severity)">{{ v.heartbeat.label }}</span>
+          <span class="nx-pill nx-pill-neutral">{{ v.heartbeat.commits }} stored</span>
+        </div>
+        <p class="nx-ts-detail">{{ v.heartbeat.detail }}</p>
+        <p class="nx-ts-detail nx-dim">{{ heartbeatNote }}</p>
+      </div>
+    </div>
+
+    <!-- =============== COMMAND PLANE ===================================== -->
+    <div class="card">
+      <div class="nx-card-title nx-cyan">Device command plane</div>
+      <div class="nx-kv-row"><label>Queued</label><b>{{ v.pendingCommand.label }}</b></div>
+      <div class="nx-kv-row"><label>Last result</label><b>{{ v.lastCommandResult.label }}</b></div>
+      <p class="nx-ts-detail">{{ v.lastCommandResult.detail }}</p>
+    </div>
+
+    <!-- =============== TERMINAL ACKNOWLEDGEMENT ========================== -->
+    <div class="card nx-ts-terminal" *ngIf="v.terminalAckRequired">
+      <div class="nx-card-title nx-cyan">Result awaiting acknowledgement</div>
+      <div class="nx-ts-state">
+        <span class="nx-pill" [ngClass]="pillClass(v.durable.severity)">{{ v.durable.label }}</span>
+      </div>
+      <p class="nx-ts-detail">
+        The device is holding this finished result until you acknowledge it. Acknowledging clears the retained record;
+        it does not change your pool configuration. A new session becomes possible afterwards.
+      </p>
+      <p class="nx-ts-detail nx-warn-text" *ngIf="!v.acknowledgeOffered">
+        Acknowledgement is not available yet: the device still reports outstanding work or a recovery state.
+      </p>
+      <button pButton type="button" [disabled]="submitting || !v.acknowledgeOffered" (click)="openAckConfirm()">
+        Acknowledge result
+      </button>
+      <p class="nx-ts-hint" *ngIf="submitting">A request is already being sent.</p>
+    </div>
+
+    <!-- =============== RESTORE NOW ======================================= -->
+    <div class="card nx-ts-restore" *ngIf="v.restoreOffered">
+      <div class="nx-card-title nx-cyan">Return to the original pool</div>
+      <p class="nx-ts-detail">
+        Stop the session early and begin returning to the pool configuration the device captured when the session
+        started. The device verifies the return before the session can complete.
+      </p>
+      <button pButton type="button" class="p-button-warning" [disabled]="submitting" (click)="openRestoreConfirm()">
+        Restore now
+      </button>
+      <p class="nx-ts-hint" *ngIf="submitting">A request is already being sent.</p>
+    </div>
+
+    <!-- Why the form is absent. A missing form with no explanation reads as a
+         broken page; each posture needs its own, actionable sentence. -->
+    <div class="card nx-ts-unavailable" *ngIf="!v.createOffered" [ngClass]="v.capable ? 'nx-ts-info' : 'nx-ts-warn'">
+      <div class="nx-card-title nx-cyan">Starting a timed session</div>
+      <p class="nx-ts-detail">{{ createDisabledReason }}</p>
+      <p class="nx-ts-detail nx-dim" *ngIf="!v.capable">
+        Nothing on this page can change that from here — it is a property of the firmware build or of the device's
+        own startup, not a setting.
+      </p>
+    </div>
+
+    <!-- =============== CREATE FORM ======================================= -->
+    <div class="card nx-ts-create" *ngIf="v.createOffered">
+      <div class="nx-card-title nx-cyan">Start a timed session</div>
+      <p class="nx-ts-detail">
+        Enter the TARGET pool only. The device captures its own current configuration internally — you are never asked
+        for it — and your existing password is kept exactly as it is.
+      </p>
+
+      <div class="nx-ts-form">
+        <fieldset class="nx-ts-fieldset">
+          <legend>Duration</legend>
+          <div class="nx-ts-presets">
+            <button type="button" class="nx-chip" *ngFor="let p of durationPresets"
+                    (click)="applyPreset(p.hours, p.minutes)">{{ p.label }}</button>
+          </div>
+          <div class="nx-ts-duration">
+            <div class="nx-ts-field">
+              <label for="ts-hours">Hours</label>
+              <input id="ts-hours" type="number" min="0" max="24" pInputText
+                     [(ngModel)]="form.hours" (ngModelChange)="onFormChanged()" />
+            </div>
+            <div class="nx-ts-field">
+              <label for="ts-minutes">Minutes</label>
+              <input id="ts-minutes" type="number" min="0" max="59" pInputText
+                     [(ngModel)]="form.minutes" (ngModelChange)="onFormChanged()" />
+            </div>
+            <div class="nx-ts-field nx-ts-computed">
+              <label id="ts-seconds-label">Sent as</label>
+              <b aria-labelledby="ts-seconds-label">{{ formCheck.durationSeconds }} s</b>
+            </div>
+          </div>
+          <p class="nx-ts-error" *ngIf="problemFor('duration') as e">{{ e }}</p>
+          <p class="nx-ts-hint">Between 15 minutes and 24 hours. The duration cannot be changed once the session starts.</p>
+        </fieldset>
+
+        <fieldset class="nx-ts-fieldset">
+          <legend>Target pool</legend>
+          <div class="nx-ts-field">
+            <label for="ts-host">Host</label>
+            <input id="ts-host" type="text" pInputText autocomplete="off" [maxlength]="maxHostLen"
+                   [(ngModel)]="form.targetHost" (ngModelChange)="onFormChanged()" />
+            <p class="nx-ts-error" *ngIf="problemFor('targetHost') as e">{{ e }}</p>
+          </div>
+          <div class="nx-ts-field">
+            <label for="ts-port">Port</label>
+            <input id="ts-port" type="number" min="1" max="65535" pInputText autocomplete="off"
+                   [(ngModel)]="form.targetPort" (ngModelChange)="onFormChanged()" />
+            <p class="nx-ts-error" *ngIf="problemFor('targetPort') as e">{{ e }}</p>
+          </div>
+          <div class="nx-ts-field">
+            <label for="ts-account">Account / worker</label>
+            <input id="ts-account" type="text" pInputText autocomplete="off" [maxlength]="maxAccountLen"
+                   [(ngModel)]="form.targetAccount" (ngModelChange)="onFormChanged()" />
+            <p class="nx-ts-error" *ngIf="problemFor('targetAccount') as e">{{ e }}</p>
+            <p class="nx-ts-hint">Never a password. Timed sessions always keep the password already stored on the device.</p>
+          </div>
+        </fieldset>
+
+        <fieldset class="nx-ts-fieldset">
+          <legend>Target protocol and chain</legend>
+          <div class="nx-ts-field">
+            <label for="ts-protocol">Stratum protocol</label>
+            <select id="ts-protocol" class="nx-ts-select" [(ngModel)]="form.targetProtocol" (ngModelChange)="onFormChanged()">
+              <option *ngFor="let o of protocolOptions" [value]="o.value">{{ o.label }}</option>
+            </select>
+          </div>
+          <div class="nx-ts-field">
+            <label for="ts-tls">TLS</label>
+            <select id="ts-tls" class="nx-ts-select" [(ngModel)]="form.targetTlsMode" (ngModelChange)="onFormChanged()">
+              <option *ngFor="let o of tlsOptions" [value]="o.value">{{ o.label }}</option>
+            </select>
+            <p class="nx-ts-hint">Custom certificates are not offered: the device could not restore one exactly.</p>
+          </div>
+          <div class="nx-ts-field">
+            <label for="ts-chain">Chain</label>
+            <select id="ts-chain" class="nx-ts-select" [(ngModel)]="form.targetChain" (ngModelChange)="onFormChanged()">
+              <option *ngFor="let o of chainOptions" [value]="o.value">{{ o.label }}</option>
+            </select>
+            <p class="nx-ts-hint">Stated explicitly — never guessed from the hostname.</p>
+          </div>
+        </fieldset>
+      </div>
+
+      <button pButton type="button" [disabled]="submitting || !formCheck.valid" (click)="openCreateReview()">
+        Review and start
+      </button>
+      <p class="nx-ts-hint" *ngIf="createDisabledReason as reason">{{ reason }}</p>
+    </div>
+  </ng-container>
+</div>
+
+<!-- =============== CREATE REVIEW DIALOG ================================= -->
+<p-dialog header="Review timed session" [(visible)]="showCreateReview" [modal]="true"
+          [style]="{ width: '640px', maxWidth: '95vw' }" [dismissableMask]="false">
+  <p class="nx-ts-detail">These are exactly the values you entered. Nothing else is sent.</p>
+  <div class="nx-kv">
+    <div class="nx-kv-row" *ngFor="let row of reviewRows">
+      <label>{{ row.label }}</label><b>{{ row.value }}</b>
+    </div>
+  </div>
+
+  <h4 class="nx-cyan nx-ts-subhead">Before you confirm</h4>
+  <ul class="nx-ts-statements">
+    <li *ngFor="let s of createStatements"><i class="pi pi-angle-right" aria-hidden="true"></i> {{ s }}</li>
+  </ul>
+
+  <div class="nx-ts-ack">
+    <input type="checkbox" id="ts-create-ack" [(ngModel)]="createAcknowledged" />
+    <label for="ts-create-ack">I have read the statements above and want the device to start this session.</label>
+  </div>
+
+  <ng-template pTemplate="footer">
+    <button pButton type="button" class="p-button-text" (click)="cancelCreateReview()">Cancel</button>
+    <button pButton type="button" [disabled]="!createAcknowledged || submitting" (click)="confirmCreate()">
+      Start timed session
+    </button>
+  </ng-template>
+</p-dialog>
+
+<!-- =============== RESTORE CONFIRM DIALOG =============================== -->
+<p-dialog header="Return to the original pool" [(visible)]="showRestoreConfirm" [modal]="true"
+          [style]="{ width: '560px', maxWidth: '95vw' }" [dismissableMask]="false">
+  <ul class="nx-ts-statements">
+    <li *ngFor="let s of restoreStatements"><i class="pi pi-angle-right" aria-hidden="true"></i> {{ s }}</li>
+  </ul>
+  <div class="nx-ts-ack">
+    <input type="checkbox" id="ts-restore-ack" [(ngModel)]="restoreAcknowledged" />
+    <label for="ts-restore-ack">I understand target mining stops and the device begins returning to the original pool.</label>
+  </div>
+  <ng-template pTemplate="footer">
+    <button pButton type="button" class="p-button-text" (click)="showRestoreConfirm = false">Cancel</button>
+    <button pButton type="button" class="p-button-warning" [disabled]="!restoreAcknowledged || submitting"
+            (click)="confirmRestore()">Restore now</button>
+  </ng-template>
+</p-dialog>
+
+<!-- =============== ACKNOWLEDGE CONFIRM DIALOG =========================== -->
+<p-dialog header="Acknowledge session result" [(visible)]="showAckConfirm" [modal]="true"
+          [style]="{ width: '560px', maxWidth: '95vw' }" [dismissableMask]="false">
+  <ul class="nx-ts-statements">
+    <li *ngFor="let s of ackStatements"><i class="pi pi-angle-right" aria-hidden="true"></i> {{ s }}</li>
+  </ul>
+  <div class="nx-ts-ack">
+    <input type="checkbox" id="ts-ack-ack" [(ngModel)]="ackAcknowledged" />
+    <label for="ts-ack-ack">I want the device to clear this retained result.</label>
+  </div>
+  <ng-template pTemplate="footer">
+    <button pButton type="button" class="p-button-text" (click)="showAckConfirm = false">Cancel</button>
+    <button pButton type="button" [disabled]="!ackAcknowledged || submitting" (click)="confirmAcknowledge()">
+      Acknowledge result
+    </button>
+  </ng-template>
+</p-dialog>
