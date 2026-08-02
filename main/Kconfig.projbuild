@@ -276,6 +276,42 @@ menu "Stratum Configuration"
             With CONFIG_NX_TIMED_SESSIONS_NTP_SERVER empty no network request is
             made at all and the status simply reports an unconfigured source.
 
+    config NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS
+        bool "Timed pool session observation-pilot diagnostics (EXPERIMENTAL, Gate B10.1)"
+        depends on NX_TIMED_SESSIONS_TIME_OBSERVE
+        default n
+        help
+            EXPERIMENTAL. Adds bounded, read-only serial diagnostics for a
+            supervised trusted-time OBSERVATION pilot, so the owner can watch a
+            real device without a dashboard, without an HTTP route and without
+            enabling the Gate B8 API. Board 601 / BM1370 only. Disabled by
+            default and never auto-enabled.
+
+            This is a FIFTH, independent safety flag and it authorizes NOTHING.
+            It only observes already-published bounded facts on the single Gate
+            B6 owner task and writes bounded machine-token log lines: the
+            trusted-time source lifecycle, network/link readiness, the
+            observation summary, and an invariant report of the healthy
+            empty-store posture. It creates no task, registers no event
+            handler, opens no socket, writes no NVS, changes no public schema,
+            never runs from an interrupt and never holds a lock across a log
+            call or an external call.
+
+            A detected invariant violation is REPORTED, never acted upon: it
+            never restarts the device, clears a record, changes the pool
+            configuration or stops mining. Acting on it is the owner's decision.
+
+            No log line can carry the configured trusted-time hostname, a
+            resolved address, a raw wall-clock epoch, a pool identity, an
+            account, a worker, a password, a session identifier, a lease token
+            or a record generation - the diagnostic models have no string field
+            and the formatters accept no string input.
+
+            With this flag disabled the firmware is byte-for-byte the committed
+            Gate B10 build: no pilot symbol is linked and no pilot line is
+            emitted. Leave disabled for production; enable it only for an
+            owner-built, owner-flashed pilot artifact.
+
     config NX_TIMED_SESSIONS_EXECUTION
         bool "Timed pool session controlled execution (EXPERIMENTAL, Gate B7)"
         depends on NX_TIMED_SESSIONS

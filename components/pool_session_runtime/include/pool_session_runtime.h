@@ -109,6 +109,21 @@ typedef struct {
      * heartbeat, touches the pool/protocol/ASIC or restarts the device.
      */
     bool observe_enabled;
+
+    /*
+     * Gate B10.1 observation-pilot link fact. OPTIONAL and diagnostic ONLY:
+     * NULL means "no link fact is available", which is the shipped binding and
+     * the binding of every build without
+     * CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS. It is read
+     * only by the bounded pilot diagnostics on the single owner task, it must
+     * never block, and it feeds NO decision anywhere in B1-B10: it cannot
+     * start or stop the time provider, change a plan, take a lease, write the
+     * store, touch the pool/protocol/ASIC or restart the device. Production
+     * binds a bounded Wi-Fi association read; tests inject a deterministic
+     * fake. The callee returns association state only — no SSID, BSSID, RSSI,
+     * address or any other identity ever leaves it.
+     */
+    bool (*link_up)(void);
 } PoolSessionRuntimeDeps;
 
 /* ------------------------------------------------------------------ */

@@ -20,6 +20,22 @@
 #include "pool_session_runtime.h"
 #include "pool_session_reset.h"
 
+#if defined(CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS) && \
+    !defined(CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE)
+#error "Gate B10.1 pilot diagnostics require CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE"
+#endif
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS
+/*
+ * Gate B10.1 — bounded observation-pilot diagnostics. Compiled ONLY under the
+ * pilot flag; with it off not one symbol, byte of RAM or log line exists and
+ * this adapter is byte-for-byte the committed Gate B10 adapter.
+ */
+#include "esp_heap_caps.h"
+#include "esp_wifi.h"
+#include "pool_session_runtime_pilot.h"
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Bounded task configuration                                          */
 /* ------------------------------------------------------------------ */
@@ -35,7 +51,14 @@
  * executor (adapter calls: nvs_config staging, an independent NVS readback
  * handle, controlled stratum task creation), so the static stack grows.
  */
-#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+/*
+ * Gate B10.1 raises the same bound for a PILOT build: the bounded diagnostics
+ * add an snprintf and an extra ESP_LOG frame to this loop, and an unattended
+ * hardware pilot is the worst possible place to discover a stack overflow.
+ * The cost is paid only by a pilot artifact; the shipped default is unchanged.
+ */
+#if defined(CONFIG_NX_TIMED_SESSIONS_EXECUTION) || \
+    defined(CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS)
 #define POOL_RUNTIME_TASK_STACK_BYTES 8192
 #else
 #define POOL_RUNTIME_TASK_STACK_BYTES 4096
@@ -228,6 +251,27 @@ static uint64_t prod_monotonic_us(void)
     return (uint64_t)esp_timer_get_time();
 }
 
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS
+/*
+ * Gate B10.1 — the bounded pilot link fact. It answers exactly one question:
+ * "is the station currently associated?" The AP record is read into a local,
+ * used ONLY for the return code and zeroed immediately, so no SSID, BSSID,
+ * RSSI, channel or address is retained, published or logged. Non-blocking,
+ * never called from an interrupt, never called while a lock is held, and it
+ * feeds no decision anywhere in the runtime.
+ */
+static bool prod_link_up(void)
+{
+    wifi_ap_record_t ap;
+    esp_err_t        err;
+
+    memset(&ap, 0, sizeof(ap));
+    err = esp_wifi_sta_get_ap_info(&ap);
+    memset(&ap, 0, sizeof(ap));
+    return err == ESP_OK;
+}
+#endif /* CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS */
+
 void pool_session_runtime_production_deps(PoolSessionRuntimeDeps *out,
                                           PoolStoreNvsBackend *backend)
 {
@@ -260,6 +304,16 @@ void pool_session_runtime_production_deps(PoolSessionRuntimeDeps *out,
     out->observe_enabled = true;
 #else
     out->observe_enabled = false;
+#endif
+    /*
+     * Gate B10.1 pilot link fact — bound ONLY under the pilot-diagnostics
+     * flag. The shipped default leaves it NULL, so no Wi-Fi call exists at
+     * all and the pilot link events are simply never produced.
+     */
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS
+    out->link_up = prod_link_up;
+#else
+    out->link_up = NULL;
 #endif
 }
 
@@ -949,6 +1003,163 @@ static void runtime_step_observation(PoolSessionRuntime *rt)
 }
 
 /* ------------------------------------------------------------------ */
+/* Gate B10.1 — bounded observation-pilot diagnostics                  */
+/* ------------------------------------------------------------------ */
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS
+
+/*
+ * RAM-only, owned exclusively by the single B6 owner task. The line buffer
+ * lives here rather than on the task stack, matching the module rule that no
+ * large working struct is ever a task local.
+ */
+static PoolPilotState s_pilot;
+static char           s_pilot_line[POOL_PILOT_SUMMARY_MAX];
+static uint32_t       s_pilot_heartbeat_writes;
+
+/*
+ * The bounded pilot tick. STRICTLY read-only: it copies the already-published
+ * sanitized B6 snapshot and B10 diagnostics, reads bounded platform counters,
+ * asks the pure step which bounded lines are due, and logs them.
+ *
+ * It never writes the store, never touches a lease, never re-plans, never
+ * changes the pool configuration, the protocol permission, the ASIC gate, the
+ * mining grant, the frequency, the voltage or the fan configuration, never
+ * writes NVS and never restarts the device. An invariant violation is
+ * REPORTED and nothing more.
+ *
+ * LOCKING: every accessor below takes and releases the runtime lock inside
+ * itself, so no lock is held across a platform call or an ESP_LOG call.
+ */
+static void runtime_step_pilot(PoolSessionRuntime *rt)
+{
+    PoolRuntimeSnapshot       snap;
+    PoolTimeSourceDiagnostics diag;
+    PoolPilotInvariantInput   inv_in;
+    PoolPilotInvariantReport  inv;
+    PoolPilotObservation      obs;
+    PoolPilotStepResult       step;
+    PoolPilotSummary          sum;
+    uint64_t                  now_us;
+    uint32_t                  uptime_s;
+    uint32_t                  i;
+    bool                      exec_hook;
+    bool                      api_hook;
+
+    if (rt == NULL || !rt->initialized || !rt->booted) {
+        return;
+    }
+
+    (void)pool_session_runtime_snapshot(rt, &snap);
+    (void)pool_session_runtime_time_diagnostics(rt, &diag);
+
+    now_us   = runtime_monotonic_us(rt);
+    uptime_s = (uint32_t)(now_us / 1000000ull);
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+    exec_hook = (s_executor_hook != NULL);
+#else
+    exec_hook = false;
+#endif
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+    api_hook = (s_api_hook != NULL);
+#else
+    api_hook = false;
+#endif
+
+    memset(&inv_in, 0, sizeof(inv_in));
+    inv_in.snapshot_model_version      = snap.model_version;
+    inv_in.snapshot_structurally_valid = pool_runtime_snapshot_valid(&snap);
+    inv_in.store_result                = snap.store_result;
+    inv_in.session_present             = snap.session_present;
+    inv_in.lease_owner                 = snap.lease_owner;
+    inv_in.restore_required            = snap.restore_required;
+    inv_in.session_write_count         = snap.proposal_commits;
+    inv_in.heartbeat_write_count       = s_pilot_heartbeat_writes;
+#ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
+    inv_in.execution_compiled = true;
+#endif
+#ifdef CONFIG_NX_TIMED_SESSIONS_API
+    inv_in.api_compiled = true;
+#endif
+    inv_in.execution_hook_registered = exec_hook;
+    inv_in.api_hook_registered       = api_hook;
+    inv_in.target_mining_authorized  = snap.target_mining_authorized;
+    inv_in.pool_mutation_permitted   = snap.pool_mutation_permitted;
+    inv_in.protocol                  = snap.protocol;
+    inv_in.runtime_state             = snap.state;
+    inv_in.time_state                = diag.state;
+
+    pool_pilot_invariants_check(&inv_in, &inv);
+
+    memset(&obs, 0, sizeof(obs));
+    obs.network_ready  = rt->control.network_ready;
+    obs.link_known     = (rt->deps.link_up != NULL);
+    obs.link_up        = obs.link_known ? rt->deps.link_up() : false;
+    obs.source_state   = diag.state;
+    obs.attempt_count  = diag.sync_attempt_count;
+    obs.monotonic_us   = now_us;
+    obs.invariant_mask = inv.mask;
+
+    pool_pilot_step(&s_pilot, &obs, &step);
+
+    for (i = 0u; i < step.count; i++) {
+        if (step.events[i] == POOL_PILOT_EVENT_INVARIANT_VIOLATION) {
+            if (pool_pilot_violation_format(s_pilot.sequence, uptime_s, &inv,
+                                            s_pilot_line, sizeof(s_pilot_line)) > 0u) {
+                ESP_LOGW(TAG, "%s", s_pilot_line);
+            }
+            continue;
+        }
+        if (pool_pilot_event_format(step.events[i], uptime_s, s_pilot_line,
+                                    sizeof(s_pilot_line)) > 0u) {
+            ESP_LOGI(TAG, "%s", s_pilot_line);
+        }
+    }
+
+    if (!step.summary_due) {
+        return;
+    }
+
+    memset(&sum, 0, sizeof(sum));
+    sum.sequence                 = step.sequence;
+    sum.uptime_s                 = uptime_s;
+    sum.source_state             = diag.state;
+    sum.trusted_available        = diag.trusted_time_available;
+    sum.trusted_operational      = diag.trusted_time_operational;
+    sum.attempt_count            = diag.sync_attempt_count;
+    sum.sync_age_valid           = diag.sync_age_valid;
+    sum.sync_age_s               = diag.sync_age_s;
+    sum.protocol                 = snap.protocol;
+    sum.runtime_state            = snap.state;
+    sum.lease_owner              = snap.lease_owner;
+    sum.restore_required         = snap.restore_required;
+    sum.session_write_count      = snap.proposal_commits;
+    sum.heartbeat_write_count    = s_pilot_heartbeat_writes;
+    sum.execution_reachable      = inv_in.execution_compiled || exec_hook;
+    sum.api_reachable            = inv_in.api_compiled || api_hook;
+    sum.free_internal_heap_b     = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    sum.min_free_internal_heap_b =
+        (uint32_t)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    /* The owner task measures ITSELF, so no foreign handle is dereferenced. */
+    sum.owner_task_stack_hwm = (uint32_t)uxTaskGetStackHighWaterMark(NULL);
+    sum.invariants           = inv;
+
+    if (pool_pilot_summary_format(&sum, s_pilot_line, sizeof(s_pilot_line)) > 0u) {
+        ESP_LOGI(TAG, "%s", s_pilot_line);
+    }
+}
+
+#else /* !CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS */
+
+/* No pilot state, no pilot symbol, no pilot line: the committed B10 build. */
+static void runtime_step_pilot(PoolSessionRuntime *rt) { (void)rt; }
+
+#endif /* CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS */
+#endif /* CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE */
+
+/* ------------------------------------------------------------------ */
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -1137,6 +1348,14 @@ PoolRuntimeStatus pool_session_runtime_commit_epoch_heartbeat(PoolSessionRuntime
     if (rt == NULL || !rt->initialized || !rt->booted) {
         return RUNTIME_ERR_NOT_INITIALIZED;
     }
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE_PILOT_DIAGNOSTICS
+    /* Gate B10.1 audit counter ONLY: it is incremented on ENTRY so even a
+     * refused heartbeat is counted, and it changes no behaviour whatsoever.
+     * An observation pilot must be able to prove this call had no caller. */
+    if (s_pilot_heartbeat_writes < UINT32_MAX) {
+        s_pilot_heartbeat_writes++;
+    }
+#endif
     if (!rt->record_present || rt->store_result != STORE_OK ||
         rt->record.kind != (uint8_t)POOL_RECORD_KIND_SESSION) {
         return RUNTIME_ERR_INTERNAL_CONSISTENCY;
@@ -1338,6 +1557,10 @@ static void runtime_task(void *arg)
 #ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE
         /* Bounded observation tick — measurement only, never authorization. */
         runtime_step_observation(rt);
+        /* Gate B10.1 — bounded, read-only pilot diagnostics on the SAME owner
+         * task. A no-op unless the pilot-diagnostics flag is enabled, and even
+         * then it only reads published facts and writes bounded log lines. */
+        runtime_step_pilot(rt);
 #endif
 
         /* Gate B7: step the executor LAST so it always consumes a fresh
