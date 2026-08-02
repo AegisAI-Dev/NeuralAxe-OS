@@ -596,14 +596,20 @@ static void boot_waiting_with_source(void)
     TEST_ASSERT_TRUE(g_rt.time_provider_started);
 }
 
-/* Feed one accepted SNTP completion through the designed fake-completion
- * seam, then let the task observe the change. */
+/*
+ * Feed one accepted SNTP completion through the designed fake-completion
+ * seam, then let the task observe the change.
+ *
+ * Gate B10 note: the ingestion function now invokes the registered sync
+ * observer, which posts RUNTIME_EVENT_TIME_SYNC_CHANGED to the owner task
+ * exactly as the production ESP-IDF callback does. Posting the event
+ * manually here as well would deliver the SAME event TWICE and drive a
+ * second re-evaluation, so it is deliberately no longer done.
+ */
 static void inject_trusted_sync(uint64_t epoch_s)
 {
     TEST_ASSERT_EQUAL(TIME_OK,
                       pool_time_sntp_handle_sync(&g_rt.time_provider, epoch_s, 0u));
-    TEST_ASSERT_EQUAL(RUNTIME_OK,
-                      pool_session_runtime_notify(&g_rt, RUNTIME_EVENT_TIME_SYNC_CHANGED));
     vTaskDelay(pdMS_TO_TICKS(200));
 }
 

@@ -8,6 +8,7 @@
  * belongs to Gate B7 or later.
  */
 
+#include <assert.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -251,6 +252,15 @@ void pool_session_runtime_production_deps(PoolSessionRuntimeDeps *out,
     out->ntp_server = "";
 #endif
     out->sync_wait_limit_s = POOL_TIME_SYNC_WAIT_DEFAULT_S;
+    /*
+     * Gate B10 observation-only mode. A FOURTH independent safety flag,
+     * default n, that authorizes nothing: see the header contract.
+     */
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE
+    out->observe_enabled = true;
+#else
+    out->observe_enabled = false;
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -305,10 +315,21 @@ static uint32_t runtime_sync_wait_limit(const PoolSessionRuntime *rt)
     return limit;
 }
 
-static bool runtime_time_source_configured(const PoolSessionRuntime *rt)
+/* A source STRING was configured (before any validation). */
+static bool runtime_time_source_present(const PoolSessionRuntime *rt)
 {
     return rt->deps.sntp_ops != NULL && rt->deps.ntp_server != NULL &&
            rt->deps.ntp_server[0] != '\0';
+}
+
+/*
+ * Gate B10: a source string exists AND passes the bounded pure validator.
+ * An invalid source is treated exactly like an absent one — no DNS lookup
+ * and no SNTP start can be reached from here.
+ */
+static bool runtime_time_source_configured(const PoolSessionRuntime *rt)
+{
+    return runtime_time_source_present(rt) && rt->time_source_validation.usable;
 }
 
 /* Refresh the B2 snapshot from the (possibly uninitialized) provider under
@@ -372,6 +393,9 @@ static void runtime_refresh_lease(PoolSessionRuntime *rt)
     coord_exit();
 }
 
+/* Defined with the trusted-time provider below; used by runtime_publish. */
+static void runtime_refresh_time_diagnostics(PoolSessionRuntime *rt);
+
 /* Classify + publish. Never releases a hold: the barrier answer is derived
  * from the state through the single total rule. */
 static void runtime_publish(PoolSessionRuntime *rt)
@@ -388,13 +412,18 @@ static void runtime_publish(PoolSessionRuntime *rt)
                                       rt->tracker.commit_count,
                                       rt->task_running, &rt->snapshot);
 
-    ESP_LOGI(TAG, "state=%s protocol=%s status=%s decision=%s store=%s phase=%s",
+    /* Gate B10: refresh the sanitized trusted-time diagnostics alongside the
+     * runtime snapshot so both views describe the same evaluation. */
+    runtime_refresh_time_diagnostics(rt);
+
+    ESP_LOGI(TAG, "state=%s protocol=%s status=%s decision=%s store=%s phase=%s time=%s",
              pool_runtime_state_str(rt->decision.state),
              pool_runtime_protocol_str(rt->snapshot.protocol),
              pool_runtime_status_str(rt->decision.status),
              pool_boot_decision_str(rt->plan.decision),
              pool_store_result_str(rt->store_result),
-             pool_operation_phase_str(rt->lease.phase));
+             pool_operation_phase_str(rt->lease.phase),
+             pool_time_source_state_str(rt->time_diag.state));
 }
 
 /* ------------------------------------------------------------------ */
@@ -672,45 +701,161 @@ static void runtime_reevaluate(PoolSessionRuntime *rt)
 /* ------------------------------------------------------------------ */
 
 /*
- * Start the B2 SNTP provider. Called ONLY when all three hold:
- *   1. the recovery plan requires trusted time;
- *   2. network-ready has been signalled;
- *   3. a valid product-configured time source exists.
- * With no configured source the runtime reports
- * RUNTIME_ERR_TIME_SOURCE_UNCONFIGURED and keeps the protocol HELD — it
- * never contacts a public NTP server and never fabricates trust.
+ * Gate B10 — the bounded post-synchronization observer.
+ *
+ * Runs in the lwIP tcpip thread from the ESP-IDF SNTP sync callback, with NO
+ * provider or coordinator lock held. It does exactly two things: record the
+ * bounded verdict for diagnostics, and post ONE task notification to the
+ * single runtime owner task so the B4/B6 re-evaluation happens THERE.
+ *
+ * It performs no NVS access, no B5 transition, no pool or protocol
+ * operation, no restart, no HTTP operation, no allocation and no blocking,
+ * and it is not given (so cannot log) the server name, the epoch or the sync
+ * generation. Duplicate callbacks are naturally idempotent: the notification
+ * is an OR of event bits, and B2 has already made an unchanged anchor a
+ * no-op before the observer is reached.
+ */
+static void runtime_sync_observer(void *ctx, PoolTimeError verdict)
+{
+    PoolSessionRuntime *rt = (PoolSessionRuntime *)ctx;
+
+    if (rt == NULL) {
+        return;
+    }
+    /* Contract 10: a callback must never run while a B5 coordinator call is
+     * in progress. Asserted here so a violation is caught deterministically
+     * rather than reasoned about. */
+    assert(pool_session_runtime_coordinator_depth() == 0u);
+
+    portENTER_CRITICAL(&s_runtime_lock);
+    rt->time_last_sync_result = verdict;
+    if (rt->time_sync_callbacks < UINT32_MAX) {
+        rt->time_sync_callbacks++;
+    }
+    portEXIT_CRITICAL(&s_runtime_lock);
+
+    (void)pool_session_runtime_notify_from_callback(rt, RUNTIME_EVENT_TIME_SYNC_CHANGED);
+}
+
+/* Assemble the pure B10 start input from this boot's facts. */
+static void runtime_build_time_start_input(const PoolSessionRuntime *rt,
+                                           PoolTimeSourceStartInput *in)
+{
+    memset(in, 0, sizeof(*in));
+    /* This adapter exists only inside the timed-session runtime, so the
+     * runtime feature is enabled by construction wherever it runs. */
+    in->runtime_enabled       = true;
+    in->observe_enabled       = rt->deps.observe_enabled;
+    in->network_ready         = rt->control.network_ready;
+    in->trusted_time_required = rt->plan.trusted_time_required;
+    in->source_present        = runtime_time_source_present(rt);
+    in->source_usable         = runtime_time_source_configured(rt);
+    in->provider_started      = rt->time_provider_started;
+    /* Observation is only for a device with no session owner at all: any
+     * committed record, or any plan that needs trusted time, disqualifies it. */
+    in->session_owner_present = rt->record_present || rt->plan.trusted_time_required ||
+                                rt->plan.restore_required;
+}
+
+/*
+ * Start the B2 SNTP provider under the pure Gate B10 rules.
+ *
+ * The provider starts ONLY when a VALIDATED product-configured source
+ * exists, the network is ready, no provider is running yet, and either the
+ * B4 recovery plan requires trusted time or observation-only mode is enabled
+ * on a device with no session owner.
+ *
+ * With no configured (or an invalid) source the runtime reports
+ * RUNTIME_ERR_TIME_SOURCE_UNCONFIGURED and keeps the protocol HELD whenever
+ * recovery needed the trust — it never contacts a public NTP server, never
+ * performs DNS and never fabricates trust. In observation mode an
+ * unconfigured source is simply reported and changes nothing.
+ *
+ * Start attempts are HARD BOUNDED (POOL_TIME_SOURCE_ATTEMPTS_MAX) with a
+ * monotonic backoff, so no unlimited retry or tight poll can exist. This is
+ * never called from an HTTP handler, a timer callback or the sync callback:
+ * only the single runtime owner task reaches it.
+ *
+ * HONEST LIMIT: a platform START failure drives the B2 provider into its
+ * ERROR lifecycle, which by the committed B2 contract only a deinit clears.
+ * Later attempts therefore cannot revive it; they simply consume the bounded
+ * budget and the diagnostics report TIME_SOURCE_ERROR. Deliberately no
+ * automatic deinit/reinit cycle is performed here — tearing the service down
+ * and rebuilding it from a bounded retry path is exactly the kind of
+ * unattended recovery this gate is not authorized to introduce.
  */
 static PoolRuntimeStatus runtime_start_time_provider(PoolSessionRuntime *rt)
 {
-    PoolTimeSntpConfig cfg;
-    PoolTimeError      err;
+    PoolTimeSourceStartInput    start_in;
+    PoolTimeSourceStartDecision decision;
+    PoolTimeSourceRetryDecision retry;
+    PoolTimeSntpConfig          cfg;
+    PoolTimeError               err;
+    uint64_t                    now;
 
-    if (!rt->plan.trusted_time_required) {
-        return RUNTIME_OK; /* nothing to do; no networking */
-    }
-    if (!rt->control.network_ready) {
-        return RUNTIME_ERR_TIME_WAIT_PENDING;
-    }
-    if (!runtime_time_source_configured(rt)) {
-        return RUNTIME_ERR_TIME_SOURCE_UNCONFIGURED;
-    }
+    runtime_build_time_start_input(rt, &start_in);
+    decision = pool_time_source_decide_start(&start_in);
+
     if (rt->time_provider_started) {
-        return RUNTIME_OK; /* idempotent */
+        /* A session that appears later (Gate B8 create) ends observation
+         * without restarting anything: the same single provider continues. */
+        rt->time_observation_active = decision.observation_only;
     }
+
+    if (!decision.start_provider) {
+        switch (decision.state) {
+        case TIME_SOURCE_UNCONFIGURED:
+        case TIME_SOURCE_INVALID:
+            /* Only a posture that actually NEEDS trusted time reports this as
+             * a failure; an observation-only device is simply left alone. */
+            return start_in.trusted_time_required ? RUNTIME_ERR_TIME_SOURCE_UNCONFIGURED
+                                                  : RUNTIME_OK;
+        case TIME_SOURCE_START_PENDING:
+            return RUNTIME_ERR_TIME_WAIT_PENDING; /* network not ready yet */
+        default:
+            return RUNTIME_OK; /* validated but idle, or already running */
+        }
+    }
+
+    /* Bounded start budget with monotonic backoff. */
+    now   = runtime_monotonic_us(rt);
+    retry = pool_time_source_retry_decide(&rt->time_retry_policy, rt->time_start_attempts,
+                                          rt->time_attempt_made, rt->time_last_attempt_us,
+                                          now);
+    if (retry.exhausted) {
+        if (!rt->time_attempts_exhausted) {
+            rt->time_attempts_exhausted = true;
+            ESP_LOGW(TAG, "trusted-time start budget exhausted after %u attempts",
+                     (unsigned)rt->time_start_attempts);
+        }
+        return RUNTIME_ERR_TIME_WAIT_EXPIRED;
+    }
+    if (!retry.may_attempt) {
+        return RUNTIME_ERR_TIME_WAIT_PENDING; /* backoff still running */
+    }
+
+    rt->time_start_attempts  = retry.attempt_index;
+    rt->time_attempt_made    = true;
+    rt->time_last_attempt_us = now;
 
     if (!rt->time_provider_initialized) {
         pool_time_sntp_config_defaults(&cfg);
-        cfg.server_count = 1u;
+        cfg.server_count = 1u; /* EXACTLY one server; never a fallback pool */
         strncpy(cfg.servers[0], rt->deps.ntp_server, sizeof(cfg.servers[0]) - 1u);
         cfg.servers[0][sizeof(cfg.servers[0]) - 1u] = '\0';
         cfg.sync_wait_s = rt->control.wait_limit_s;
 
         err = pool_time_sntp_init(&rt->time_provider, rt->deps.sntp_ops, &cfg, &rt->time_policy);
         if (err != TIME_OK) {
+            /* The machine token never carries the hostname. */
             ESP_LOGW(TAG, "time provider init rejected (%s)", pool_time_error_str(err));
             return RUNTIME_ERR_TIME_SOURCE_UNCONFIGURED;
         }
         rt->time_provider_initialized = true;
+
+        /* Register the callback BEFORE starting: initialization performs no
+         * networking, so no sync can fire in this window. */
+        (void)pool_time_sntp_set_observer(&rt->time_provider, runtime_sync_observer, rt);
     }
 
     err = pool_time_sntp_start(&rt->time_provider);
@@ -718,9 +863,89 @@ static PoolRuntimeStatus runtime_start_time_provider(PoolSessionRuntime *rt)
         ESP_LOGW(TAG, "time provider start rejected (%s)", pool_time_error_str(err));
         return RUNTIME_ERR_TIME_SOURCE_UNCONFIGURED;
     }
-    rt->time_provider_started = true;
-    ESP_LOGI(TAG, "trusted-time provider started (bounded wait %us)", rt->control.wait_limit_s);
+    rt->time_provider_started   = true;
+    rt->time_observation_active = decision.observation_only;
+    ESP_LOGI(TAG, "trusted-time provider started (%s, attempt %u, bounded wait %us)",
+             decision.observation_only ? "observation-only" : "session recovery",
+             (unsigned)rt->time_start_attempts, (unsigned)rt->control.wait_limit_s);
     return RUNTIME_OK;
+}
+
+/*
+ * Rebuild and publish the sanitized trusted-time diagnostics. Reads only
+ * already-collected bounded facts; performs no platform call, no networking
+ * and no store access, and copies no string.
+ */
+static void runtime_refresh_time_diagnostics(PoolSessionRuntime *rt)
+{
+    PoolTimeSourceDiagnosticsInput in;
+    PoolTimeSourceDiagnostics      built;
+
+    memset(&in, 0, sizeof(in));
+    in.runtime_enabled      = true;
+    in.observe_enabled      = rt->deps.observe_enabled;
+    in.source_present       = runtime_time_source_present(rt);
+    in.source_usable        = runtime_time_source_configured(rt);
+    in.provider_initialized = rt->time_provider_initialized;
+    in.provider_started     = rt->time_provider_started;
+    in.lifecycle            = (uint8_t)pool_time_sntp_lifecycle(
+        rt->time_provider_initialized ? &rt->time_provider : NULL);
+    in.snapshot_trusted   = rt->time_snapshot.trusted;
+    in.anchor_age_us      = rt->time_snapshot.anchor_age_us;
+    in.anchor_age_valid   = rt->time_snapshot.trusted;
+    in.attempts           = rt->time_start_attempts;
+    in.attempts_exhausted = rt->time_attempts_exhausted;
+    in.wait_limit_s       = rt->control.wait_limit_s;
+    /*
+     * The B4 bounded recovery wait only advances in WAITING_FOR_TRUSTED_TIME.
+     * Observation runs in a FREE posture, so it carries its OWN bounded
+     * window — a purely diagnostic one that never drives a plan, a restore or
+     * a protocol change.
+     */
+    in.wait_elapsed_s = rt->time_observation_active ? rt->time_observe_elapsed_s
+                                                    : rt->control.wait_elapsed_s;
+    in.wait_expired   = pool_runtime_wait_expired(in.wait_elapsed_s, in.wait_limit_s);
+
+    portENTER_CRITICAL(&s_runtime_lock);
+    in.last_sync_result = rt->time_last_sync_result;
+    portEXIT_CRITICAL(&s_runtime_lock);
+
+    pool_time_source_diagnostics_build(&in, &built);
+
+    portENTER_CRITICAL(&s_runtime_lock);
+    rt->time_diag = built; /* published atomically for readers */
+    portEXIT_CRITICAL(&s_runtime_lock);
+}
+
+/*
+ * Gate B10 — the bounded observation-only tick.
+ *
+ * Advances the observation window, re-reads the B2 anchor and republishes
+ * the diagnostics. That is ALL it does. It never re-plans, never evaluates
+ * persistence, never writes the session store, never acquires or reconciles
+ * a lease, never touches the pool configuration, the protocol, the ASIC gate
+ * or the mining grant, and never restarts the device. Reaching the bound
+ * changes only what is REPORTED — normal source mining continues untouched.
+ */
+static void runtime_step_observation(PoolSessionRuntime *rt)
+{
+    /*
+     * Observation ends the moment a session owner appears — including one
+     * created later in the SAME boot through the Gate B8 API. From then on
+     * the B4 plan, not observation, decides what the time provider is for.
+     */
+    if (!rt->time_observation_active || rt->plan.trusted_time_required ||
+        rt->record_present) {
+        return;
+    }
+    if (rt->time_observe_elapsed_s < rt->control.wait_limit_s) {
+        rt->time_observe_elapsed_s += POOL_RUNTIME_TICK_S;
+        if (rt->time_observe_elapsed_s > rt->control.wait_limit_s) {
+            rt->time_observe_elapsed_s = rt->control.wait_limit_s;
+        }
+    }
+    runtime_refresh_time_snapshot(rt);
+    runtime_refresh_time_diagnostics(rt);
 }
 
 /* ------------------------------------------------------------------ */
@@ -748,7 +973,19 @@ PoolRuntimeStatus pool_session_runtime_init(PoolSessionRuntime *rt,
     rt->reset_class = POOL_RESET_CLASS_UNKNOWN;
     rt->store_result = STORE_NOT_INITIALIZED;
     rt->bootstrap_status = OP_ERR_BOOTSTRAP_REQUIRED;
+
+    /*
+     * Gate B10: validate the product-configured trusted-time source ONCE, at
+     * bind time, with the pure bounded validator. This performs no DNS, no
+     * networking and no allocation, and it keeps no copy of the candidate —
+     * only its shape. An invalid source is treated exactly like an absent
+     * one from here on.
+     */
+    (void)pool_time_source_validate(rt->deps.ntp_server, &rt->time_source_validation);
     rt->time_source_configured = runtime_time_source_configured(rt);
+    rt->time_last_sync_result  = TIME_ERR_NOT_INITIALIZED;
+    pool_time_source_retry_defaults(&rt->time_retry_policy);
+    pool_time_source_diagnostics_init(&rt->time_diag);
 
     pool_runtime_control_init(&rt->control, runtime_sync_wait_limit(rt));
     pool_runtime_tracker_init(&rt->tracker);
@@ -770,9 +1007,14 @@ PoolRuntimeStatus pool_session_runtime_deinit(PoolSessionRuntime *rt)
     }
     (void)pool_session_runtime_stop_task(rt);
     if (rt->time_provider_initialized) {
+        /* Clear the observer BEFORE tearing the service down so no in-flight
+         * callback can reach a runtime that is being zeroed. Deinit also
+         * stops the service and drops the accepted anchor. */
+        (void)pool_time_sntp_set_observer(&rt->time_provider, NULL, NULL);
         (void)pool_time_sntp_deinit(&rt->time_provider);
         rt->time_provider_initialized = false;
         rt->time_provider_started     = false;
+        rt->time_observation_active   = false;
     }
     if (rt->store_opened) {
         (void)pool_session_store_deinit(&rt->store);
@@ -965,6 +1207,48 @@ uint32_t pool_session_runtime_reset_reason_reads(const PoolSessionRuntime *rt)
 }
 
 /* ------------------------------------------------------------------ */
+/* Gate B10 — sanitized trusted-time diagnostics                       */
+/* ------------------------------------------------------------------ */
+
+PoolRuntimeStatus pool_session_runtime_time_diagnostics(const PoolSessionRuntime *rt,
+                                                        PoolTimeSourceDiagnostics *out)
+{
+    if (out == NULL) {
+        return RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    pool_time_source_diagnostics_init(out); /* fail-closed on every path */
+    if (rt == NULL) {
+        return RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    portENTER_CRITICAL(&s_runtime_lock);
+    *out = rt->time_diag; /* consistent copy, never torn */
+    portEXIT_CRITICAL(&s_runtime_lock);
+    return RUNTIME_OK;
+}
+
+uint32_t pool_session_runtime_time_start_attempts(const PoolSessionRuntime *rt)
+{
+    return (rt == NULL) ? 0u : rt->time_start_attempts;
+}
+
+uint32_t pool_session_runtime_time_sync_callbacks(const PoolSessionRuntime *rt)
+{
+    uint32_t n;
+    if (rt == NULL) {
+        return 0u;
+    }
+    portENTER_CRITICAL(&s_runtime_lock);
+    n = rt->time_sync_callbacks;
+    portEXIT_CRITICAL(&s_runtime_lock);
+    return n;
+}
+
+bool pool_session_runtime_time_observation_active(const PoolSessionRuntime *rt)
+{
+    return (rt == NULL) ? false : rt->time_observation_active;
+}
+
+/* ------------------------------------------------------------------ */
 /* The single bounded runtime owner task                               */
 /* ------------------------------------------------------------------ */
 
@@ -1000,6 +1284,21 @@ static void runtime_task(void *arg)
         if (outcome.start_time_provider) {
             (void)runtime_start_time_provider(rt);
         }
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE
+        else if ((outcome.applied_events & RUNTIME_EVENT_NETWORK_READY) != 0u) {
+            /*
+             * Gate B10 observation-only path. The pure B6 control block asks
+             * for a provider start only while WAITING_FOR_TRUSTED_TIME; an
+             * observation device is FREE, so the adapter offers the same
+             * network-ready fact to the pure B10 start rule, which permits it
+             * ONLY when no session owner exists. This branch is compiled out
+             * entirely when the observation flag is off, so the committed
+             * build is byte-for-byte unchanged.
+             */
+            (void)runtime_start_time_provider(rt);
+            runtime_refresh_time_diagnostics(rt);
+        }
+#endif
         if (outcome.reload_store) {
             /* B6 reloads only — it never mutates on a reload request. */
             PoolStoreResult r = pool_session_store_load(&rt->store, &rt->work_record,
@@ -1035,6 +1334,11 @@ static void runtime_task(void *arg)
         } else if (outcome.reevaluate_plan) {
             runtime_reevaluate(rt);
         }
+
+#ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE
+        /* Bounded observation tick — measurement only, never authorization. */
+        runtime_step_observation(rt);
+#endif
 
         /* Gate B7: step the executor LAST so it always consumes a fresh
          * plan. A no-op without the execution flag / a registered hook. */
@@ -1137,5 +1441,31 @@ PoolRuntimeStatus pool_session_runtime_notify(PoolSessionRuntime *rt, uint32_t e
         return RUNTIME_OK;
     }
     xTaskNotify((TaskHandle_t)rt->task_handle, sanitized, eSetBits);
+    return RUNTIME_OK;
+}
+
+PoolRuntimeStatus pool_session_runtime_notify_from_callback(PoolSessionRuntime *rt,
+                                                            uint32_t event_bits)
+{
+    uint32_t sanitized;
+    void    *handle;
+
+    if (rt == NULL) {
+        return RUNTIME_ERR_INVALID_ARGUMENT;
+    }
+    sanitized = pool_runtime_event_sanitize(event_bits);
+    if (sanitized == 0u) {
+        return RUNTIME_ERR_UNSUPPORTED_EVENT; /* unknown bits: dropped */
+    }
+    portENTER_CRITICAL(&s_runtime_lock);
+    handle = rt->task_handle;
+    portEXIT_CRITICAL(&s_runtime_lock);
+    if (handle == NULL) {
+        /* Deliberately NOT latched: writing control.pending_events from a
+         * foreign thread would be an unsynchronized read-modify-write. The
+         * bounded tick re-evaluates instead, so nothing is stranded. */
+        return RUNTIME_ERR_NOT_INITIALIZED;
+    }
+    xTaskNotify((TaskHandle_t)handle, sanitized, eSetBits);
     return RUNTIME_OK;
 }

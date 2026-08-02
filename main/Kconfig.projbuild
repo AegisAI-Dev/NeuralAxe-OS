@@ -239,9 +239,42 @@ menu "Stratum Configuration"
             the product has not explicitly chosen. Selecting a server is an open
             product decision (privacy, availability and jurisdiction).
 
+            Accepted values (Gate B10 bounded validation): a dotted DNS hostname
+            of at least two labels drawn only from [A-Za-z0-9.-], or a dotted-quad
+            IPv4 literal without leading zeros. URL schemes, paths, credentials,
+            whitespace, control characters, single-label names and IPv6 literals
+            are rejected, and a rejected value behaves exactly like an empty one:
+            no DNS lookup and no SNTP start ever happen.
+
             Note: standard SNTP/DNS is not cryptographically authenticated (no NTS,
             no DNSSEC). See components/pool_time/include/pool_time.h for the exact
             trust boundary and the documented network-trust residual.
+
+    config NX_TIMED_SESSIONS_TIME_OBSERVE
+        bool "Timed pool session trusted-time OBSERVATION only (EXPERIMENTAL, Gate B10)"
+        depends on NX_TIMED_SESSIONS
+        default n
+        help
+            EXPERIMENTAL. Starts the trusted-time (SNTP) provider after network
+            readiness purely to OBSERVE and validate trusted time on a real device,
+            so a supervised pilot can confirm the time foundation before any timed
+            session is ever created. Board 601 / BM1370 only. Disabled by default.
+
+            This is a FOURTH, independent safety flag and it authorizes NOTHING.
+            With it enabled the device still creates no session, applies no target
+            pool configuration, restores nothing, acquires no operation lease,
+            writes no session record, commits no heartbeat, changes no ASIC gate,
+            grants no target mining and never restarts. It does not require the
+            Gate B7 execution flag or the Gate B8 API flag, and it never turns an
+            empty session store into a session store.
+
+            Observation runs only on a device with NO session owner: an empty or
+            cleared store. Normal source/default mining and protocol startup are
+            byte-for-byte unchanged whether the synchronization succeeds, times
+            out or never starts because no source is configured.
+
+            With CONFIG_NX_TIMED_SESSIONS_NTP_SERVER empty no network request is
+            made at all and the status simply reports an unconfigured source.
 
     config NX_TIMED_SESSIONS_EXECUTION
         bool "Timed pool session controlled execution (EXPERIMENTAL, Gate B7)"

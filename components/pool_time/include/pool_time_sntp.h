@@ -97,6 +97,25 @@ typedef struct {
 } PoolTimeSntpPlatformOps;
 
 /*
+ * Bounded post-synchronization observer (Gate B10).
+ *
+ * Invoked from pool_time_sntp_handle_sync() — i.e. from the ESP-IDF sync
+ * notification callback running in the lwIP tcpip thread — AFTER the anchor
+ * decision has been published and OUTSIDE the module critical section, so no
+ * provider lock is ever held while it runs. It fires for BOTH acceptance and
+ * rejection, because either is a trust-relevant fact the owner of the
+ * session runtime must re-evaluate.
+ *
+ * CONTRACT (enforced by review and by the Gate B10 test suite): an observer
+ * may perform ONLY a bounded task notification. It must not touch NVS, the
+ * operation coordinator, the pool configuration, the protocol, HTTP or the
+ * ASIC; it must not restart the device; it must not block or allocate; and
+ * it must never log the configured server name — which it is deliberately
+ * not given, along with the epoch and the sync generation.
+ */
+typedef void (*PoolTimeSntpSyncObserver)(void *ctx, PoolTimeError verdict);
+
+/*
  * Provider instance. Transparent for tests (like PoolSession in Gate B1);
  * production callers treat it as opaque. The published anchor is only ever
  * read/written under the module's bounded critical section, and readers
@@ -110,6 +129,8 @@ typedef struct {
     PoolTimeAnchor                 anchor;   /* published under the module lock */
     PoolTimeError                  last_error;
     bool                           bound_to_real_stack;
+    PoolTimeSntpSyncObserver       observer;     /* set under the module lock */
+    void                          *observer_ctx;
 } PoolTimeSntpProvider;
 
 /* ------------------------------------------------------------------ */
@@ -169,6 +190,21 @@ PoolTimeError pool_time_sntp_deinit(PoolTimeSntpProvider *p);
 PoolTimeError pool_time_sntp_handle_sync(PoolTimeSntpProvider *p,
                                          uint64_t epoch_s,
                                          uint32_t epoch_us_frac);
+
+/*
+ * Register (or clear, with observer == NULL) the bounded post-synchronization
+ * observer. Valid only on an initialized provider; UNINITIALIZED is refused
+ * with TIME_ERR_NOT_INITIALIZED and changes nothing.
+ *
+ * ORDERING: register BEFORE pool_time_sntp_start(). Initialization performs
+ * no networking (the ESP-IDF service is configured with .start = false), so
+ * no synchronization callback can fire in the window between init and
+ * registration. Deinit clears the observer along with the rest of the
+ * instance, so no callback can reach a torn-down owner.
+ */
+PoolTimeError pool_time_sntp_set_observer(PoolTimeSntpProvider *p,
+                                          PoolTimeSntpSyncObserver observer,
+                                          void *ctx);
 
 /* ------------------------------------------------------------------ */
 /* Introspection                                                       */

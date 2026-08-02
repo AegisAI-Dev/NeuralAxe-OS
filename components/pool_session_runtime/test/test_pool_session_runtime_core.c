@@ -180,9 +180,10 @@ TEST_CASE("rt core: feature-enabled boot action requires bootstrap and holds fir
     TEST_ASSERT_FALSE(on.protocol_allowed);
 }
 
-TEST_CASE("rt core: the default build reports the feature disabled and has no instance",
+TEST_CASE("rt core: the feature flag and the production instance always agree",
           "[pool_runtime]")
 {
+#ifndef CONFIG_NX_TIMED_SESSIONS
     /* CONFIG_NX_TIMED_SESSIONS defaults to n, so this build must expose NO
      * production instance at all: nothing to bootstrap, no task, no nx_tps. */
     TEST_ASSERT_FALSE(nx_timed_sessions_enabled());
@@ -192,6 +193,27 @@ TEST_CASE("rt core: the default build reports the feature disabled and has no in
     TEST_ASSERT_TRUE(nx_timed_sessions_protocol_start_allowed());
     nx_timed_sessions_notify_network_ready(); /* no-op, must not crash */
     TEST_ASSERT_EQUAL(0u, pool_session_runtime_task_count());
+#else
+    /*
+     * A feature-ENABLED build (the Gate B10 observation posture is validated
+     * this way) exposes the single production instance. The bootstrap itself
+     * is deliberately NOT invoked here: it would open the real "nx_tps"
+     * namespace and create the production owner task, neither of which may
+     * happen inside the shared test image. Until a bootstrap succeeds the
+     * barrier must fail CLOSED.
+     */
+    TEST_ASSERT_TRUE(nx_timed_sessions_enabled());
+    TEST_ASSERT_NOT_NULL(pool_session_runtime_default_instance());
+    TEST_ASSERT_FALSE(nx_timed_sessions_protocol_start_allowed());
+    nx_timed_sessions_notify_network_ready(); /* un-booted: a safe no-op */
+    TEST_ASSERT_EQUAL(0u, pool_session_runtime_task_count());
+#endif
+    /* The pure rule both branches obey is identical in every build. */
+    TEST_ASSERT_EQUAL(pool_session_runtime_feature_enabled(), nx_timed_sessions_enabled());
+    TEST_ASSERT_FALSE(pool_runtime_boot_action_for_feature(false).bootstrap_required);
+    TEST_ASSERT_TRUE(pool_runtime_boot_action_for_feature(false).protocol_allowed);
+    TEST_ASSERT_TRUE(pool_runtime_boot_action_for_feature(true).bootstrap_required);
+    TEST_ASSERT_FALSE(pool_runtime_boot_action_for_feature(true).protocol_allowed);
 }
 
 /* ================================================================= */

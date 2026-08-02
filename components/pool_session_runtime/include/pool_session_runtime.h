@@ -10,6 +10,7 @@
 #include "pool_operation_coordinator.h"
 #include "pool_time.h"
 #include "pool_time_sntp.h"
+#include "pool_time_source.h"
 
 /*
  * NeuralAxe timed pool sessions — ESP-IDF runtime adapter (Gate B6).
@@ -97,6 +98,17 @@ typedef struct {
     /* Bounded post-reboot synchronization window (seconds). 0 selects the
      * committed B2 default; values above the B2 hard maximum are clamped. */
     uint32_t sync_wait_limit_s;
+
+    /*
+     * Gate B10 observation-only mode (CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE
+     * in production; injected here so BOTH values are deterministically
+     * testable). It authorizes NOTHING: it only permits the trusted-time
+     * provider to start after network readiness on a device with no session
+     * owner, so a supervised pilot can validate the time foundation. It
+     * never creates a session, writes the store, takes a lease, commits a
+     * heartbeat, touches the pool/protocol/ASIC or restarts the device.
+     */
+    bool observe_enabled;
 } PoolSessionRuntimeDeps;
 
 /* ------------------------------------------------------------------ */
@@ -136,6 +148,21 @@ typedef struct {
     bool                 time_source_configured;
     bool                 time_provider_initialized;
     bool                 time_provider_started;
+
+    /* B10 — trusted-time source policy, bounded start budget and the
+     * sanitized diagnostics view. None of these fields is a string, so no
+     * hostname can be retained outside deps.ntp_server itself. */
+    PoolTimeSourceValidation  time_source_validation;
+    PoolTimeSourceRetryPolicy time_retry_policy;
+    PoolTimeSourceDiagnostics time_diag;
+    uint32_t                  time_start_attempts;
+    uint32_t                  time_observe_elapsed_s; /* observation window only */
+    uint64_t                  time_last_attempt_us;
+    bool                      time_attempt_made;
+    bool                      time_attempts_exhausted;
+    bool                      time_observation_active;
+    PoolTimeError             time_last_sync_result;
+    uint32_t                  time_sync_callbacks; /* audit; written in the cb */
 
     /* B4 */
     PoolSessionBootContext  boot_ctx;
@@ -220,6 +247,21 @@ PoolRuntimeStatus pool_session_runtime_stop_task(PoolSessionRuntime *rt);
 PoolRuntimeStatus pool_session_runtime_notify(PoolSessionRuntime *rt,
                                               uint32_t event_bits);
 
+/*
+ * Gate B10 — the ONLY notification path allowed from the B2 SNTP sync
+ * callback (lwIP tcpip thread). It performs a bounded FreeRTOS task
+ * notification and nothing else: no NVS, no B5 call, no protocol or pool
+ * operation, no restart, no HTTP, no blocking, no allocation and no logging
+ * of the configured server name.
+ *
+ * Unlike pool_session_runtime_notify() it NEVER latches into the control
+ * block when no task exists — that would be an unsynchronized
+ * read-modify-write from a foreign thread. It returns
+ * RUNTIME_ERR_NOT_INITIALIZED instead, and the bounded tick re-evaluates.
+ */
+PoolRuntimeStatus pool_session_runtime_notify_from_callback(PoolSessionRuntime *rt,
+                                                            uint32_t event_bits);
+
 /* Copy the published sanitized snapshot. Never a torn read. */
 PoolRuntimeStatus pool_session_runtime_snapshot(const PoolSessionRuntime *rt,
                                                 PoolRuntimeSnapshot *out);
@@ -234,6 +276,33 @@ uint32_t pool_session_runtime_task_count(void);
 /* Nesting depth of in-progress B5 coordinator calls. Every NVS and SNTP op
  * asserts this is 0, proving contract 11 deterministically. */
 uint32_t pool_session_runtime_coordinator_depth(void);
+
+/* ------------------------------------------------------------------ */
+/* Gate B10 — sanitized trusted-time diagnostics                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Copy the published sanitized trusted-time diagnostics. Never a torn read.
+ * The model has NO string field, so it cannot carry the server hostname, a
+ * resolved address, DNS error text, a server index, a raw SNTP status, a raw
+ * epoch, the sync generation, a pool identity, a session id or a lease token.
+ *
+ * This is DIAGNOSTIC ONLY. Nothing in it authorizes target mining, releases
+ * a protocol hold, or substitutes for the B4/B6 re-evaluation that must
+ * follow a trust change.
+ */
+PoolRuntimeStatus pool_session_runtime_time_diagnostics(const PoolSessionRuntime *rt,
+                                                        PoolTimeSourceDiagnostics *out);
+
+/* Audit: bounded provider start attempts consumed this boot. */
+uint32_t pool_session_runtime_time_start_attempts(const PoolSessionRuntime *rt);
+
+/* Audit: synchronization callbacks observed this boot (accepted + refused). */
+uint32_t pool_session_runtime_time_sync_callbacks(const PoolSessionRuntime *rt);
+
+/* True while the provider runs for OBSERVATION ONLY — i.e. no B4 plan
+ * required the trust. Observation never authorizes anything. */
+bool pool_session_runtime_time_observation_active(const PoolSessionRuntime *rt);
 
 #ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
 /*

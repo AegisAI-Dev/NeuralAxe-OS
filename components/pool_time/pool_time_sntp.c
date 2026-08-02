@@ -249,6 +249,25 @@ PoolTimeError pool_time_sntp_deinit(PoolTimeSntpProvider *p)
 /* Synchronization ingestion (the single anchor-capture path)          */
 /* ------------------------------------------------------------------ */
 
+PoolTimeError pool_time_sntp_set_observer(PoolTimeSntpProvider *p,
+                                          PoolTimeSntpSyncObserver observer,
+                                          void *ctx)
+{
+    if (p == NULL) {
+        return TIME_ERR_INVALID_ARGUMENT;
+    }
+    if (p->lifecycle == POOL_TIME_SNTP_UNINITIALIZED) {
+        return TIME_ERR_NOT_INITIALIZED;
+    }
+    /* Published under the module lock so the sync callback never reads a
+     * half-written observer/context pair. */
+    portENTER_CRITICAL(&s_pool_time_lock);
+    p->observer     = observer;
+    p->observer_ctx = ctx;
+    portEXIT_CRITICAL(&s_pool_time_lock);
+    return TIME_OK;
+}
+
 PoolTimeError pool_time_sntp_handle_sync(PoolTimeSntpProvider *p,
                                          uint64_t epoch_s,
                                          uint32_t epoch_us_frac)
@@ -256,6 +275,8 @@ PoolTimeError pool_time_sntp_handle_sync(PoolTimeSntpProvider *p,
     PoolTimeAnchor candidate;
     PoolTimeError verdict;
     uint64_t mono;
+    PoolTimeSntpSyncObserver observer;
+    void *observer_ctx;
 
     if (p == NULL) {
         return TIME_ERR_INVALID_ARGUMENT;
@@ -305,10 +326,22 @@ PoolTimeError pool_time_sntp_handle_sync(PoolTimeSntpProvider *p,
         p->anchor    = candidate;
         p->lifecycle = POOL_TIME_SNTP_TRUSTED;
     }
+    observer     = p->observer;
+    observer_ctx = p->observer_ctx;
     portEXIT_CRITICAL(&s_pool_time_lock);
 
     /* A rejected candidate leaves the accepted anchor byte-identical. */
     p->last_error = verdict;
+
+    /*
+     * Gate B10: the bounded post-synchronization notification. It runs with
+     * NO lock held (the critical section closed above) and receives neither
+     * the epoch, the generation nor the server name — only the verdict. See
+     * the observer contract in pool_time_sntp.h.
+     */
+    if (observer != NULL) {
+        observer(observer_ctx, verdict);
+    }
     return verdict;
 }
 
