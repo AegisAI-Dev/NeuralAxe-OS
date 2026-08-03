@@ -35,6 +35,9 @@
 #ifdef CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT
 #include "pool_session_preflight.h"
 #endif
+#ifdef CONFIG_NX_WEATHER_AWARE_TUNING
+#include "weather_runtime_boot.h"
+#endif
 
 static GlobalState GLOBAL_STATE;
 
@@ -101,6 +104,20 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to init NVS");
         return;
     }
+
+#ifdef CONFIG_NX_WEATHER_AWARE_TUNING
+    // NeuralAxe Weather-Aware Tuning (Gate W4): an OBSERVATION-ONLY boot
+    // notice. It builds the pure weather runtime with NO injected trusted-time
+    // clock, NO transport and NO store, performs one bounded step — which
+    // therefore reports WAITING_FOR_TRUSTED_TIME — and logs bounded machine
+    // tokens.
+    //
+    // It authorizes nothing: no frequency, voltage, fan or thermal change, no
+    // pool or protocol change, no session, no lease, no SNTP start, no NVS
+    // namespace, no HTTP route, no task and no restart. Applying a weather
+    // recommendation to hardware requires a separate future execution gate.
+    nx_weather_boot_notice();
+#endif
 
 #ifdef CONFIG_NX_TIMED_SESSIONS
     // NeuralAxe timed pool sessions (Gate B6): the earliest safe point — NVS is

@@ -416,4 +416,48 @@ menu "Stratum Configuration"
             conflict reporting rather than access control. See
             docs/NEURALAXE_PHASE_2M1A_TIMED_POOL_SESSIONS_SECURITY.md.
 
+    config NX_WEATHER_AWARE_TUNING
+        bool "NeuralAxe Weather-Aware Tuning runtime (EXPERIMENTAL, Gate W4)"
+        default n
+        help
+            EXPERIMENTAL. Compiles the default-disabled Weather-Aware Tuning
+            convergence runtime (NeuralAxe Phase 2W, Gate W4), which joins the
+            committed W1 profile/climate policy, W2 crash-safe persistence
+            model, W3 weather client/scheduler and the committed Gate B2/B10
+            trusted-time foundation into ONE bounded RECOMMENDATION.
+
+            This flag is INDEPENDENT of every timed-session flag. It does not
+            depend on, select or imply NX_TIMED_SESSIONS, the Gate B7
+            execution flag, the Gate B8 API flag or the Gate B10 trusted-time
+            observation flag, and it never turns any of them on.
+
+            IT AUTHORIZES NOTHING. With it enabled the device still changes no
+            frequency, no core voltage, no fan setting and no thermal limit;
+            changes no pool configuration and no protocol behavior; acquires
+            no operation lease; creates, restores or ends no timed session;
+            grants no ASIC mining; registers no HTTP route; and never
+            restarts. The runtime's only output is a bounded recommendation
+            value that contains no executable command and no function pointer.
+            Applying a recommendation to hardware requires a separate,
+            explicit, future execution gate that does not exist yet.
+
+            NO SECOND TIME PROVIDER. The weather runtime never initializes
+            SNTP, never writes a trusted-time anchor and never reads a raw
+            wall clock. It consumes trusted time only through an injected
+            PoolTimeClock that its integrator owns. Without one it reports a
+            bounded WAITING_FOR_TRUSTED_TIME state and evaluates no policy -
+            it never falls back to time(), gettimeofday() or Stratum ntime.
+
+            NO SOURCE AND NO LOCATION ARE BAKED IN. The weather provider
+            defaults to UNCONFIGURED and the coordinates default to unset, so
+            no network request can be composed; no weather hostname, URL,
+            coordinate or API key exists in the firmware. Selecting a provider
+            and a location is an explicit future configuration action, and the
+            Gate W0 distribution decision is still unresolved.
+
+            With this flag disabled the weather runtime is not built into the
+            application, no weather symbol is linked, no task is created, the
+            nx_wtp namespace is never opened and behavior is byte-for-byte
+            unchanged. Leave disabled for production.
+
 endmenu

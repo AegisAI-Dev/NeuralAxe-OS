@@ -71,6 +71,14 @@ INCLUDE_DIRS
 
 PRIV_REQUIRES
     "app_update"
+    # Gate W4. UNCONDITIONAL on purpose: ESP-IDF resolves component
+    # requirements during early expansion, before any CONFIG_* symbol exists,
+    # so a config-conditional entry here silently fails to apply. The
+    # component contributes nothing to the default image — its only
+    # main-facing symbol lives in weather_runtime_boot.c, which is entirely
+    # #ifdef'd out unless CONFIG_NX_WEATHER_AWARE_TUNING is set. Posture A is
+    # verified byte-identical to the pre-W4 baseline.
+    "weather_runtime"
     "driver"
     "thermal_control"
     "esp_adc"
