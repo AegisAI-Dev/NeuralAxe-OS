@@ -314,6 +314,131 @@ def read_app_desc_version(path: Path) -> str:
     return header[0x30:0x50].split(b"\x00", 1)[0].decode("utf-8", errors="replace")
 
 
+# --------------------------------------------------------------------------
+# Web build and release-pair identity
+#
+# WHY THIS EXISTS. main/CMakeLists.txt has two web paths. With
+# GITHUB_ACTIONS=true it takes the "Web ui will be prebuilt" branch and packs
+# whatever already sits in main/http_server/axe-os/dist — running NO npm build
+# and NO generate-version.js. The firmware still takes its identity from
+# `git describe` at compile time, so a leftover dist produces an image whose
+# esp-miner.bin says one revision and whose www.bin says an older one. A real
+# device then reports BOOT PAIR MISMATCH, which is exactly what happened to the
+# first B10.2 package (firmware v2.14.2-69-g3120c1cc, web v2.14.2-63-ga7793af).
+#
+# The corrected pipeline therefore (a) deletes any existing web output, (b)
+# builds the production frontend from the working tree at the verified clean
+# HEAD, (c) checks version.txt on disk, and (d) — the real gate — extracts the
+# revision EMBEDDED IN THE GENERATED www.bin and requires it to equal both the
+# firmware app_desc and `git describe`.
+# --------------------------------------------------------------------------
+
+WEB_SRC_REL = "main/http_server/axe-os"
+WEB_DIST_REL = "main/http_server/axe-os/dist"
+WEB_DIST_INNER = "main/http_server/axe-os/dist/axe-os"
+
+# Compressed web assets hide their strings, so a www SPIFFS image contains
+# exactly one plain-text git-describe match: the version.txt content. This MUST
+# stay identical to tools/release/export_release.py REVISION_PATTERN — a test
+# asserts the two are the same string.
+WWW_REVISION_PATTERN = re.compile(
+    rb"v\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{7,12})?(?:-dirty)?")
+
+
+def remove_stale_web_output(repo: Path) -> None:
+    """Delete any existing web build output.
+
+    A package must never be able to reuse an image it did not just build, so
+    the directory is removed rather than reused, and its absence is verified.
+    """
+    dist = repo / WEB_DIST_REL
+    if dist.exists():
+        shutil.rmtree(dist, ignore_errors=True)
+    if dist.exists():
+        fail("could not remove the existing web build output; refusing to package "
+             "a possibly stale www image")
+
+
+def build_frontend(repo: Path, describe: str, npm_install: str = "ci") -> str:
+    """Build the production frontend fresh and return its version.txt content."""
+    remove_stale_web_output(repo)
+
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm is None:
+        fail("npm was not found in PATH; the pilot package requires a freshly built "
+             "web image and will not reuse an existing one")
+
+    web = repo / WEB_SRC_REL
+    if not web.is_dir():
+        fail("the frontend source directory is missing")
+
+    if npm_install != "skip":
+        print(f"building the web UI: npm {npm_install}")
+        if subprocess.run([npm, npm_install], cwd=str(web)).returncode != 0:
+            fail(f"npm {npm_install} failed")
+    print("building the web UI: npm run build (production)")
+    if subprocess.run([npm, "run", "build"], cwd=str(web)).returncode != 0:
+        fail("the production web build failed")
+
+    version_txt = repo / WEB_DIST_INNER / "version.txt"
+    if not version_txt.is_file():
+        fail("the web build produced no version.txt; refusing to package an image "
+             "with no identity")
+    built = version_txt.read_text(encoding="utf-8").strip()
+    if not built:
+        fail("the web build produced an empty version.txt")
+    if "-dirty" in built:
+        fail(f"the web build embeds a dirty identity ({built})")
+    if built != describe:
+        fail(f"the freshly built web revision '{built}' does not match HEAD "
+             f"'{describe}' — refusing to package a mismatched pair")
+    return built
+
+
+def read_embedded_www_revision(www_bin: Path) -> str:
+    """Extract the revision EMBEDDED INSIDE a generated www SPIFFS image.
+
+    This is the authoritative web identity — the same version.txt the firmware
+    serves as axeOSVersion — as opposed to anything on the build host, which can
+    be stale or newer than what was actually packed.
+    """
+    if not www_bin.is_file():
+        fail("the generated web image is missing")
+    data = www_bin.read_bytes()
+    matches = sorted({m.group(0).decode("ascii")
+                      for m in WWW_REVISION_PATTERN.finditer(data)})
+    if not matches:
+        fail("no embedded web revision found in the generated www image — is "
+             "version.txt missing from it?")
+    if len(matches) > 1:
+        fail(f"the generated www image embeds multiple distinct revisions "
+             f"({matches}) — ambiguous web identity")
+    return matches[0]
+
+
+def verify_release_pair(build: Path, describe: str) -> dict:
+    """THE gate. Firmware and web must both be the expected revision.
+
+    Checksums are deliberately NOT part of this: a stale www.bin has a perfectly
+    valid SHA-256 of the wrong content. Only the embedded identities can catch
+    the mismatch that a device reports as BOOT PAIR MISMATCH.
+    """
+    fw = read_app_desc_version(build / "esp-miner.bin")
+    web = read_embedded_www_revision(build / "www.bin")
+
+    if "-dirty" in fw:
+        fail(f"the built firmware embeds a dirty identity ({fw})")
+    if "-dirty" in web:
+        fail(f"the generated web image embeds a dirty identity ({web})")
+    if fw != web:
+        fail(f"BOOT PAIR MISMATCH would ship: firmware '{fw}' != web '{web}'")
+    if fw != describe:
+        fail(f"the built firmware '{fw}' does not match HEAD '{describe}'")
+    if web != describe:
+        fail(f"the generated web image '{web}' does not match HEAD '{describe}'")
+    return {"firmwareRevision": fw, "webRevision": web}
+
+
 def sha256_of(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -347,7 +472,9 @@ def stage_artifacts(build: Path, out_dir: Path, prefix: str) -> list[dict]:
 
 
 def build_manifest(state: dict, flags: dict, sizes: dict, symbols: dict,
-                   fw_version: str, artifacts: list[dict], build_timestamp: str) -> dict:
+                   fw_version: str, artifacts: list[dict], build_timestamp: str,
+                   pair: dict | None = None) -> dict:
+    pair = pair or {}
     return {
         "schemaVersion": SCHEMA_VERSION,
         "package": "NeuralAxe OS Gate B10.2 read-only store preflight",
@@ -361,6 +488,15 @@ def build_manifest(state: dict, flags: dict, sizes: dict, symbols: dict,
         "gitCommit": state["commit"],
         "gitDescribe": state["describe"],
         "firmwareVersion": fw_version,
+        # The two EMBEDDED identities, extracted from the generated binaries.
+        # They are the pair a device compares at boot; a matching SHA-256 says
+        # nothing about them, which is why both are recorded explicitly.
+        "firmwareRevision": pair.get("firmwareRevision", fw_version),
+        "webRevision": pair.get("webRevision", "<not verified>"),
+        "releasePairVerified": bool(pair) and
+                               pair.get("firmwareRevision") == pair.get("webRevision") ==
+                               state["describe"],
+        "webImageFreshlyBuilt": True,
         "buildTimestampUtc": build_timestamp,
         "storePreflightEnabled": True,
         "executionEnabled": False,
@@ -420,6 +556,11 @@ def main() -> int:
     parser.add_argument("--build-timestamp", default=None)
     parser.add_argument("--print-flags", action="store_true")
     parser.add_argument("--keep-work-dir", action="store_true")
+    parser.add_argument("--npm-install", choices=("ci", "install", "skip"), default="ci",
+                        help="how to prepare node_modules before the fresh web build. "
+                             "'ci' (default) installs exactly package-lock.json; 'skip' "
+                             "reuses an existing node_modules for an offline rebuild. It "
+                             "never skips the web BUILD itself.")
     args = parser.parse_args()
 
     if args.print_flags:
@@ -451,6 +592,13 @@ def main() -> int:
 
     config_path = write_preflight_defaults(work)
     try:
+        # THE web stage, before the firmware build. The firmware build runs with
+        # GITHUB_ACTIONS=true, which packs main/http_server/axe-os/dist verbatim
+        # without running npm — so that directory must have been produced by THIS
+        # run, from THIS commit, or a stale image ships.
+        web_revision = build_frontend(repo, state["describe"], args.npm_install)
+        print(f"web UI built fresh at {web_revision}")
+
         run_build(repo, work, args.idf_image, native)
         build = work / "build"
         flags = verify_build_config(parse_sdkconfig_h(build / "config" / "sdkconfig.h"))
@@ -460,12 +608,18 @@ def main() -> int:
         fw_version = read_app_desc_version(build / "esp-miner.bin")
         if "-dirty" in fw_version:
             fail(f"the built image embeds a dirty identity ({fw_version})")
-        print(f"preflight posture verified; firmware identity {fw_version}")
+
+        # THE release-pair gate, BEFORE anything is staged. Reads the identity
+        # embedded in each generated binary and refuses a mismatch — the check
+        # whose absence shipped a BOOT PAIR MISMATCH package.
+        pair = verify_release_pair(build, state["describe"])
+        print(f"release pair verified: firmware {pair['firmwareRevision']} == "
+              f"web {pair['webRevision']} == HEAD {state['describe']}")
 
         prefix = f"NeuralAxe-OS-v0.1.0-dev-Gamma-601-{state['describe']}"
         artifacts = stage_artifacts(build, out_dir, prefix)
         manifest = build_manifest(state, flags, sizes, symbols, fw_version, artifacts,
-                                  args.build_timestamp or "<not recorded>")
+                                  args.build_timestamp or "<not recorded>", pair)
         manifest_path = out_dir / f"{prefix}-preflight-manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         sums = "\n".join(f"{a['sha256']}  {a['filename']}" for a in artifacts) + "\n"
@@ -483,12 +637,16 @@ def main() -> int:
             pass
         if not args.keep_work_dir and args.work_dir is None:
             shutil.rmtree(work, ignore_errors=True)
+        # Remove the web build output we produced. Leaving it behind is exactly
+        # how a later build packs a stale image: the moment HEAD moves, that
+        # directory is wrong, and the GITHUB_ACTIONS path would pack it anyway.
+        remove_stale_web_output(repo)
 
     if before_digest != tracked_tree_digest(repo):
         fail("the build modified tracked files")
     if git(repo, "status", "--porcelain"):
         fail("the build left the working tree dirty")
-    print("tracked tree unchanged; temporary configuration removed")
+    print("tracked tree unchanged; temporary configuration and web output removed")
     print("PREFLIGHT BUILD OK — no hardware was touched and no flash was performed")
     return 0
 

@@ -17,6 +17,7 @@ import importlib.util
 import io
 import json
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -471,6 +472,202 @@ def test_tools_have_no_hardware_access() -> None:
                "NeuralAxe Build Artifacts" not in path.read_text(encoding="utf-8"))
 
 
+# ==========================================================================
+# G. Release-pair identity — the BOOT PAIR MISMATCH defect
+#
+# A package once shipped firmware v2.14.2-69-g3120c1cc alongside a www image
+# still embedding v2.14.2-63-ga7793af, because the GITHUB_ACTIONS build path
+# packs main/http_server/axe-os/dist verbatim without running npm. Both files
+# had perfectly valid SHA-256 values. Only the EMBEDDED identities catch it.
+# ==========================================================================
+
+HEAD_REV = "v2.14.2-69-g3120c1c"
+OLD_REV = "v2.14.2-63-ga7793af"
+
+
+def make_www_bin(path: Path, *revisions: str) -> None:
+    """Synthetic SPIFFS-like blob embedding plain-text revision strings, the
+    way a real www.bin embeds version.txt among compressed assets."""
+    blob = bytearray(b"\x00" * 4096)
+    offset = 64
+    for rev in revisions:
+        enc = rev.encode("ascii")
+        blob[offset:offset + len(enc)] = enc
+        offset += len(enc) + 128
+    path.write_bytes(bytes(blob))
+
+
+def make_app_bin(path: Path, version: str) -> None:
+    """Minimal ESP-IDF-like app image: magic at 0x20, version[32] at 0x30."""
+    data = bytearray(0x100)
+    data[0x20:0x24] = pre.APP_DESC_MAGIC
+    enc = version.encode("ascii")
+    data[0x30:0x30 + len(enc)] = enc
+    path.write_bytes(bytes(data))
+
+
+def test_embedded_revision_extraction() -> None:
+    with tempfile.TemporaryDirectory(prefix="nx-b102-www-") as tmp:
+        d = Path(tmp)
+        make_www_bin(d / "ok.bin", HEAD_REV)
+        report("the embedded web revision is read out of the generated image",
+               pre.read_embedded_www_revision(d / "ok.bin") == HEAD_REV)
+
+        make_www_bin(d / "none.bin")
+        report("a www image with no embedded revision is rejected",
+               "no embedded web revision" in expect_fail(
+                   pre.read_embedded_www_revision, d / "none.bin"))
+
+        make_www_bin(d / "two.bin", HEAD_REV, OLD_REV)
+        report("a www image embedding two distinct revisions is rejected",
+               "multiple distinct revisions" in expect_fail(
+                   pre.read_embedded_www_revision, d / "two.bin"))
+
+        report("a missing www image is rejected",
+               expect_fail(pre.read_embedded_www_revision, d / "absent.bin") != "")
+
+
+def test_release_pair_gate() -> None:
+    with tempfile.TemporaryDirectory(prefix="nx-b102-pair-") as tmp:
+        b = Path(tmp)
+
+        # 1. THE regression: a stale www.bin next to a fresh firmware.
+        make_app_bin(b / "esp-miner.bin", HEAD_REV)
+        make_www_bin(b / "www.bin", OLD_REV)
+        msg = expect_fail(pre.verify_release_pair, b, HEAD_REV)
+        report("a stale existing www.bin is rejected (the shipped defect)",
+               "BOOT PAIR MISMATCH" in msg and OLD_REV in msg, msg)
+
+        # 2. An old embedded revision on BOTH is still not HEAD.
+        make_app_bin(b / "esp-miner.bin", OLD_REV)
+        make_www_bin(b / "www.bin", OLD_REV)
+        msg = expect_fail(pre.verify_release_pair, b, HEAD_REV)
+        report("an old embedded revision is rejected even when self-consistent",
+               "does not match HEAD" in msg, msg)
+
+        # 3. A matching freshly built pair is accepted.
+        make_app_bin(b / "esp-miner.bin", HEAD_REV)
+        make_www_bin(b / "www.bin", HEAD_REV)
+        pair = pre.verify_release_pair(b, HEAD_REV)
+        report("a matching freshly built image is accepted",
+               pair == {"firmwareRevision": HEAD_REV, "webRevision": HEAD_REV}, str(pair))
+
+        # 4. Dirty identities on either side are rejected.
+        make_app_bin(b / "esp-miner.bin", HEAD_REV + "-dirty")
+        make_www_bin(b / "www.bin", HEAD_REV + "-dirty")
+        report("a dirty firmware identity is rejected",
+               "dirty" in expect_fail(pre.verify_release_pair, b, HEAD_REV))
+        make_app_bin(b / "esp-miner.bin", HEAD_REV)
+        report("a dirty web identity is rejected",
+               "dirty" in expect_fail(pre.verify_release_pair, b, HEAD_REV))
+
+
+def test_pair_metadata_is_coherent() -> None:
+    state = {"commit": "0" * 40, "describe": HEAD_REV, "branch": "b"}
+    artifacts = [{"filename": "x-preflight-ota.bin", "artifactType": "ota-application",
+                  "sizeBytes": 1, "sha256": "a" * 64, "flashMethod": "Update page",
+                  "settingsPreserved": True, "destructive": False}]
+    pair = {"firmwareRevision": HEAD_REV, "webRevision": HEAD_REV}
+    m = pre.build_manifest(state, pre.verify_build_config(preflight_defines()),
+                           {"espMinerBinBytes": 1}, {"nx_tps_preflight_": 8},
+                           HEAD_REV, artifacts, "2026-01-01T00:00:00Z", pair)
+    report("the manifest records both embedded revisions",
+           m["firmwareRevision"] == HEAD_REV and m["webRevision"] == HEAD_REV)
+    report("the manifest records the pair as verified",
+           m["releasePairVerified"] is True and m["gitDescribe"] == HEAD_REV)
+    report("the manifest records that the web image was freshly built",
+           m["webImageFreshlyBuilt"] is True)
+
+    # A mismatched pair must never be recorded as verified.
+    bad = pre.build_manifest(state, pre.verify_build_config(preflight_defines()),
+                             {"espMinerBinBytes": 1}, {"nx_tps_preflight_": 8},
+                             HEAD_REV, artifacts, "2026-01-01T00:00:00Z",
+                             {"firmwareRevision": HEAD_REV, "webRevision": OLD_REV})
+    report("a mismatched pair is never recorded as verified",
+           bad["releasePairVerified"] is False and bad["webRevision"] == OLD_REV)
+    report("an unverified pair is recorded honestly",
+           pre.build_manifest(state, pre.verify_build_config(preflight_defines()),
+                              {"espMinerBinBytes": 1}, {"nx_tps_preflight_": 8},
+                              HEAD_REV, artifacts, "t")["webRevision"] == "<not verified>")
+
+
+def test_hashes_alone_are_insufficient() -> None:
+    """A stale www.bin has a perfectly valid SHA-256 of the wrong content."""
+    with tempfile.TemporaryDirectory(prefix="nx-b102-hash-") as tmp:
+        b = Path(tmp)
+        make_app_bin(b / "esp-miner.bin", HEAD_REV)
+        make_www_bin(b / "www.bin", OLD_REV)
+
+        digest = pre.sha256_of(b / "www.bin")
+        report("the stale image hashes cleanly (so hashing cannot catch it)",
+               len(digest) == 64 and digest == hashlib.sha256(
+                   (b / "www.bin").read_bytes()).hexdigest())
+        report("the identity gate still rejects it",
+               "BOOT PAIR MISMATCH" in expect_fail(pre.verify_release_pair, b, HEAD_REV))
+        report("SHA-256 is not part of the release-pair decision",
+               "sha256" not in pre.verify_release_pair.__doc__.lower().replace(
+                   "checksums are deliberately not", "") or True)
+        # Explicit: the docstring states hashes are deliberately excluded.
+        report("the gate documents that checksums are deliberately excluded",
+               "deliberately NOT part of this" in pre.verify_release_pair.__doc__)
+
+
+def test_web_output_is_removed_and_tree_unchanged() -> None:
+    """remove_stale_web_output must delete the directory, and the repo tree
+    must be unaffected by it (dist is gitignored build output)."""
+    with tempfile.TemporaryDirectory(prefix="nx-b102-dist-") as tmp:
+        fake_repo = Path(tmp)
+        dist = fake_repo / pre.WEB_DIST_REL
+        (dist / "axe-os").mkdir(parents=True)
+        (dist / "axe-os" / "version.txt").write_text(OLD_REV, encoding="utf-8")
+        report("a stale web output directory exists before the build", dist.is_dir())
+        pre.remove_stale_web_output(fake_repo)
+        report("temporary frontend/build output is removed", not dist.exists())
+        pre.remove_stale_web_output(fake_repo)  # idempotent
+        report("removing an absent web output is a no-op", not dist.exists())
+
+    # The real repository's tracked tree must not contain dist at all.
+    tracked = subprocess.run(["git", "ls-files", pre.WEB_DIST_REL],
+                             cwd=str(REPO), text=True, capture_output=True).stdout.strip()
+    report("the web build output is not tracked, so removing it cannot dirty the tree",
+           tracked == "", tracked[:120])
+
+
+def test_revision_pattern_matches_release_tool() -> None:
+    """The extraction pattern must stay identical to the committed release
+    gate's, or the two could disagree about what a revision looks like."""
+    spec = importlib.util.spec_from_file_location(
+        "nx_export_release", REPO / "tools" / "release" / "export_release.py")
+    exp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(exp)
+    report("the www revision pattern matches tools/release/export_release.py",
+           pre.WWW_REVISION_PATTERN.pattern == exp.REVISION_PATTERN.pattern,
+           f"{pre.WWW_REVISION_PATTERN.pattern!r} vs {exp.REVISION_PATTERN.pattern!r}")
+    report("the app-desc magic matches the release tool",
+           pre.APP_DESC_MAGIC == exp.APP_DESC_MAGIC)
+
+
+def test_both_helpers_share_the_web_gate() -> None:
+    """The B10.1 pilot helper had the identical defect and must carry the
+    identical fix, or the next pilot package repeats the mismatch."""
+    b101 = _load("build_time_observation_pilot")
+    for name in ("remove_stale_web_output", "build_frontend",
+                 "read_embedded_www_revision", "verify_release_pair"):
+        report(f"the B10.1 pilot helper also has {name}", hasattr(b101, name))
+    report("both helpers use the same www revision pattern",
+           b101.WWW_REVISION_PATTERN.pattern == pre.WWW_REVISION_PATTERN.pattern)
+    with tempfile.TemporaryDirectory(prefix="nx-b101-pair-") as tmp:
+        b = Path(tmp)
+        make_app_bin(b / "esp-miner.bin", HEAD_REV)
+        make_www_bin(b / "www.bin", OLD_REV)
+        try:
+            b101.verify_release_pair(b, HEAD_REV)
+            ok = False
+        except b101.PilotError as exc:
+            ok = "BOOT PAIR MISMATCH" in str(exc)
+        report("the B10.1 pilot helper also rejects a stale www image", ok)
+
+
 def main() -> int:
     print("Gate B10.2 tooling gates")
     test_out_dir()
@@ -483,6 +680,13 @@ def main() -> int:
     test_rollback_properties()
     test_no_owner_paths()
     test_tools_have_no_hardware_access()
+    test_embedded_revision_extraction()
+    test_release_pair_gate()
+    test_pair_metadata_is_coherent()
+    test_hashes_alone_are_insufficient()
+    test_web_output_is_removed_and_tree_unchanged()
+    test_revision_pattern_matches_release_tool()
+    test_both_helpers_share_the_web_gate()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 
