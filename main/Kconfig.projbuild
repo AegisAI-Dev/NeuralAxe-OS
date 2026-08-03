@@ -460,4 +460,108 @@ menu "Stratum Configuration"
             nx_wtp namespace is never opened and behavior is byte-for-byte
             unchanged. Leave disabled for production.
 
+    config NX_WEATHER_SOURCE_POLICY
+        bool "NeuralAxe weather private source policy (EXPERIMENTAL, Gate W5)"
+        depends on NX_WEATHER_AWARE_TUNING
+        default n
+        help
+            EXPERIMENTAL. Compiles the Gate W5 private source policy, which
+            decides WHETHER a weather source may be used and, if so, WHICH
+            provider and WHERE. It decides nothing else.
+
+            IT AUTHORIZES NOTHING BEYOND A RECOMMENDATION. Everything the
+            Gate W4 flag already forbids stays forbidden: no frequency,
+            voltage, fan or thermal change; no pool or protocol change; no
+            timed session, lease or execution; no SNTP start; no HTTP route;
+            no task; no restart.
+
+            NOTHING IS IMPLICIT. Every symbol below defaults to "not
+            selected", so enabling this flag alone still yields an
+            unconfigured device that issues no request. There is no default
+            provider, no default location and no default timezone.
+
+            PRIVATE VALUES NEVER LIVE IN THE REPOSITORY. Supply them through
+            an out-of-tree sdkconfig fragment produced by
+            tools/pilot/build_weather_recommendation_pilot.py, which reads
+            them from the environment, never prints them, and deletes the
+            fragment afterwards. The tracked defaults stay unconfigured.
+
+    if NX_WEATHER_SOURCE_POLICY
+
+    choice NX_WEATHER_DISTRIBUTION
+        prompt "Weather distribution mode"
+        default NX_WEATHER_DIST_UNSPECIFIED
+        help
+            Which distribution this deployment is, which decides whether an
+            external weather source may be contacted at all. Only
+            OWNER_MANAGED_EXTERNAL permits a provider.
+
+    config NX_WEATHER_DIST_UNSPECIFIED
+        bool "Unspecified (default; permits nothing)"
+
+    config NX_WEATHER_DIST_DISABLED
+        bool "Disabled (explicitly switched off)"
+
+    config NX_WEATHER_DIST_OWNER_MANAGED_EXTERNAL
+        bool "Owner-managed external source"
+        help
+            The owner explicitly supplies the source configuration, NeuralAxe
+            infers neither location nor provider, the source is not reachable
+            through the unauthenticated timed-session API, and the owner is
+            responsible for the selected external service and its terms.
+
+    endchoice
+
+    choice NX_WEATHER_PROVIDER
+        prompt "Weather provider"
+        default NX_WEATHER_PROVIDER_NONE
+        help
+            The provider is an explicit capability, never an implicit
+            selection. Gate W5 supports exactly one, the committed Gate W3
+            Open-Meteo adapter, and adds no other.
+
+    config NX_WEATHER_PROVIDER_NONE
+        bool "None (default; no provider selected)"
+
+    config NX_WEATHER_PROVIDER_OPEN_METEO
+        bool "Open-Meteo (committed Gate W3 adapter)"
+
+    endchoice
+
+    choice NX_WEATHER_TIMEZONE
+        prompt "Weather local timezone"
+        default NX_WEATHER_TZ_NONE
+        help
+            The timezone used to convert trusted UTC to the local evaluation
+            window. It is NOT a location: it never implies coordinates and is
+            never used as a location proxy.
+
+    config NX_WEATHER_TZ_NONE
+        bool "None (default; no timezone selected)"
+
+    config NX_WEATHER_TZ_EUROPE_BRUSSELS
+        bool "Europe/Brussels (committed Gate W3 implementation)"
+
+    endchoice
+
+    config NX_WEATHER_LATITUDE_E4
+        int "Weather latitude (degrees x 1e4)"
+        range -900000 900000
+        default 0
+        help
+            PRIVATE. Signed degrees scaled by 1e4, matching the committed W2
+            record and W3 request parameters. 0 together with longitude 0 is
+            the repository's "unset" sentinel and is rejected, so leaving
+            this at the default keeps the device unconfigured. Never commit a
+            real value; supply it through the pilot helper's environment.
+
+    config NX_WEATHER_LONGITUDE_E4
+        int "Weather longitude (degrees x 1e4)"
+        range -1800000 1800000
+        default 0
+        help
+            PRIVATE. See the latitude help text. Never commit a real value.
+
+    endif
+
 endmenu

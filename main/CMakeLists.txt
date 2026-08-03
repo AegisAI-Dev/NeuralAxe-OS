@@ -79,6 +79,12 @@ PRIV_REQUIRES
     # #ifdef'd out unless CONFIG_NX_WEATHER_AWARE_TUNING is set. Posture A is
     # verified byte-identical to the pre-W4 baseline.
     "weather_runtime"
+    # Gate W5. Unconditional for the same reason as weather_runtime above:
+    # ESP-IDF resolves component requirements before any CONFIG_* symbol
+    # exists. Its only main-facing symbol lives in nx_weather_source_boot.c,
+    # which is entirely #ifdef'd out unless CONFIG_NX_WEATHER_SOURCE_POLICY
+    # is set, so the default image links nothing from it.
+    "weather_source_policy"
     "driver"
     "thermal_control"
     "esp_adc"

@@ -37,6 +37,9 @@
 #endif
 #ifdef CONFIG_NX_WEATHER_AWARE_TUNING
 #include "weather_runtime_boot.h"
+#ifdef CONFIG_NX_WEATHER_SOURCE_POLICY
+#include "nx_weather_source_boot.h"
+#endif
 #endif
 
 static GlobalState GLOBAL_STATE;
@@ -117,6 +120,14 @@ void app_main(void)
     // namespace, no HTTP route, no task and no restart. Applying a weather
     // recommendation to hardware requires a separate future execution gate.
     nx_weather_boot_notice();
+#ifdef CONFIG_NX_WEATHER_SOURCE_POLICY
+    // NeuralAxe Gate W5: the private source-policy notice. It runs the
+    // ordered configuration gate (distribution, provider, location,
+    // timezone, schedule, recommendation-only) and injects NO clock,
+    // transport or store, so it issues zero network requests and authorizes
+    // nothing beyond a bounded recommendation.
+    nx_weather_source_boot_notice();
+#endif
 #endif
 
 #ifdef CONFIG_NX_TIMED_SESSIONS
