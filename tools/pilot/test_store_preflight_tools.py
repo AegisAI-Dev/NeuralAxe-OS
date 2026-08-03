@@ -802,7 +802,7 @@ def test_one_revision_reaches_both_sides() -> None:
     same supplied revision — neither derives its own."""
     b101 = _load("build_time_observation_pilot")
     for label, mod in (("B10.2", pre), ("B10.1", b101)):
-        cmd = mod.build_command("/repo", "/work", CANONICAL_REV)
+        cmd = mod.build_command("/repo", "/work", revision=CANONICAL_REV)
         report("the %s firmware build is given -DPROJECT_VER=%s"
                % (label, CANONICAL_REV),
                '-DPROJECT_VER="%s"' % CANONICAL_REV in cmd, cmd)
@@ -831,6 +831,23 @@ def test_one_revision_reaches_both_sides() -> None:
         report("the %s web build is given %s=%s"
                % (label, canon.REVISION_ENV, CANONICAL_REV),
                CANONICAL_REV in supplied, str(supplied))
+
+    # The production call sites themselves, read from the real source. A test
+    # that only calls build_command() directly is a mock: the container branch
+    # of run_build() regressed exactly that way and every test stayed green.
+    import ast as _ast
+    for label, path in (("B10.2", HERE / "build_store_preflight.py"),
+                        ("B10.1", HERE / "build_time_observation_pilot.py")):
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        for fn in ("build_command", "run_build"):
+            calls = [n for n in _ast.walk(tree)
+                     if isinstance(n, _ast.Call)
+                     and isinstance(n.func, _ast.Name) and n.func.id == fn]
+            bad = [c.lineno for c in calls
+                   if not any(k.arg in ("revision", None) for k in c.keywords)]
+            report("%s: all %d %s() call sites supply revision"
+                   % (label, len(calls), fn),
+                   calls and not bad, "missing at %s" % bad)
 
     js = (REPO / "main" / "http_server" / "axe-os"
           / "generate-version.js").read_text(encoding="utf-8")

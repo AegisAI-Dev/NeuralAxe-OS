@@ -311,8 +311,13 @@ def find_container_runtime() -> str:
     raise AssertionError("unreachable")
 
 
-def build_command(repo_path: str, work_path: str, revision: str) -> str:
-    """The idf.py invocation, expressed with container-side paths."""
+def build_command(repo_path: str, work_path: str, *, revision: str) -> str:
+    """The idf.py invocation, expressed with container-side paths.
+
+    `revision` is KEYWORD-ONLY and has no default. A call site cannot omit it
+    silently, and cannot pass a path where the revision belongs — which is
+    how the container build path regressed once already.
+    """
     defaults = f"{repo_path}/sdkconfig.defaults;{work_path}/pilot.sdkconfig.defaults"
     # -DPROJECT_VER pins the firmware identity to the ONE canonical revision.
     # Without it ESP-IDF calls git_describe() with no --abbrev and the
@@ -328,10 +333,16 @@ def build_command(repo_path: str, work_path: str, revision: str) -> str:
     )
 
 
-def run_build(repo: Path, work: Path, image: str, native: bool,
+def run_build(repo: Path, work: Path, image: str, native: bool, *,
               revision: str) -> None:
+    """Build the firmware, FORWARDING the one canonical revision.
+
+    Both branches must pass it on. The container must never derive its own
+    identity: its git version chooses a different abbreviation length than
+    the host that built the web image, which ships a BOOT PAIR MISMATCH.
+    """
     if native:
-        cmd = build_command(str(repo), str(work), revision)
+        cmd = build_command(str(repo), str(work), revision=revision)
         print("building natively (IDF_PATH is set)")
         proc = subprocess.run(["bash", "-lc", cmd], cwd=str(repo),
                               env={**os.environ, "GITHUB_ACTIONS": "true"})
@@ -344,7 +355,10 @@ def run_build(repo: Path, work: Path, image: str, native: bool,
         f"git config --global --add safe.directory {CONTAINER_REPO} && "
         "git config --global core.autocrlf true && "
         "git config --global core.filemode false && "
-        + build_command(CONTAINER_REPO, CONTAINER_WORK)
+        # The revision is FORWARDED, never recomputed: the container must not
+        # run its own `git describe`, or its git version chooses the
+        # abbreviation length again and the release pair diverges.
+        + build_command(CONTAINER_REPO, CONTAINER_WORK, revision=revision)
     )
     cmd = [
         runtime, "run", "--rm",
@@ -811,7 +825,8 @@ def main() -> int:
         web_revision = build_frontend(repo, state["describe"], args.npm_install)
         print(f"web UI built fresh at {web_revision}")
 
-        run_build(repo, work, args.idf_image, native, state["describe"])
+        run_build(repo, work, args.idf_image, native,
+                  revision=state["describe"])
 
         build = work / "build"
         flags = verify_build_config(parse_sdkconfig_h(build / "config" / "sdkconfig.h"), host)

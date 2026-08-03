@@ -30,7 +30,10 @@ import importlib.util
 import io
 import json
 import contextlib
+import os
 import re
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -40,6 +43,15 @@ spec = importlib.util.spec_from_file_location("pilot_build",
                                               HERE / "build_time_observation_pilot.py")
 pilot = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pilot)
+
+
+def _load_helper(name: str):
+    """Load a sibling pilot helper, for the cross-helper contract proofs."""
+    s = importlib.util.spec_from_file_location(name, HERE / (name + ".py"))
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
 
 # A synthetic fixture. It is never resolved and never contacted.
 GOOD_HOST = "time-pilot.example"
@@ -566,6 +578,335 @@ def test_no_source_in_any_output() -> None:
                not remaining, str(remaining))
 
 
+# ==========================================================================
+# The canonical-revision CALL FLOW.
+#
+# The container branch of run_build() once called build_command() without the
+# revision. Every test at the time passed, because they all called
+# build_command() directly — a helper mock — and never exercised the real
+# production call site. These proofs are written against the SOURCE and
+# against a real run_build() invocation instead.
+# ==========================================================================
+
+import ast as _ast
+import inspect as _inspect
+
+HELPERS = ("build_time_observation_pilot", "build_store_preflight")
+
+
+def _helper_path(name: str) -> Path:
+    return HERE / (name + ".py")
+
+
+def _calls_to(tree, func_name: str) -> list:
+    return [n for n in _ast.walk(tree)
+            if isinstance(n, _ast.Call)
+            and isinstance(n.func, _ast.Name)
+            and n.func.id == func_name]
+
+
+def _supplies_revision(call) -> bool:
+    """True when this call site actually hands over a revision."""
+    if any(kw.arg == "revision" for kw in call.keywords):
+        return True
+    if any(kw.arg is None for kw in call.keywords):
+        return True  # **kwargs forwarding
+    return False
+
+
+def test_every_production_call_site_supplies_the_revision() -> None:
+    """(4) The ACTUAL production call signatures are covered — every call site
+    in the real helper sources, not a mock written in the test."""
+    for name in HELPERS:
+        path = _helper_path(name)
+        tree = _ast.parse(path.read_text(encoding="utf-8"))
+        for func in ("build_command", "run_build"):
+            calls = _calls_to(tree, func)
+            report("%s: %s() is actually called in production code"
+                   % (name, func), len(calls) >= 1, "%d call sites" % len(calls))
+            bad = [c.lineno for c in calls if not _supplies_revision(c)]
+            report("%s: every %s() call site supplies revision (%d sites)"
+                   % (name, func, len(calls)),
+                   not bad, "missing at lines %s" % bad)
+
+    # The exact defect that shipped, expressed as a source assertion: the
+    # container branch must forward the revision, not rebuild the string.
+    src = _inspect.getsource(pilot.run_build)
+    report("the B10.1 container branch forwards the revision",
+           "build_command(CONTAINER_REPO, CONTAINER_WORK, revision=revision)" in src)
+    report("the B10.1 native branch forwards the revision",
+           "revision=revision" in src.split("if native:")[1].split("return")[0])
+
+    # MUTATION SELF-CHECK. A source scanner that cannot fail is worthless, and
+    # the previous battery passed while this exact defect was in the tree. Feed
+    # the detector the regression verbatim and require it to object.
+    regressed = _ast.parse(
+        "def run_build(repo, work, image, native, *, revision):\n"
+        "    inner = 'cfg && ' + build_command(CONTAINER_REPO, CONTAINER_WORK)\n")
+    missed = [c for c in _calls_to(regressed, "build_command")
+              if not _supplies_revision(c)]
+    report("the call-site detector REJECTS the regression that shipped "
+           "(build_command with no revision)",
+           len(missed) == 1, str(missed))
+    repaired = _ast.parse(
+        "def run_build(repo, work, image, native, *, revision):\n"
+        "    inner = 'cfg && ' + build_command(CONTAINER_REPO, CONTAINER_WORK,"
+        " revision=revision)\n")
+    report("the call-site detector ACCEPTS the corrected call",
+           not [c for c in _calls_to(repaired, "build_command")
+                if not _supplies_revision(c)])
+
+
+def test_revision_cannot_be_omitted() -> None:
+    """(2) Omitting the revision is impossible to do silently: it is a
+    keyword-only parameter with no default, so it fails loudly and in a
+    controlled way."""
+    for name in HELPERS:
+        mod = pilot if name == "build_time_observation_pilot" else _load_helper(name)
+        sig = _inspect.signature(mod.build_command)
+        p = sig.parameters.get("revision")
+        report("%s: build_command's revision is keyword-only" % name,
+               p is not None and p.kind is _inspect.Parameter.KEYWORD_ONLY, str(sig))
+        report("%s: build_command's revision has no default" % name,
+               p is not None and p.default is _inspect.Parameter.empty)
+        sig2 = _inspect.signature(mod.run_build)
+        p2 = sig2.parameters.get("revision")
+        report("%s: run_build's revision is keyword-only with no default" % name,
+               p2 is not None
+               and p2.kind is _inspect.Parameter.KEYWORD_ONLY
+               and p2.default is _inspect.Parameter.empty, str(sig2))
+
+        # Controlled failure, not a silent wrong value.
+        try:
+            mod.build_command("/repo", "/work")
+            caught = ""
+        except TypeError as exc:
+            caught = str(exc)
+        report("%s: omitting the revision raises TypeError, never builds" % name,
+               "revision" in caught, caught)
+
+        # A path can no longer land in the revision slot by position.
+        try:
+            mod.build_command("/repo", "/work", "/oops")
+            caught = ""
+        except TypeError as exc:
+            caught = str(exc)
+        report("%s: a third positional argument is rejected outright" % name,
+               "positional" in caught, caught)
+
+
+def test_run_build_forwards_revision_to_build_command() -> None:
+    """(1) run_build really forwards the revision — BOTH branches driven, with
+    the container runtime and subprocess stubbed so nothing is executed."""
+    rev = "v2.14.2-71-gd8176eb7"
+    for name in HELPERS:
+        mod = pilot if name == "build_time_observation_pilot" else _load_helper(name)
+        for branch, native in (("container", False), ("native", True)):
+            seen = {}
+
+            class _Result:
+                returncode = 0
+
+            def fake_run(argv, **kw):
+                seen["argv"] = argv
+                return _Result()
+
+            real_run = mod.subprocess.run
+            real_which = mod.shutil.which
+            mod.subprocess.run = fake_run
+            mod.shutil.which = lambda n: "/usr/bin/docker" if n == "docker" else None
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    mod.run_build(Path("/repo"), Path("/work"), "img", native,
+                                  revision=rev)
+            finally:
+                mod.subprocess.run = real_run
+                mod.shutil.which = real_which
+
+            rendered = " ".join(str(x) for x in seen.get("argv", []))
+            report("%s/%s: the firmware command carries -DPROJECT_VER=%s"
+                   % (name, branch, rev),
+                   '-DPROJECT_VER="%s"' % rev in rendered,
+                   rendered[-160:])
+            report("%s/%s: the container is not asked to derive its own identity"
+                   % (name, branch),
+                   "git describe" not in rendered)
+
+
+def test_both_helpers_share_the_revision_contract() -> None:
+    """(3) B10.1 and B10.2 use the same canonical revision contract."""
+    other = _load_helper("build_store_preflight")
+    report("both helpers resolve the same canonical_revision module",
+           Path(pilot.canon.__file__).resolve()
+           == Path(other.canon.__file__).resolve()
+           == (HERE / "canonical_revision.py").resolve())
+    for attr in ("CANONICAL_ABBREV", "CANONICAL_DESCRIBE_ARGS", "REVISION_ENV"):
+        report("both helpers share %s" % attr,
+               getattr(pilot.canon, attr) == getattr(other.canon, attr))
+    for func in ("build_command", "run_build"):
+        a = _inspect.signature(getattr(pilot, func)).parameters["revision"]
+        b = _inspect.signature(getattr(other, func)).parameters["revision"]
+        report("both helpers declare %s(revision=...) identically" % func,
+               a.kind == b.kind == _inspect.Parameter.KEYWORD_ONLY
+               and a.default is b.default is _inspect.Parameter.empty)
+
+    # And the same exact-string pair requirement.
+    for label, mod in (("B10.1", pilot), ("B10.2", other)):
+        src = _inspect.getsource(mod.verify_release_pair)
+        report("%s requires firmware == web == canonical, by exact string"
+               % label,
+               "fw != web" in src and "fw != describe" in src
+               and "web != describe" in src)
+        report("%s validates the canonical shape of both sides" % label,
+               "validate_canonical" in src)
+
+
+# --------------------------------------------------------------------------
+# Cleanup after a firmware-build exception, proven by driving the REAL main().
+# --------------------------------------------------------------------------
+
+SECRET_HOST = "pilot-source.invalid.example"
+
+
+def _seed_repo(root: Path) -> Path:
+    """A throwaway git repo shaped like this one (tag + the web dist path)."""
+    cfg = ["-c", "user.email=t@example.invalid", "-c", "user.name=t",
+           "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
+
+    def run(*a):
+        return subprocess.run(["git", *cfg, *a], cwd=str(root),
+                              capture_output=True, text=True, check=True)
+
+    (root / pilot.WEB_SRC_REL).mkdir(parents=True, exist_ok=True)
+    (root / pilot.WEB_SRC_REL / "package.json").write_text("{}\n")
+    run("init", "-q")
+    run("add", "-A")
+    run("commit", "-q", "-m", "seed")
+    run("tag", "v2.14.2")
+    (root / "f.txt").write_text("x\n")
+    run("add", "-A")
+    run("commit", "-q", "-m", "c1")
+    return root
+
+
+def _run_main_with_failing_build(tmp: Path) -> dict:
+    """Drive the real main() to the point of a firmware-build failure.
+
+    Only the two heavy stages are replaced: the npm web build (which would take
+    minutes and needs a real Angular project) and the firmware build (which is
+    the stage under test — it must raise). EVERYTHING else, including the
+    try/finally cleanup contract, is the real code path.
+    """
+    repo = _seed_repo(tmp / "repo")
+    work = tmp / "work"
+    work.mkdir()
+    out = tmp / "out"
+    dist_inner = repo / pilot.WEB_DIST_INNER
+
+    def fake_frontend(r, describe, npm_install="ci"):
+        dist_inner.mkdir(parents=True, exist_ok=True)
+        (dist_inner / "version.txt").write_text(describe, encoding="utf-8")
+        (dist_inner / "main.js").write_text("//\n", encoding="utf-8")
+        return describe
+
+    def exploding_build(*a, **k):
+        # The exact shape of the reported regression: a TypeError escaping the
+        # firmware-build stage, NOT a controlled PilotError.
+        raise TypeError(
+            "build_command() missing 1 required positional argument: 'revision'")
+
+    real_frontend, real_build = pilot.build_frontend, pilot.run_build
+    real_argv = sys.argv
+    pilot.build_frontend = fake_frontend
+    pilot.run_build = exploding_build
+    sys.argv = ["build_time_observation_pilot.py",
+                "--repo-root", str(repo), "--work-dir", str(work),
+                "--out-dir", str(out)]
+    os.environ[pilot.ENV_VAR] = SECRET_HOST
+
+    captured = io.StringIO()
+    raised = None
+    config_existed = {"value": False}
+
+    # Confirm the temporary configuration really did carry the source before
+    # the failure — otherwise "it was removed" would prove nothing.
+    real_write = pilot.write_pilot_defaults
+
+    def watching_write(w, host):
+        p = real_write(w, host)
+        config_existed["value"] = p.is_file() and host in p.read_text(encoding="utf-8")
+        return p
+
+    pilot.write_pilot_defaults = watching_write
+    try:
+        with contextlib.redirect_stdout(captured), \
+                contextlib.redirect_stderr(captured):
+            try:
+                pilot.main()
+            except BaseException as exc:      # noqa: BLE001 - recorded, not handled
+                raised = exc
+    finally:
+        pilot.build_frontend = real_frontend
+        pilot.run_build = real_build
+        pilot.write_pilot_defaults = real_write
+        sys.argv = real_argv
+        os.environ.pop(pilot.ENV_VAR, None)
+
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
+                           capture_output=True, text=True).stdout.strip()
+    return {
+        "repo": repo, "work": work, "out": out,
+        "raised": raised, "log": captured.getvalue(), "dirty": dirty,
+        "config_carried_source": config_existed["value"],
+        "config_left": sorted(p.name for p in work.glob("*.sdkconfig.defaults")),
+        "dist_left": (repo / pilot.WEB_DIST_REL).exists(),
+    }
+
+
+def test_cleanup_after_a_firmware_build_exception() -> None:
+    """(5)(6)(7)(8) After the firmware build raises, the frontend output and
+    the temporary configuration are removed, the tracked tree is unchanged, and
+    nothing leaks the source."""
+    with tempfile.TemporaryDirectory(prefix="nx-b101-cleanup-") as tmp:
+        r = _run_main_with_failing_build(Path(tmp))
+
+        report("the failing build really did raise",
+               r["raised"] is not None,
+               type(r["raised"]).__name__)
+        report("the temporary configuration really carried the source before "
+               "the failure", r["config_carried_source"] is True)
+
+        # (6) temporary configuration removed after failure
+        report("the temporary configuration is removed after the exception",
+               r["config_left"] == [], str(r["config_left"]))
+
+        # (5) frontend output removed after a firmware-build exception
+        report("the frontend build output is removed after the exception",
+               r["dist_left"] is False)
+
+        # (7) tracked tree unchanged
+        report("the tracked tree is left clean after the exception",
+               r["dirty"] == "", r["dirty"])
+
+        # (8) no hostname in logs or in the exception
+        report("no NTP hostname reaches stdout/stderr",
+               SECRET_HOST not in r["log"])
+        report("no NTP hostname reaches the raised exception",
+               SECRET_HOST not in str(r["raised"])
+               and SECRET_HOST not in repr(r["raised"]))
+        report("no NTP hostname reaches a manifest (none was written)",
+               not r["out"].exists() or not any(
+                   SECRET_HOST in p.read_text(encoding="utf-8", errors="replace")
+                   for p in r["out"].rglob("*") if p.is_file()))
+        report("no package was staged by the failing run",
+               not r["out"].exists() or not any(r["out"].iterdir()))
+
+        # The scanner must be able to see the source at all, or the four checks
+        # above would pass vacuously.
+        report("the leak scanner is not vacuous (it finds a planted value)",
+               SECRET_HOST in ("log carrying " + SECRET_HOST))
+
+
 def main() -> int:
     print("Gate B10.1 pilot build-helper gates")
     test_validator_accepts()
@@ -584,6 +925,11 @@ def main() -> int:
     test_no_source_in_any_output()
     test_no_owner_paths_in_committed_files()
     test_no_repo_paths_in_helper()
+    test_every_production_call_site_supplies_the_revision()
+    test_revision_cannot_be_omitted()
+    test_run_build_forwards_revision_to_build_command()
+    test_both_helpers_share_the_revision_contract()
+    test_cleanup_after_a_firmware_build_exception()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

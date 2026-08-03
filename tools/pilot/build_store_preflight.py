@@ -211,7 +211,7 @@ def find_container_runtime() -> str:
     raise AssertionError("unreachable")
 
 
-def build_command(repo_path: str, work_path: str, revision: str) -> str:
+def build_command(repo_path: str, work_path: str, *, revision: str) -> str:
     defaults = f"{repo_path}/sdkconfig.defaults;{work_path}/preflight.sdkconfig.defaults"
     # -DPROJECT_VER pins the firmware identity to the ONE canonical
     # revision. Without it ESP-IDF calls git_describe() with no --abbrev
@@ -223,10 +223,11 @@ def build_command(repo_path: str, work_path: str, revision: str) -> str:
             f'-DSDKCONFIG_DEFAULTS="{defaults}" set-target esp32s3 build')
 
 
-def run_build(repo: Path, work: Path, image: str, native: bool,
+def run_build(repo: Path, work: Path, image: str, native: bool, *,
               revision: str) -> None:
     if native:
-        proc = subprocess.run(["bash", "-lc", build_command(str(repo), str(work), revision)],
+        proc = subprocess.run(["bash", "-lc",
+                               build_command(str(repo), str(work), revision=revision)],
                               cwd=str(repo), env={**os.environ, "GITHUB_ACTIONS": "true"})
         if proc.returncode != 0:
             fail(f"preflight build failed (exit {proc.returncode})")
@@ -236,7 +237,7 @@ def run_build(repo: Path, work: Path, image: str, native: bool,
     inner = (f"git config --global --add safe.directory {CONTAINER_REPO} && "
              "git config --global core.autocrlf true && "
              "git config --global core.filemode false && "
-             + build_command(CONTAINER_REPO, CONTAINER_WORK, revision))
+             + build_command(CONTAINER_REPO, CONTAINER_WORK, revision=revision))
     cmd = [runtime, "run", "--rm",
            "-v", f"{repo}:{CONTAINER_REPO}:rw",
            "-v", f"{work}:{CONTAINER_WORK}:rw",
@@ -648,7 +649,8 @@ def main() -> int:
         web_revision = build_frontend(repo, state["describe"], args.npm_install)
         print(f"web UI built fresh at {web_revision}")
 
-        run_build(repo, work, args.idf_image, native, state["describe"])
+        run_build(repo, work, args.idf_image, native,
+                  revision=state["describe"])
         build = work / "build"
         flags = verify_build_config(parse_sdkconfig_h(build / "config" / "sdkconfig.h"))
         symbols = verify_symbols(list_symbols(build / "esp-miner.elf", work,
