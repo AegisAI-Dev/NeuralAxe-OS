@@ -34,6 +34,7 @@ def _load(name: str):
 
 pre = _load("build_store_preflight")
 rb = _load("verify_rollback_readiness")
+canon = _load("canonical_revision")
 
 PASS = 0
 FAIL = 0
@@ -113,9 +114,15 @@ def report(name: str, ok: bool, detail: str = "") -> None:
 
 
 def expect_fail(fn, *a, **k) -> str:
+    """Return the refusal message, or "" if the call did NOT refuse.
+
+    RevisionError is included because the canonical identity provider raises
+    its own type; a caller that only caught PreflightError would report a
+    canonical refusal as an unhandled crash rather than a passing gate.
+    """
     try:
         fn(*a, **k)
-    except pre.PreflightError as exc:
+    except (pre.PreflightError, canon.RevisionError) as exc:
         return str(exc)
     return ""
 
@@ -481,7 +488,13 @@ def test_tools_have_no_hardware_access() -> None:
 # had perfectly valid SHA-256 values. Only the EMBEDDED identities catch it.
 # ==========================================================================
 
-HEAD_REV = "v2.14.2-69-g3120c1c"
+# A NEWLY BUILT package must carry the canonical 8-character revision. This
+# fixture was itself written in the 7-character form, and the canonical gate
+# now rejects it — which is the point. OLD_REV stays 7-character on purpose:
+# it is the genuinely stale identity that shipped, and the historic rollback
+# packages it stands for must remain verifiable (see test_rollback*, which
+# deliberately keeps its pre-contract fixtures).
+HEAD_REV = "v2.14.2-69-g3120c1cc"
 OLD_REV = "v2.14.2-63-ga7793af"
 
 
@@ -668,6 +681,393 @@ def test_both_helpers_share_the_web_gate() -> None:
         report("the B10.1 pilot helper also rejects a stale www image", ok)
 
 
+# --------------------------------------------------------------------------
+# The canonical revision contract (packaging defect 2: BOOT PAIR MISMATCH
+# caused by two independent `git describe` invocations choosing different
+# abbreviation lengths for the SAME commit).
+# --------------------------------------------------------------------------
+
+# A real commit and its two observed renderings on this very repository.
+FULL_SHA = "34a51508ac603b42bfdf3cdcae1a8c74448af207"
+CANONICAL_REV = "v2.14.2-70-g34a51508"   # container git 2.43 — and now everyone
+SHORT_REV = "v2.14.2-70-g34a5150"        # host git 2.54 default — a PREFIX
+
+
+def _source_of(mod, name: str) -> str:
+    import inspect
+    return inspect.getsource(getattr(mod, name))
+
+
+def make_git_repo(root: Path, tag: str = "v2.14.2") -> Path:
+    """A throwaway git repository inside a temp directory.
+
+    Nothing here touches the NeuralAxe repository. These fixtures exercise real
+    `git describe` behaviour rather than a mock of it, because the defect under
+    test lives in git's own abbreviation choice.
+    """
+    cfg = ["-c", "user.email=t@example.invalid", "-c", "user.name=t",
+           "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
+
+    def run(*a):
+        return subprocess.run(["git", *cfg, *a], cwd=str(root),
+                              capture_output=True, text=True, check=True)
+
+    run("init", "-q")
+    (root / "f.txt").write_text("seed\n")
+    run("add", "f.txt")
+    run("commit", "-q", "-m", "seed")
+    run("tag", tag)
+    for i in range(3):
+        (root / "f.txt").write_text("c%d\n" % i)
+        run("add", "f.txt")
+        run("commit", "-q", "-m", "c%d" % i)
+    return root
+
+
+def git_config(root: Path, key: str, value: str) -> None:
+    subprocess.run(["git", "config", key, value], cwd=str(root),
+                   capture_output=True, text=True, check=True)
+
+
+def test_abbreviation_cannot_diverge() -> None:
+    """(1) A default 7-character git abbreviation cannot diverge from the
+    8-character firmware abbreviation."""
+    report("the 7-character form git produces by default is REJECTED as "
+           "non-canonical",
+           "not a canonical revision" in expect_fail(
+               canon.validate_canonical, SHORT_REV))
+    report("the 8-character canonical form is accepted",
+           canon.validate_canonical(CANONICAL_REV) is None)
+
+    with tempfile.TemporaryDirectory(prefix="nx-canon-abbrev-") as tmp:
+        repo = make_git_repo(Path(tmp))
+        default = subprocess.run(["git", "describe", "--tags", "--always"],
+                                 cwd=tmp, capture_output=True,
+                                 text=True).stdout.strip()
+        canonical = canon.canonical_revision(repo)
+        report("the canonical revision is always exactly %d hex characters, "
+               "whatever git's own default produced (%r)"
+               % (canon.CANONICAL_ABBREV, default),
+               canon.CANONICAL_REVISION_RE.match(canonical) is not None,
+               canonical)
+        report("the canonical describe pins --abbrev explicitly, so neither "
+               "side may fall back on git's default",
+               canon.CANONICAL_DESCRIBE_ARGS[-1] ==
+               "--abbrev=%d" % canon.CANONICAL_ABBREV)
+
+        # Force the exact divergence that shipped: same commit, two lengths.
+        seven = subprocess.run(
+            ["git", "describe", "--tags", "--long", "--always", "--abbrev=7"],
+            cwd=tmp, capture_output=True, text=True).stdout.strip()
+        eight = subprocess.run(
+            ["git", "describe", "--tags", "--long", "--always", "--abbrev=8"],
+            cwd=tmp, capture_output=True, text=True).stdout.strip()
+        report("git really does render one commit at two lengths",
+               seven != eight and eight.startswith(seven),
+               "%s vs %s" % (seven, eight))
+        report("only the 8-character rendering is canonical",
+               canonical == eight and
+               "not a canonical revision" in expect_fail(
+                   canon.validate_canonical, seven))
+
+
+def test_changing_minimum_abbreviation_length() -> None:
+    """(2) Repositories whose minimum-unique abbreviation length changes still
+    produce the same canonical revision."""
+    with tempfile.TemporaryDirectory(prefix="nx-canon-minlen-") as tmp:
+        repo = make_git_repo(Path(tmp))
+        baseline = canon.canonical_revision(repo)
+        commit = canon.full_commit(repo)
+        results = {}
+        for setting in ("auto", "4", "7", "8", "10", "16", "40"):
+            git_config(repo, "core.abbrev", setting)
+            results[setting] = canon.canonical_revision(repo)
+        git_config(repo, "core.abbrev", "auto")
+
+        report("core.abbrev has no effect on the canonical revision "
+               "(%d distinct value across %d settings)"
+               % (len(set(results.values())), len(results)),
+               set(results.values()) == {baseline},
+               json.dumps(results))
+        report("the canonical hash is the commit's first %d characters"
+               % canon.CANONICAL_ABBREV,
+               canon.revision_matches_commit(baseline, commit),
+               "%s vs %s" % (baseline, commit))
+        report("the canonical revision never carries -dirty",
+               "-dirty" not in baseline)
+
+
+def test_one_revision_reaches_both_sides() -> None:
+    """(3) The firmware build and the web version generator receive the exact
+    same supplied revision — neither derives its own."""
+    b101 = _load("build_time_observation_pilot")
+    for label, mod in (("B10.2", pre), ("B10.1", b101)):
+        cmd = mod.build_command("/repo", "/work", CANONICAL_REV)
+        report("the %s firmware build is given -DPROJECT_VER=%s"
+               % (label, CANONICAL_REV),
+               '-DPROJECT_VER="%s"' % CANONICAL_REV in cmd, cmd)
+
+    class _Result:
+        returncode = 0
+
+    for label, mod in (("B10.2", pre), ("B10.1", b101)):
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append((argv, kw.get("env")))
+            return _Result()
+
+        real_run = mod.subprocess.run
+        mod.subprocess.run = fake_run
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                try:
+                    mod.build_frontend(REPO, CANONICAL_REV, npm_install="skip")
+                except Exception:
+                    pass  # the fake build produces no dist; the env is the point
+        finally:
+            mod.subprocess.run = real_run
+        supplied = [e.get(canon.REVISION_ENV) for _, e in calls if e is not None]
+        report("the %s web build is given %s=%s"
+               % (label, canon.REVISION_ENV, CANONICAL_REV),
+               CANONICAL_REV in supplied, str(supplied))
+
+    js = (REPO / "main" / "http_server" / "axe-os"
+          / "generate-version.js").read_text(encoding="utf-8")
+    report("generate-version.js honours the supplied canonical revision",
+           canon.REVISION_ENV in js)
+    report("generate-version.js pins --abbrev explicitly in its fallback",
+           "--abbrev=%d" % canon.CANONICAL_ABBREV in js)
+    report("generate-version.js no longer uses the bare describe it shipped "
+           "with",
+           "git describe --tags --always --dirty" not in js)
+
+    cml = (REPO / "CMakeLists.txt").read_text(encoding="utf-8")
+    report("the project CMakeLists pins PROJECT_VER so a plain idf.py build "
+           "cannot choose git's default either",
+           "--abbrev=%d" % canon.CANONICAL_ABBREV in cml and
+           "if(NOT DEFINED PROJECT_VER)" in cml)
+    report("the project CMakeLists also honours a supplied revision",
+           canon.REVISION_ENV in cml)
+
+
+def test_prefix_equivalent_revisions_are_rejected() -> None:
+    """(4) The package gate rejects prefix-equivalent but string-different
+    revisions. A device compares strings, so a shared prefix is not a match."""
+    report("the two renderings really are prefix-equivalent and really are "
+           "different strings",
+           CANONICAL_REV.startswith(SHORT_REV) and CANONICAL_REV != SHORT_REV)
+
+    b101 = _load("build_time_observation_pilot")
+    with tempfile.TemporaryDirectory(prefix="nx-canon-prefix-") as tmp:
+        b = Path(tmp)
+        for label, mod, err in (("B10.2", pre, pre.PreflightError),
+                                ("B10.1", b101, b101.PilotError)):
+            make_app_bin(b / "esp-miner.bin", CANONICAL_REV)
+            make_www_bin(b / "www.bin", SHORT_REV)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    mod.verify_release_pair(b, CANONICAL_REV)
+                caught = ""
+            except err as exc:
+                caught = str(exc)
+            report("the %s gate rejects firmware %s paired with web %s"
+                   % (label, CANONICAL_REV, SHORT_REV),
+                   "BOOT PAIR MISMATCH" in caught, caught)
+
+            make_app_bin(b / "esp-miner.bin", SHORT_REV)
+            make_www_bin(b / "www.bin", CANONICAL_REV)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    mod.verify_release_pair(b, CANONICAL_REV)
+                caught = ""
+            except err as exc:
+                caught = str(exc)
+            report("the %s gate rejects the mirrored pair too" % label,
+                   "BOOT PAIR MISMATCH" in caught, caught)
+
+            make_app_bin(b / "esp-miner.bin", SHORT_REV)
+            make_www_bin(b / "www.bin", SHORT_REV)
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    mod.verify_release_pair(b, SHORT_REV)
+                caught = ""
+            except err as exc:
+                caught = str(exc)
+            report("the %s gate refuses even a MATCHED pair when the shape is "
+                   "not canonical (both %s)" % (label, SHORT_REV),
+                   "not canonical" in caught, caught)
+
+    src = _source_of(pre, "verify_release_pair")
+    report("the pair gate performs no prefix comparison",
+           "startswith" not in src and "[:8]" not in src)
+    report("the pair gate compares no checksums",
+           "sha256" not in src.lower())
+
+
+def test_dirty_identities_are_rejected() -> None:
+    """(5) Dirty identities are rejected — no package may be built from an
+    uncommitted tree, and no built image may embed a dirty identity."""
+    b101 = _load("build_time_observation_pilot")
+    with tempfile.TemporaryDirectory(prefix="nx-canon-dirty-") as tmp:
+        repo = make_git_repo(Path(tmp))
+        report("a clean throwaway repository reports clean",
+               canon.working_tree_dirty(repo) is False)
+        (repo / "untracked.txt").write_text("x\n")
+        report("an untracked file makes the tree dirty (git status "
+               "--porcelain, which describe --dirty missed on this repository)",
+               canon.working_tree_dirty(repo) is True)
+        for label, mod, err in (("B10.2", pre, pre.PreflightError),
+                                ("B10.1", b101, b101.PilotError)):
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    mod.repo_state(repo)
+                caught = ""
+            except err as exc:
+                caught = str(exc)
+            report("the %s helper refuses to build from a dirty tree" % label,
+                   "not clean" in caught, caught)
+        (repo / "untracked.txt").unlink()
+        report("removing it makes the tree clean again",
+               canon.working_tree_dirty(repo) is False)
+
+    with tempfile.TemporaryDirectory(prefix="nx-canon-dirtybin-") as tmp:
+        b = Path(tmp)
+        make_app_bin(b / "esp-miner.bin", CANONICAL_REV + "-dirty")
+        make_www_bin(b / "www.bin", CANONICAL_REV)
+        report("a dirty firmware identity is rejected at the pair gate",
+               "dirty" in expect_fail(pre.verify_release_pair, b,
+                                      CANONICAL_REV))
+        make_app_bin(b / "esp-miner.bin", CANONICAL_REV)
+        make_www_bin(b / "www.bin", CANONICAL_REV + "-dirty")
+        report("a dirty web identity is rejected at the pair gate",
+               "dirty" in expect_fail(pre.verify_release_pair, b,
+                                      CANONICAL_REV))
+    report("a -dirty revision can never be canonical",
+           "not a canonical revision" in expect_fail(
+               canon.validate_canonical, CANONICAL_REV + "-dirty"))
+
+
+def test_manifest_records_the_full_commit() -> None:
+    """(6) The manifest's gitCommit stays the full 40-character SHA, recorded
+    separately from the abbreviated display revision."""
+    state = {"commit": FULL_SHA, "describe": CANONICAL_REV, "branch": "b"}
+    pair = {"firmwareRevision": CANONICAL_REV, "webRevision": CANONICAL_REV}
+    m = pre.build_manifest(state, preflight_defines(), {"esp-miner.bin": 1}, {},
+                           CANONICAL_REV, [], "2026-01-01T00:00:00Z", pair)
+    report("the manifest gitCommit is the full 40-character SHA",
+           m["gitCommit"] == FULL_SHA and len(m["gitCommit"]) == 40)
+    report("the manifest records the canonical display revision separately",
+           m["canonicalGitDescribe"] == CANONICAL_REV and
+           m["gitCommit"] != m["canonicalGitDescribe"])
+    report("the manifest records the pinned abbreviation length",
+           m["canonicalAbbrevLength"] == canon.CANONICAL_ABBREV)
+    report("the manifest records the exact describe command used",
+           m["canonicalDescribeCommand"] ==
+           "git " + " ".join(canon.CANONICAL_DESCRIBE_ARGS))
+    report("the manifest's display revision belongs to its full commit",
+           canon.revision_matches_commit(m["canonicalGitDescribe"],
+                                         m["gitCommit"]))
+    report("the manifest's firmware and web revisions are equal and canonical",
+           m["firmwareRevision"] == m["webRevision"] == CANONICAL_REV and
+           m["releasePairVerified"] is True)
+
+    bad = dict(state)
+    bad["describe"] = SHORT_REV
+    m2 = pre.build_manifest(bad, preflight_defines(), {"esp-miner.bin": 1}, {},
+                            SHORT_REV, [], "2026-01-01T00:00:00Z",
+                            {"firmwareRevision": CANONICAL_REV,
+                             "webRevision": CANONICAL_REV})
+    report("releasePairVerified is False when the embedded pair does not equal "
+           "the recorded revision",
+           m2["releasePairVerified"] is False)
+    report("a truncated commit is refused where a full commit is required",
+           "full 40-character commit" in expect_fail(
+               canon.abbreviated_commit, FULL_SHA[:8]))
+
+
+def test_helpers_share_one_identity_provider() -> None:
+    """(7) The B10.1 and B10.2 helpers use the SAME canonical identity
+    provider — neither carries a private copy of the describe arguments."""
+    b101 = _load("build_time_observation_pilot")
+    report("both helpers resolve the same canonical_revision module file",
+           Path(pre.canon.__file__).resolve() ==
+           Path(b101.canon.__file__).resolve() ==
+           (HERE / "canonical_revision.py").resolve())
+    for attr in ("CANONICAL_ABBREV", "CANONICAL_DESCRIBE_ARGS", "REVISION_ENV"):
+        report("both helpers share %s" % attr,
+               getattr(pre.canon, attr) == getattr(b101.canon, attr))
+    report("both helpers share the canonical revision pattern",
+           pre.canon.CANONICAL_REVISION_RE.pattern ==
+           b101.canon.CANONICAL_REVISION_RE.pattern)
+
+    # A helper must not assemble its own describe invocation. "describe" alone
+    # is not the tell — both helpers legitimately use it as a dict key for the
+    # revision the provider handed them. The tell is a git ARGUMENT literal.
+    describe_flags = {"--tags", "--long", "--always", "--dirty"}
+    for label, path in (("B10.2", HERE / "build_store_preflight.py"),
+                        ("B10.1", HERE / "build_time_observation_pilot.py")):
+        literals = {s.strip() for s in code_string_literals(path)}
+        # --abbrev-ref is `rev-parse --abbrev-ref HEAD` (the branch name); it
+        # chooses no hash length and is not part of this contract.
+        private = (literals & describe_flags) | {
+            s for s in literals
+            if s.startswith("--abbrev") and s != "--abbrev-ref"}
+        report("the %s helper assembles no private git describe invocation"
+               % label,
+               not private, str(sorted(private)))
+        report("the %s helper only uses 'describe' as the provider's result key"
+               % label,
+               "describe" not in literals or
+               'state["describe"]' in path.read_text(encoding="utf-8"))
+        src = path.read_text(encoding="utf-8")
+        report("the %s helper obtains its identity through the provider"
+               % label,
+               "canon.canonical_revision(" in src and
+               "canon.full_commit(" in src)
+        report("the %s helper decides dirtiness through the provider" % label,
+               "canon.working_tree_dirty(" in src)
+
+
+def test_release_exporter_cannot_drift() -> None:
+    """(8) tools/release/export_release.py cannot drift from the pilot helpers:
+    it derives no revision of its own and compares by exact string equality."""
+    exp_path = REPO / "tools" / "release" / "export_release.py"
+    spec = importlib.util.spec_from_file_location("nx_export_release", exp_path)
+    exp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(exp)
+
+    literals = code_string_literals(exp_path)
+    report("the release exporter never invokes `git describe` itself — it can "
+           "only compare what the images already embed",
+           not any("describe" in s for s in literals),
+           str([s for s in literals if "describe" in s]))
+
+    pair_src = _source_of(exp, "check_release_pair")
+    report("the release exporter compares revisions with exact inequality",
+           "fw_revision != web_revision" in pair_src)
+    report("the release exporter uses no prefix comparison",
+           "startswith" not in pair_src and "[:8]" not in pair_src)
+    report("the release exporter's pattern accepts the canonical form",
+           exp.REVISION_PATTERN.fullmatch(CANONICAL_REV.encode()) is not None)
+
+    with tempfile.TemporaryDirectory(prefix="nx-canon-export-") as tmp:
+        b = Path(tmp)
+        make_app_bin(b / "esp-miner.bin", CANONICAL_REV)
+        make_www_bin(b / "www.bin", SHORT_REV)
+        caught = ""
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                exp.check_release_pair(b / "esp-miner.bin", b / "www.bin")
+        except SystemExit as e:
+            caught = "exit %s" % e.code
+        except Exception as e:
+            caught = str(e)
+        report("the release exporter also rejects the prefix-equivalent pair "
+               "that shipped",
+               caught != "", caught)
+
+
 def main() -> int:
     print("Gate B10.2 tooling gates")
     test_out_dir()
@@ -687,6 +1087,14 @@ def main() -> int:
     test_web_output_is_removed_and_tree_unchanged()
     test_revision_pattern_matches_release_tool()
     test_both_helpers_share_the_web_gate()
+    test_abbreviation_cannot_diverge()
+    test_changing_minimum_abbreviation_length()
+    test_one_revision_reaches_both_sides()
+    test_prefix_equivalent_revisions_are_rejected()
+    test_dirty_identities_are_rejected()
+    test_manifest_records_the_full_commit()
+    test_helpers_share_one_identity_provider()
+    test_release_exporter_cannot_drift()
     print(f"\n{PASS} passed, {FAIL} failed")
     return 1 if FAIL else 0
 

@@ -106,6 +106,17 @@ BLOCKING_TOKENS = [t for t in EXPECTED_TOKENS
                    ("TPS_PREFLIGHT_BOOT", "TPS_PREFLIGHT_COMPLETE")]
 
 
+# --------------------------------------------------------------------------
+# THE canonical revision provider — one identity for firmware AND web.
+# --------------------------------------------------------------------------
+import importlib.util as _ilu
+
+_canon_spec = _ilu.spec_from_file_location(
+    "nx_canonical_revision", Path(__file__).resolve().parent / "canonical_revision.py")
+canon = _ilu.module_from_spec(_canon_spec)
+_canon_spec.loader.exec_module(canon)
+
+
 class PreflightError(Exception):
     """A fatal failure. Messages never contain a local path or private value."""
 
@@ -126,15 +137,23 @@ def git(repo: Path, *args: str) -> str:
 
 
 def repo_state(repo: Path) -> dict:
-    if git(repo, "status", "--porcelain"):
-        fail("the working tree is not clean — a preflight artifact must be built from "
-             "an exact committed HEAD. Commit or stash first.")
-    describe = git(repo, "describe", "--tags", "--always", "--dirty")
-    if "-dirty" in describe:
-        fail(f"refusing to build a dirty revision ({describe}).")
+    """The build identity. ONE canonical revision, plus the full commit.
+
+    Dirtiness is decided by `git status --porcelain`, not by
+    `git describe --dirty`: on this repository the host's --dirty did not
+    report a genuinely dirty tree while porcelain did.
+    """
+    if canon.working_tree_dirty(repo):
+        fail("the working tree is not clean — an artifact must be built from an "
+             "exact committed HEAD. Commit or stash first.")
+    try:
+        commit = canon.full_commit(repo)
+        describe = canon.canonical_revision(repo)
+    except canon.RevisionError as exc:
+        fail(str(exc))
     return {
-        "commit": git(repo, "rev-parse", "HEAD"),
-        "describe": describe,
+        "commit": commit,          # full 40 characters, never abbreviated
+        "describe": describe,      # the ONE canonical display revision
         "branch": git(repo, "rev-parse", "--abbrev-ref", "HEAD"),
     }
 
@@ -192,15 +211,22 @@ def find_container_runtime() -> str:
     raise AssertionError("unreachable")
 
 
-def build_command(repo_path: str, work_path: str) -> str:
+def build_command(repo_path: str, work_path: str, revision: str) -> str:
     defaults = f"{repo_path}/sdkconfig.defaults;{work_path}/preflight.sdkconfig.defaults"
+    # -DPROJECT_VER pins the firmware identity to the ONE canonical
+    # revision. Without it ESP-IDF calls git_describe() with no --abbrev
+    # and the container's git picks its own length, which is how the
+    # firmware ended up 8 hex characters while the host-built web image
+    # was 7 — an exact-string BOOT PAIR MISMATCH on a real device.
     return (f"idf.py -B {work_path}/build -DSDKCONFIG={work_path}/sdkconfig "
+            f'-DPROJECT_VER="{revision}" '
             f'-DSDKCONFIG_DEFAULTS="{defaults}" set-target esp32s3 build')
 
 
-def run_build(repo: Path, work: Path, image: str, native: bool) -> None:
+def run_build(repo: Path, work: Path, image: str, native: bool,
+              revision: str) -> None:
     if native:
-        proc = subprocess.run(["bash", "-lc", build_command(str(repo), str(work))],
+        proc = subprocess.run(["bash", "-lc", build_command(str(repo), str(work), revision)],
                               cwd=str(repo), env={**os.environ, "GITHUB_ACTIONS": "true"})
         if proc.returncode != 0:
             fail(f"preflight build failed (exit {proc.returncode})")
@@ -210,7 +236,7 @@ def run_build(repo: Path, work: Path, image: str, native: bool) -> None:
     inner = (f"git config --global --add safe.directory {CONTAINER_REPO} && "
              "git config --global core.autocrlf true && "
              "git config --global core.filemode false && "
-             + build_command(CONTAINER_REPO, CONTAINER_WORK))
+             + build_command(CONTAINER_REPO, CONTAINER_WORK, revision))
     cmd = [runtime, "run", "--rm",
            "-v", f"{repo}:{CONTAINER_REPO}:rw",
            "-v", f"{work}:{CONTAINER_WORK}:rw",
@@ -376,8 +402,12 @@ def build_frontend(repo: Path, describe: str, npm_install: str = "ci") -> str:
         print(f"building the web UI: npm {npm_install}")
         if subprocess.run([npm, npm_install], cwd=str(web)).returncode != 0:
             fail(f"npm {npm_install} failed")
+
+    # Hand generate-version.js the EXACT canonical revision the firmware build
+    # also receives, so neither side derives its own abbreviation.
+    env = {**os.environ, canon.REVISION_ENV: describe}
     print("building the web UI: npm run build (production)")
-    if subprocess.run([npm, "run", "build"], cwd=str(web)).returncode != 0:
+    if subprocess.run([npm, "run", "build"], cwd=str(web), env=env).returncode != 0:
         fail("the production web build failed")
 
     version_txt = repo / WEB_DIST_INNER / "version.txt"
@@ -430,12 +460,26 @@ def verify_release_pair(build: Path, describe: str) -> dict:
         fail(f"the built firmware embeds a dirty identity ({fw})")
     if "-dirty" in web:
         fail(f"the generated web image embeds a dirty identity ({web})")
+
+    # EXACT STRING EQUALITY, in both directions, against the ONE canonical
+    # revision. Never a prefix test: 'v2.14.2-70-g34a5150' is a prefix of
+    # 'v2.14.2-70-g34a51508' and names the same commit, yet the device compares
+    # strings and reports BOOT PAIR MISMATCH.
     if fw != web:
         fail(f"BOOT PAIR MISMATCH would ship: firmware '{fw}' != web '{web}'")
     if fw != describe:
         fail(f"the built firmware '{fw}' does not match HEAD '{describe}'")
     if web != describe:
         fail(f"the generated web image '{web}' does not match HEAD '{describe}'")
+
+    # Both sides agreeing is necessary but not sufficient: they could agree on a
+    # non-canonical shape (for example if -DPROJECT_VER were ever dropped and
+    # both fell back on git's default abbreviation). Pin the shape too.
+    for label, value in (("firmware", fw), ("web", web)):
+        try:
+            canon.validate_canonical(value)
+        except canon.RevisionError as exc:
+            fail(f"the {label} identity is not canonical: {exc}")
     return {"firmwareRevision": fw, "webRevision": web}
 
 
@@ -485,8 +529,13 @@ def build_manifest(state: dict, flags: dict, sizes: dict, symbols: dict,
         "targetDevice": "Gamma",
         "targetBoard": "601",
         "targetAsic": "BM1370",
+        # The full 40-character commit, recorded SEPARATELY and never
+        # abbreviated. The canonical revision below is a display identity only.
         "gitCommit": state["commit"],
         "gitDescribe": state["describe"],
+        "canonicalGitDescribe": state["describe"],
+        "canonicalAbbrevLength": canon.CANONICAL_ABBREV,
+        "canonicalDescribeCommand": "git " + " ".join(canon.CANONICAL_DESCRIBE_ARGS),
         "firmwareVersion": fw_version,
         # The two EMBEDDED identities, extracted from the generated binaries.
         # They are the pair a device compares at boot; a matching SHA-256 says
@@ -599,7 +648,7 @@ def main() -> int:
         web_revision = build_frontend(repo, state["describe"], args.npm_install)
         print(f"web UI built fresh at {web_revision}")
 
-        run_build(repo, work, args.idf_image, native)
+        run_build(repo, work, args.idf_image, native, state["describe"])
         build = work / "build"
         flags = verify_build_config(parse_sdkconfig_h(build / "config" / "sdkconfig.h"))
         symbols = verify_symbols(list_symbols(build / "esp-miner.elf", work,

@@ -345,7 +345,9 @@ def test_manifest() -> None:
 # Extensions of the local build files the helper legitimately names. Anything
 # else that parses as a usable trusted-time source would be a baked-in server.
 BUILD_FILE_SUFFIXES = {"bin", "elf", "h", "json", "txt", "defaults", "py", "log",
-                       "sh", "cvs", "map", "csv", "md"}
+                       "sh", "cvs", "map", "csv", "md",
+                       # local executable names (npm.cmd on Windows), not hosts
+                       "cmd", "exe", "bat", "js"}
 
 STRING_LITERAL = re.compile(r"""(?:'([^'\n]*)'|"([^"\n]*)")""")
 VERSION_LIKE = re.compile(r"^v?\d+\.\d+(\.\d+)?([.\-][\w\-]+)*$")
@@ -380,6 +382,13 @@ OWNER_LOCAL_PATH = re.compile(
     r"[A-Za-z]:[\\/](?:" + "|".join(_WIN_ROOTS) + r")"
     r"|/home/[a-z]|/Users/[A-Za-z]|" + _LOCAL_APP_DIR)
 
+# The owner's artifact destination, matched only in a path context: either the
+# "Build Artifacts" directory name, or "Firmware" adjacent to a separator.
+ARTIFACT_DIR_PATH = re.compile(
+    r"Build\s+Artifacts"
+    r"|[\\/]\s*Firmware\b"
+    r"|\bFirmware\s*[\\/]")
+
 # Every file this gate intends to commit, relative to the repository root.
 COMMITTED_FILES = (
     "components/pool_session_runtime/CMakeLists.txt",
@@ -412,8 +421,23 @@ def test_no_repo_paths_in_helper() -> None:
     text = (HERE / "build_time_observation_pilot.py").read_text(encoding="utf-8")
     report("the helper hardcodes no owner-local path",
            OWNER_LOCAL_PATH.search(text) is None)
+    # The owner's artifact directory looks like
+    #   <root>\NeuralAxe Build Artifacts\Firmware\...
+    # Match it in a PATH context. A bare capitalised "Firmware" is ordinary
+    # English ("Firmware and web must both be...") and flagging it would make
+    # the scanner fire on prose rather than on a hardcoded destination.
     report("the helper hardcodes no artifact directory",
-           "NeuralAxe Build Artifacts" not in text and "Firmware" not in text)
+           not ARTIFACT_DIR_PATH.search(text),
+           str(sorted({m.group(0) for m in ARTIFACT_DIR_PATH.finditer(text)})))
+    # The scanner must still catch the real thing.
+    report("the artifact-directory scanner still detects a real hardcoded path",
+           all(ARTIFACT_DIR_PATH.search(s) for s in (
+               r'out = "E:\\NeuralAxe Build Artifacts\\Firmware\\b101"',
+               'out = "/mnt/d/NeuralAxe Build Artifacts/Firmware"',
+               'out = "artifacts/Firmware/"')))
+    report("the artifact-directory scanner does not fire on prose",
+           not ARTIFACT_DIR_PATH.search(
+               '"""THE gate. Firmware and web must both be the expected."""'))
 
     # Provider-neutral: instead of naming public NTP services (which would read
     # like a suggestion list), assert that NO string literal in the helper is a
