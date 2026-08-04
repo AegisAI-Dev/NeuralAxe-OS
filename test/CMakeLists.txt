@@ -29,14 +29,25 @@ set(EXTRA_COMPONENT_DIRS "../components")
 #       pool_session_execution pool_session_api pool_session_preflight" build
 #   idf.py -B <dir2> -DSDKCONFIG=<sdk2> -DTEST_COMPONENTS="tuning_profile \
 #       tuning_store local_schedule weather_client weather_runtime \
-#       weather_source_policy" build
+#       weather_source_policy weather_pilot_diag mutation_observability" build
 #
-set(TEST_COMPONENTS "stratum asic thermal_control pool_session pool_time pool_session_store pool_session_recovery pool_operation_coordinator pool_session_runtime pool_session_execution pool_session_api pool_session_preflight tuning_profile tuning_store local_schedule weather_client weather_runtime weather_source_policy" CACHE STRING "List of components to test")
+set(TEST_COMPONENTS "stratum asic thermal_control pool_session pool_time pool_session_store pool_session_recovery pool_operation_coordinator pool_session_runtime pool_session_execution pool_session_api pool_session_preflight tuning_profile tuning_store local_schedule weather_client weather_runtime weather_source_policy weather_pilot_diag mutation_observability" CACHE STRING "List of components to test")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 set(IDF_TARGET "esp32s3")
 
 idf_build_set_property(COMPILE_DEFINITIONS "-DCONFIG_ASIC_FREQUENCY=100" APPEND)
+
+# Gate W6.1. The NeuralAxe feature flags live in main/Kconfig.projbuild, which
+# belongs to the FIRMWARE project — this test project has its own main, so no
+# CONFIG_NX_* symbol exists here by default and the counters would compile away
+# untested. Defining it as a build property (exactly as CONFIG_ASIC_FREQUENCY
+# above) turns the counting behaviour on for the test image ONLY. It changes
+# nothing in the firmware build and does not touch test-ci/sdkconfig.defaults,
+# which stays byte-exact. The flag-OFF posture is proven structurally instead,
+# by the ELF symbol audit showing the counters are absent from the default
+# image.
+idf_build_set_property(COMPILE_DEFINITIONS "-DCONFIG_NX_MUTATION_OBSERVABILITY=1" APPEND)
 
 project(unit_test_stratum)

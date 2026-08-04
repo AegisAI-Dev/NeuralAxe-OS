@@ -12,6 +12,7 @@
 #include "vcore.h"
 #include "power.h"
 #include "nvs_config.h"
+#include "nx_mutation_counters.h"
 #include "global_state.h"
 #include "asic_reset.h"
 #include "device_config.h"
@@ -763,6 +764,8 @@ static void tests_done(GlobalState * GLOBAL_STATE, bool isTestPassed)
             GLOBAL_STATE->SELF_TEST_MODULE.finished = logString;
             vTaskDelay(1000 / portTICK_PERIOD_MS);
         }
+        /* Gate W6.1: a restart is about to happen. */
+        nx_mutation_counter_note(NX_MUT_RESTART_REQUEST);
         esp_restart();
     } else {
         // isTestFailed
@@ -784,6 +787,8 @@ static void tests_done(GlobalState * GLOBAL_STATE, bool isTestPassed)
                 nvs_config_set_bool(NVS_CONFIG_SELF_TEST, false);
                 // Wait until NVS is written
                 vTaskDelay(100 / portTICK_PERIOD_MS);
+                /* Gate W6.1: a restart is about to happen. */
+                nx_mutation_counter_note(NX_MUT_RESTART_REQUEST);
                 esp_restart();
             }
         }

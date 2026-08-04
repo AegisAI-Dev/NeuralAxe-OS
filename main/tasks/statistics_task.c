@@ -11,6 +11,9 @@
 #include "global_state.h"
 #include "nvs_config.h"
 #include "connect.h"
+#ifdef CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+#include "nx_weather_pilot_diag_log.h"
+#endif
 
 #define DEFAULT_POLL_RATE 1000
 
@@ -193,6 +196,23 @@ void statistics_task(void * pvParameters)
         } else {
             removeStatisticsBuffer();
         }
+
+#ifdef CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+        // NeuralAxe Gate W6.1: the periodic recommendation-only pilot
+        // observation. Hosted by this ALREADY-EXISTING observation task —
+        // the pilot creates no task, timer or queue of its own, which is a
+        // standing constraint of the whole weather feature.
+        //
+        // Read-only and bounded: it attempts the one-per-boot baseline
+        // capture on monotonic time, re-reads the mutation counters and the
+        // timed-session snapshot, runs the invariant monitor and emits at
+        // most one summary per 60 s. No NVS write, no network request, no
+        // recovery. Its only allocation is the two bounded configuration
+        // strings the nvs_config string getters hand out, each freed on
+        // every path — the same pattern this loop already uses for the
+        // statistics frequency. Without the flag this is not compiled.
+        nx_weather_pilot_observe();
+#endif
 
         vTaskDelayUntil(&taskWakeTime, DEFAULT_POLL_RATE / portTICK_PERIOD_MS); // taskWakeTime is automatically updated
     }

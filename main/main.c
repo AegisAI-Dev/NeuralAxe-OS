@@ -14,6 +14,7 @@
 #include "i2c_bitaxe.h"
 #include "adc.h"
 #include "nvs_config.h"
+#include "nx_mutation_adapter.h"
 #include "self_test.h"
 #include "asic.h"
 #include "bap/bap.h"
@@ -39,6 +40,9 @@
 #include "weather_runtime_boot.h"
 #ifdef CONFIG_NX_WEATHER_SOURCE_POLICY
 #include "nx_weather_source_boot.h"
+#ifdef CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+#include "nx_weather_pilot_diag_log.h"
+#endif
 #endif
 #endif
 
@@ -108,6 +112,18 @@ void app_main(void)
         return;
     }
 
+#ifdef CONFIG_NX_MUTATION_OBSERVABILITY
+    // NeuralAxe Gate W6.1: register the READ-ONLY configuration-fingerprint
+    // provider, immediately after nvs_config_init() so the configuration it
+    // reads is the one this boot actually loaded. It stores one function
+    // pointer and changes nothing.
+    //
+    // The call site is guarded as well as the implementation so the default
+    // image contains not even an empty stub: with the flag off, NOTHING from
+    // the observability component is linked.
+    nx_mutation_adapter_install();
+#endif
+
 #ifdef CONFIG_NX_WEATHER_AWARE_TUNING
     // NeuralAxe Weather-Aware Tuning (Gate W4): an OBSERVATION-ONLY boot
     // notice. It builds the pure weather runtime with NO injected trusted-time
@@ -127,6 +143,12 @@ void app_main(void)
     // transport or store, so it issues zero network requests and authorizes
     // nothing beyond a bounded recommendation.
     nx_weather_source_boot_notice();
+#ifdef CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+    // NeuralAxe Gate W6: the recommendation-only pilot notice. Bounded,
+    // read-only diagnostics plus the invariant monitor. No task, timer,
+    // queue, HTTP route or NVS write; zero network requests; executed=false.
+    nx_weather_pilot_boot_notice();
+#endif
 #endif
 #endif
 

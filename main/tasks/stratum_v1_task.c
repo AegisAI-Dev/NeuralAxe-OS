@@ -4,6 +4,7 @@
 #include "global_state.h"
 #include <lwip/tcpip.h>
 #include "stratum_v1_task.h"
+#include "nx_mutation_counters.h"
 #include "stratum_socket.h"
 #include "protocol_coordinator.h"
 #include "connect.h"
@@ -251,6 +252,10 @@ void stratum_v1_task(void *pvParameters)
                 }
 #endif
                 ESP_LOGE(TAG, "Max retry attempts reached, restarting...");
+                /* Gate W6.1: a restart is about to happen. Recorded like every
+                 * other restart path, so "restart state unchanged" covers the
+                 * whole image and not just the operator-initiated routes. */
+                nx_mutation_counter_note(NX_MUT_RESTART_REQUEST);
                 esp_restart();
             }
             retry_attempts++;

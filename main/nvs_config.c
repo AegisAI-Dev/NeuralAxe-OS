@@ -17,6 +17,105 @@
 #include "theme_api.h"
 #include "scoreboard.h"
 
+#include "nx_mutation_counters.h"
+
+/*
+ * NeuralAxe Gate W6.1 — CONFIGURATION MUTATION BOUNDARY.
+ *
+ * This file is the single owner of persistent configuration, so it is the
+ * correct and only place to observe a configuration change. Runtime activity
+ * cannot reach here: the thermal controller drives fan PWM without writing a
+ * setting, the ASIC ramp and the initial voltage application do not store a
+ * value, and a pool reconnect re-READS configuration rather than writing it.
+ *
+ * Every setter below already returns early when the stored value equals the
+ * new one, so the increment placed after that guard counts ACCEPTED EFFECTIVE
+ * CHANGES only — never a no-op write and never a rejected key or type
+ * mismatch. The change is counted at acceptance into the audited write path;
+ * a later persistence failure does not decrement, because the configuration
+ * the device is running with has already changed.
+ *
+ * Unclassified keys deliberately map to no counter: a pilot only compares the
+ * safety-relevant classes, and inventing a catch-all would turn unrelated
+ * settings (best difficulty, scoreboard, theme, self-test flag, display) into
+ * false violations. Wi-Fi credentials and hostname are likewise unclassified —
+ * outside the pilot's invariant set, and never described by a counter.
+ *
+ * A counter reads "accepted effective changes to configuration in THIS class".
+ * NVS_CONFIG_OVERCLOCK_ENABLED changes the permitted frequency AND voltage
+ * envelope, so it increments both; the counters are compared for equality
+ * against a baseline, never summed into a per-key total.
+ *
+ * A counter says only THAT something changed, never WHO changed it. The
+ * overheat protection path in power_management_task.c writes a permanently
+ * derated frequency, voltage, fan mode and overheat flag: that is a genuine
+ * configuration mutation and it is counted, so the pilot fails loudly and the
+ * owner investigates. Reading a counter as attribution would be wrong — the
+ * invariant being proven is "nothing changed", which is the stronger claim.
+ */
+static void nx_note_config_mutation(NvsConfigKey key)
+{
+    switch (key) {
+    case NVS_CONFIG_ASIC_FREQUENCY:
+        nx_mutation_counter_note(NX_MUT_FREQUENCY_CONFIG); break;
+    case NVS_CONFIG_ASIC_VOLTAGE:
+        nx_mutation_counter_note(NX_MUT_VOLTAGE_CONFIG); break;
+    case NVS_CONFIG_OVERCLOCK_ENABLED:
+        nx_mutation_counter_note(NX_MUT_FREQUENCY_CONFIG);
+        nx_mutation_counter_note(NX_MUT_VOLTAGE_CONFIG); break;
+
+    case NVS_CONFIG_AUTO_FAN_SPEED:
+    case NVS_CONFIG_MANUAL_FAN_SPEED:
+    case NVS_CONFIG_MIN_FAN_SPEED:
+    case NVS_CONFIG_FAN_CURVE:
+    case NVS_CONFIG_FAN_CURVE_HYSTERESIS:
+        nx_mutation_counter_note(NX_MUT_FAN_CONFIG); break;
+
+    case NVS_CONFIG_TEMP_TARGET:
+    case NVS_CONFIG_OVERHEAT_MODE:
+    case NVS_CONFIG_THERMAL_MODE:
+    /* Sensor calibration belongs to the thermal class for the same reason the
+     * target does: it changes the temperature the controller acts on. */
+    case NVS_CONFIG_TEMP_OFFSET:
+    case NVS_CONFIG_EMC_IDEALITY_FACTOR:
+    case NVS_CONFIG_EMC_BETA_COMPENSATION:
+    case NVS_CONFIG_POWER_CONSUMPTION_TARGET:
+        nx_mutation_counter_note(NX_MUT_THERMAL_CONFIG); break;
+
+    case NVS_CONFIG_STRATUM_URL:
+    case NVS_CONFIG_STRATUM_PORT:
+    case NVS_CONFIG_STRATUM_USER:
+    case NVS_CONFIG_STRATUM_PASS:
+    case NVS_CONFIG_STRATUM_DIFFICULTY:
+    case NVS_CONFIG_FALLBACK_STRATUM_URL:
+    case NVS_CONFIG_FALLBACK_STRATUM_PORT:
+    case NVS_CONFIG_FALLBACK_STRATUM_USER:
+    case NVS_CONFIG_FALLBACK_STRATUM_PASS:
+    case NVS_CONFIG_FALLBACK_STRATUM_DIFFICULTY:
+    case NVS_CONFIG_USE_FALLBACK_STRATUM:
+        nx_mutation_counter_note(NX_MUT_POOL_CONFIG); break;
+
+    case NVS_CONFIG_STRATUM_PROTOCOL:
+    case NVS_CONFIG_STRATUM_TLS:
+    case NVS_CONFIG_STRATUM_CERT:
+    case NVS_CONFIG_STRATUM_EXTRANONCE_SUBSCRIBE:
+    case NVS_CONFIG_STRATUM_DECODE_COINBASE_TX:
+    case NVS_CONFIG_SV2_CHANNEL_TYPE:
+    case NVS_CONFIG_SV2_AUTHORITY_PUBKEY:
+    case NVS_CONFIG_FALLBACK_STRATUM_PROTOCOL:
+    case NVS_CONFIG_FALLBACK_STRATUM_TLS:
+    case NVS_CONFIG_FALLBACK_STRATUM_CERT:
+    case NVS_CONFIG_FALLBACK_STRATUM_EXTRANONCE_SUBSCRIBE:
+    case NVS_CONFIG_FALLBACK_STRATUM_DECODE_COINBASE_TX:
+    case NVS_CONFIG_FALLBACK_SV2_CHANNEL_TYPE:
+    case NVS_CONFIG_FALLBACK_SV2_AUTHORITY_PUBKEY:
+        nx_mutation_counter_note(NX_MUT_PROTOCOL_CONFIG); break;
+
+    default:
+        break;   /* not a pilot-relevant configuration class */
+    }
+}
+
 #define NVS_CONFIG_NAMESPACE "main"
 #define NVS_STR_LIMIT (4000 - 1) // See nvs_set_str
 
@@ -493,6 +592,8 @@ void nvs_config_set_string(NvsConfigKey key, const char *value)
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_STR || (setting->value[0].str && strcmp(setting->value[0].str, value) == 0)) return;
 
+    nx_note_config_mutation(key);
+
     ConfigUpdate update = { .key = key, .type = TYPE_STR, .value.str = strdup(value) };
     if (!update.value.str) return;
     xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
@@ -504,6 +605,11 @@ void nvs_config_set_string_indexed(NvsConfigKey key, int index, const char *valu
     if (!setting || setting->type != TYPE_STR || setting->array_size < 1) return;
     if (index < 0 || index >= setting->array_size) return;
     if (setting->value[index].str && strcmp(setting->value[index].str, value) == 0) return;
+
+    /* The only indexed key today is the scoreboard, which the classifier maps
+     * to no counter — this is a no-op now, and closes the hole if an indexed
+     * key ever becomes pilot-relevant. */
+    nx_note_config_mutation(key);
 
     ConfigUpdate update = { .key = key, .type = TYPE_STR, .value.str = strdup(value), .index = index };
     if (!update.value.str) return;
@@ -532,6 +638,8 @@ void nvs_config_set_u16(NvsConfigKey key, uint16_t value)
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_U16 || setting->value[0].u16 == value) return;
 
+    nx_note_config_mutation(key);
+
     ConfigUpdate update = { .key = key, .type = TYPE_U16, .value.u16 = value };
     xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
 }
@@ -557,6 +665,8 @@ void nvs_config_set_i32(NvsConfigKey key, int32_t value)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_I32 || setting->value[0].i32 == value) return;
+
+    nx_note_config_mutation(key);
 
     ConfigUpdate update = { .key = key, .type = TYPE_I32, .value.i32 = value };
     xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
@@ -584,6 +694,8 @@ void nvs_config_set_u64(NvsConfigKey key, uint64_t value)
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_U64 || setting->value[0].u64 == value) return;
 
+    nx_note_config_mutation(key);
+
     ConfigUpdate update = { .key = key, .type = TYPE_U64, .value.u64 = value };
     xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
 }
@@ -610,6 +722,8 @@ void nvs_config_set_float(NvsConfigKey key, float value)
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_FLOAT || fabsf(setting->value[0].f - value) < 0.001f) return;
 
+    nx_note_config_mutation(key);
+
     ConfigUpdate update = { .key = key, .type = TYPE_FLOAT, .value.f = value };
     xQueueSend(nvs_save_queue, &update, portMAX_DELAY);
 }
@@ -635,6 +749,8 @@ void nvs_config_set_bool(NvsConfigKey key, bool value)
 {
     Settings *setting = nvs_config_get_settings(key);
     if (!setting || setting->type != TYPE_BOOL || setting->value[0].b == value) return;
+
+    nx_note_config_mutation(key);
 
     ConfigUpdate update = { .key = key, .type = TYPE_BOOL, .value.b = value };
     xQueueSend(nvs_save_queue, &update, portMAX_DELAY);

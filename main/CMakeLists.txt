@@ -6,6 +6,7 @@ SRCS
     "log_buffer.c"
     "nvs_config.c"
     "nx_execution_glue.c"
+    "nx_mutation_adapter.c"
     "display.c"
     "screen.c"
     "input.c"
@@ -85,6 +86,15 @@ PRIV_REQUIRES
     # which is entirely #ifdef'd out unless CONFIG_NX_WEATHER_SOURCE_POLICY
     # is set, so the default image links nothing from it.
     "weather_source_policy"
+    # Gate W6, unconditional for the same ESP-IDF reason. Its only
+    # main-facing symbol lives in nx_weather_pilot_diag_log.c, which is
+    # entirely #ifdef'd out unless
+    # CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS is set.
+    "weather_pilot_diag"
+    # Gate W6.1 mutation observability. Unconditional for the same ESP-IDF
+    # reason; every increment compiles away without
+    # CONFIG_NX_MUTATION_OBSERVABILITY, so the default image links nothing.
+    "mutation_observability"
     "driver"
     "thermal_control"
     "esp_adc"

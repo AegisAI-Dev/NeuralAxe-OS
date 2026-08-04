@@ -45,6 +45,7 @@
 #include "pool_session_runtime_admission.h"
 #endif
 #include "pool_session_api.h"
+#include "nx_mutation_counters.h"
 
 static const char * TAG = "http_server";
 static const char * CORS_TAG = "CORS";
@@ -931,6 +932,9 @@ static esp_err_t POST_restart(httpd_req_t * req)
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     // Restart the system
+    /* Gate W6.1: an explicit software restart was requested. Counted
+     * here, at the control boundary, because the call does not return. */
+    nx_mutation_counter_note(NX_MUT_RESTART_REQUEST);
     esp_restart();
 
     // This return statement will never be reached, but it's good practice to include it
@@ -1243,6 +1247,11 @@ esp_err_t POST_WWW_update(httpd_req_t * req)
     char buf[1000];
     int remaining = req->content_len;
 
+    /* Gate W6.1: a web-image OTA has passed every fence (auth, AP mode and
+     * the timed-session conflict check) and is now accepted. */
+    nx_mutation_counter_note(NX_MUT_OTA_WEB);
+
+
     const esp_partition_t * www_partition =
         esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, "www");
     if (www_partition == NULL) {
@@ -1344,6 +1353,8 @@ esp_err_t POST_OTA_update(httpd_req_t * req)
     int remaining = req->content_len;
 
     const esp_partition_t * ota_partition = esp_ota_get_next_update_partition(NULL);
+    /* Gate W6.1: a firmware OTA has passed every fence and is accepted. */
+    nx_mutation_counter_note(NX_MUT_OTA_FIRMWARE);
     ESP_ERROR_CHECK(esp_ota_begin(ota_partition, OTA_SIZE_UNKNOWN, &ota_handle));
 
     int chunks = 0;
@@ -1394,6 +1405,9 @@ esp_err_t POST_OTA_update(httpd_req_t * req)
     httpd_resp_sendstr(req, "Firmware update complete, rebooting now!\n");
     ESP_LOGI(TAG, "Restarting System because of Firmware update complete");
     vTaskDelay(1000 / portTICK_PERIOD_MS);
+    /* Gate W6.1: an explicit software restart was requested. Counted
+     * here, at the control boundary, because the call does not return. */
+    nx_mutation_counter_note(NX_MUT_RESTART_REQUEST);
     esp_restart();
 
     return ESP_OK;

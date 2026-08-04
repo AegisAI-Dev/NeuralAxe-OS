@@ -5,6 +5,7 @@
  *****************************************************************************/
 
 #include "stratum_api.h"
+#include "nx_mutation_counters.h"
 #include "cJSON.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -160,6 +161,9 @@ static bool realloc_json_buffer(size_t len)
         fprintf(stderr, "Error: realloc failed in recalloc_sock()\n");
         ESP_LOGI(TAG, "Restarting System because of ERROR: realloc failed in recalloc_sock");
         vTaskDelay(1000 / portTICK_PERIOD_MS);
+        /* Gate W6.1: a restart is about to happen. Every restart path in the
+         * image is recorded, not only the operator-initiated routes. */
+        nx_mutation_counter_note(NX_MUT_RESTART_REQUEST);
         esp_restart();
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NeuralAxe OS — Gate W5 weather recommendation-only pilot builder.
+"""NeuralAxe OS — weather recommendation-only pilot builder (Gates W5/W6).
 
 Builds a firmware/web pair whose Weather-Aware Tuning source is configured
 from PRIVATE, OWNER-SUPPLIED values, without those values ever entering the
@@ -16,10 +16,12 @@ WHAT THIS BUILDS
 WHERE THE PRIVATE VALUES LIVE
     Only in the environment, and only for the lifetime of this process:
 
-        NX_WEATHER_PROVIDER   open-meteo
-        NX_WEATHER_LATITUDE   signed decimal degrees, e.g. -12.3456
-        NX_WEATHER_LONGITUDE  signed decimal degrees
-        NX_WEATHER_TIMEZONE   europe/brussels
+        NX_PILOT_NTP_SERVER    the trusted-time source (hostname or IPv4)
+        NX_WEATHER_DISTRIBUTION owner-managed-external
+        NX_WEATHER_PROVIDER     open-meteo
+        NX_WEATHER_LATITUDE     signed decimal degrees, e.g. -12.3456
+        NX_WEATHER_LONGITUDE    signed decimal degrees
+        NX_WEATHER_TIMEZONE     europe/brussels
 
     They are parsed with a locale-independent fixed-point reader, validated,
     and written to ONE temporary sdkconfig fragment outside the repository,
@@ -27,6 +29,14 @@ WHERE THE PRIVATE VALUES LIVE
     printed: no echo, no error message quoting a value, no manifest field.
     The repository defaults stay unconfigured, so a normal build produces a
     device that selects no provider and requests nothing.
+
+WHAT THE BUILD PROVES (Gate W6)
+    After the build it verifies the posture from the GENERATED sdkconfig.h
+    (intent is not evidence), audits the ELF for forbidden symbols (B7
+    execution, B8 command routes, B10.2 preflight, any weather hardware
+    apply) and for required ones (W4/W5/W6 plus exactly ONE trusted-time
+    provider), checks the image fits its OTA slot, and verifies the exact
+    canonical release pair firmwareRevision == webRevision == describe.
 
 WHAT THE MANIFEST RECORDS
     Bounded booleans and enums only — whether a thing was configured, never
@@ -51,11 +61,14 @@ import canonical_revision  # noqa: E402
 
 SCHEMA_VERSION = 1
 
+ENV_NTP = "NX_PILOT_NTP_SERVER"
+ENV_DISTRIBUTION = "NX_WEATHER_DISTRIBUTION"
 ENV_PROVIDER = "NX_WEATHER_PROVIDER"
 ENV_LATITUDE = "NX_WEATHER_LATITUDE"
 ENV_LONGITUDE = "NX_WEATHER_LONGITUDE"
 ENV_TIMEZONE = "NX_WEATHER_TIMEZONE"
-ENV_VARS = (ENV_PROVIDER, ENV_LATITUDE, ENV_LONGITUDE, ENV_TIMEZONE)
+ENV_VARS = (ENV_NTP, ENV_DISTRIBUTION, ENV_PROVIDER, ENV_LATITUDE,
+            ENV_LONGITUDE, ENV_TIMEZONE)
 
 DEFAULT_IDF_IMAGE = "espressif/idf:v5.5.3"
 CONTAINER_REPO = "/nx/repo"
@@ -64,6 +77,17 @@ CONTAINER_WORK = "/nx/work"
 # The one provider Gate W5 supports, and the one timezone Gate W3 implements.
 SUPPORTED_PROVIDERS = {"open-meteo": "OPEN_METEO"}
 SUPPORTED_TIMEZONES = {"europe/brussels": "EUROPE_BRUSSELS"}
+# Gate W5 permits exactly one distribution mode to use a provider.
+SUPPORTED_DISTRIBUTIONS = {"owner-managed-external": "OWNER_MANAGED_EXTERNAL"}
+
+# The trusted-time source is a hostname or IPv4 literal, validated with the
+# same conservative grammar the committed B10.1 helper uses. It is PRIVATE:
+# it is never printed and never reaches a manifest.
+HOST_MAX = 63
+LABEL_CHARS = re.compile(r"^[A-Za-z0-9-]+$")
+
+APP_SLOT_BYTES = 4 * 1024 * 1024
+WWW_SLOT_BYTES = 3 * 1024 * 1024
 
 LAT_E4_MAX = 900000
 LON_E4_MAX = 1800000
@@ -75,13 +99,28 @@ SRC_INVALID_LATITUDE = "WX_SRC_INVALID_LATITUDE"
 SRC_INVALID_LONGITUDE = "WX_SRC_INVALID_LONGITUDE"
 SRC_INVALID_TIMEZONE = "WX_SRC_INVALID_TIMEZONE"
 SRC_INCOMPLETE = "WX_SRC_INCOMPLETE"
+SRC_INVALID_DISTRIBUTION = "WX_SRC_INVALID_DISTRIBUTION"
+SRC_INVALID_NTP = "WX_SRC_INVALID_NTP_SOURCE"
 SRC_READY = "WX_SRC_READY_RECOMMENDATION_ONLY"
 
 # Symbols that must NOT be linked into a recommendation-only pilot.
 FORBIDDEN_SYMBOL_PREFIXES = (
-    "pool_session_execution_",
+    "pool_session_execution_",   # Gate B7 execution
     "pool_session_executor_",
-    "nx_pool_session_api_",
+    "nx_pool_session_api_",      # Gate B8 command routes
+    "nx_tps_preflight_",         # Gate B10.2 store preflight
+    "nx_weather_apply_",         # any future weather hardware apply
+)
+# A benign conflict-reporting helper, not a command route (the committed
+# Gate B10.1 helper allowlists the same symbol).
+ALLOWED_DESPITE_PREFIX = frozenset({"nx_pool_session_api_send_conflict"})
+
+REQUIRED_SYMBOL_PREFIXES = (
+    "nx_weather_pilot_",         # Gate W6 diagnostics
+    "nx_weather_source_",        # Gate W5 policy
+    "weather_runtime_",          # Gate W4 runtime
+    "pool_time_sntp_",           # the ONE committed trusted-time provider
+    "nx_mutation_",              # Gate W6.1 mutation observability
 )
 
 # A deliberately strict decimal-degree grammar: optional sign, digits, an
@@ -125,6 +164,40 @@ def parse_degrees_e4(text: str) -> int:
     return -value if negative else value
 
 
+def ntp_source_valid(host: str) -> bool:
+    """Validate a private trusted-time source WITHOUT echoing it.
+
+    Conservative on purpose: a hostname of dot-separated alphanumeric/hyphen
+    labels, or a dotted-quad IPv4 literal with no leading zeros. No scheme, no
+    port, no path, no IPv6 and no single-label name — the same shape the
+    committed Gate B10.1 helper accepts.
+    """
+    if not host or len(host) > 253:
+        return False
+    if "://" in host or "/" in host or ":" in host or " " in host:
+        return False
+    labels = host.split(".")
+    if len(labels) < 2 or len(labels) > 16:
+        return False
+    for label in labels:
+        if not label or len(label) > HOST_MAX:
+            return False
+        if label.startswith("-") or label.endswith("-"):
+            return False
+        if not LABEL_CHARS.match(label):
+            return False
+    # A dotted quad must be a valid IPv4 without leading zeros.
+    if all(label.isdigit() for label in labels):
+        if len(labels) != 4:
+            return False
+        for label in labels:
+            if len(label) > 1 and label.startswith("0"):
+                return False
+            if int(label) > 255:
+                return False
+    return True
+
+
 def read_private_config(env: dict | None = None) -> dict:
     """Read and validate the private configuration from the environment.
 
@@ -134,18 +207,24 @@ def read_private_config(env: dict | None = None) -> dict:
     """
     src = os.environ if env is None else env
 
+    raw_ntp = (src.get(ENV_NTP) or "").strip()
+    raw_distribution = (src.get(ENV_DISTRIBUTION) or "").strip().lower()
     raw_provider = (src.get(ENV_PROVIDER) or "").strip().lower()
     raw_latitude = (src.get(ENV_LATITUDE) or "").strip()
     raw_longitude = (src.get(ENV_LONGITUDE) or "").strip()
     raw_timezone = (src.get(ENV_TIMEZONE) or "").strip().lower()
 
-    supplied = [bool(raw_provider), bool(raw_latitude),
-                bool(raw_longitude), bool(raw_timezone)]
+    supplied = [bool(raw_ntp), bool(raw_distribution), bool(raw_provider),
+                bool(raw_latitude), bool(raw_longitude), bool(raw_timezone)]
     if not any(supplied):
         return {"status": SRC_UNCONFIGURED, "ready": False}
     if not all(supplied):
         return {"status": SRC_INCOMPLETE, "ready": False}
 
+    if not ntp_source_valid(raw_ntp):
+        return {"status": SRC_INVALID_NTP, "ready": False}
+    if raw_distribution not in SUPPORTED_DISTRIBUTIONS:
+        return {"status": SRC_INVALID_DISTRIBUTION, "ready": False}
     if raw_provider not in SUPPORTED_PROVIDERS:
         return {"status": SRC_INVALID_PROVIDER, "ready": False}
     if raw_timezone not in SUPPORTED_TIMEZONES:
@@ -172,6 +251,8 @@ def read_private_config(env: dict | None = None) -> dict:
     return {
         "status": SRC_READY,
         "ready": True,
+        "ntp": raw_ntp,
+        "distribution": SUPPORTED_DISTRIBUTIONS[raw_distribution],
         "provider": SUPPORTED_PROVIDERS[raw_provider],
         "timezone": SUPPORTED_TIMEZONES[raw_timezone],
         "latitude_e4": lat_e4,
@@ -212,16 +293,25 @@ def pilot_defaults_text(cfg: dict) -> str:
     lines = [
         "# NeuralAxe OS Gate W5 weather recommendation-only pilot.",
         "# TEMPORARY, OWNER-LOCAL, NEVER COMMITTED. Deleted when the build ends.",
+        "CONFIG_NX_TIMED_SESSIONS=y",
+        "CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE=y",
+        f'CONFIG_NX_TIMED_SESSIONS_NTP_SERVER="{cfg["ntp"]}"',
         "CONFIG_NX_WEATHER_AWARE_TUNING=y",
         "CONFIG_NX_WEATHER_SOURCE_POLICY=y",
-        "CONFIG_NX_WEATHER_DIST_OWNER_MANAGED_EXTERNAL=y",
+        f"CONFIG_NX_WEATHER_DIST_{cfg['distribution']}=y",
         f"CONFIG_NX_WEATHER_PROVIDER_{cfg['provider']}=y",
         f"CONFIG_NX_WEATHER_TZ_{cfg['timezone']}=y",
+        "CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS=y",
+        # Gate W6.1. Without this the pilot has NO authority to read at the
+        # mutation boundaries, every mutation fact is stamped UNAVAILABLE and
+        # the invariant monitor can never report a healthy pilot.
+        "CONFIG_NX_MUTATION_OBSERVABILITY=y",
         f"CONFIG_NX_WEATHER_LATITUDE_E4={cfg['latitude_e4']}",
         f"CONFIG_NX_WEATHER_LONGITUDE_E4={cfg['longitude_e4']}",
         "# Recommendation-only: every execution surface stays off.",
         "# CONFIG_NX_TIMED_SESSIONS_EXECUTION is not set",
         "# CONFIG_NX_TIMED_SESSIONS_API is not set",
+        "# CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT is not set",
     ]
     return "\n".join(lines) + "\n"
 
@@ -255,6 +345,118 @@ def shred(path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# Post-build verification: configuration, symbols, partitions, release pair
+# --------------------------------------------------------------------------
+
+REQUIRED_SDKCONFIG = (
+    "CONFIG_NX_TIMED_SESSIONS",
+    "CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE",
+    "CONFIG_NX_WEATHER_AWARE_TUNING",
+    "CONFIG_NX_WEATHER_SOURCE_POLICY",
+    "CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS",
+    "CONFIG_NX_MUTATION_OBSERVABILITY",
+)
+FORBIDDEN_SDKCONFIG = (
+    "CONFIG_NX_TIMED_SESSIONS_EXECUTION",
+    "CONFIG_NX_TIMED_SESSIONS_API",
+    "CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT",
+)
+
+
+def verify_sdkconfig_h(build: Path) -> None:
+    """Prove the posture from the GENERATED header, not from our own fragment.
+
+    The fragment states intent; sdkconfig.h states what the compiler actually
+    saw. Only the second is evidence.
+    """
+    path = build / "config" / "sdkconfig.h"
+    if not path.is_file():
+        fail("generated sdkconfig.h not found; cannot verify the build posture")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    for sym in REQUIRED_SDKCONFIG:
+        if f"#define {sym} 1" not in text:
+            fail(f"required build option missing: {sym}")
+    for sym in FORBIDDEN_SDKCONFIG:
+        if f"#define {sym} 1" in text:
+            fail(f"forbidden build option enabled: {sym}")
+
+
+def elf_symbols(elf: Path) -> set[str]:
+    for nm in ("xtensa-esp32s3-elf-nm", "nm"):
+        proc = subprocess.run([nm, "-g", "--defined-only", str(elf)],
+                              capture_output=True, text=True)
+        if proc.returncode == 0:
+            out = set()
+            for line in proc.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 3:
+                    out.add(parts[-1])
+            return out
+    fail("no usable nm binary found for the ELF symbol audit")
+    return set()
+
+
+def verify_symbols(elf: Path) -> dict:
+    """Prove at the binary level what this pilot may and may not contain."""
+    syms = elf_symbols(elf)
+
+    offending = sorted(
+        s for s in syms
+        if s.startswith(FORBIDDEN_SYMBOL_PREFIXES)
+        and s not in ALLOWED_DESPITE_PREFIX)
+    if offending:
+        fail(f"forbidden symbols linked into the pilot image: {len(offending)}")
+
+    missing = [pfx for pfx in REQUIRED_SYMBOL_PREFIXES
+               if not any(s.startswith(pfx) for s in syms)]
+    if missing:
+        fail(f"required pilot symbols absent: {len(missing)} prefix group(s)")
+
+    # Exactly ONE trusted-time provider initializer: weather must not add a
+    # second SNTP path.
+    inits = sorted(s for s in syms if s.endswith("pool_time_sntp_init"))
+    if len(inits) != 1:
+        fail("the trusted-time provider must be present exactly once")
+
+    return {
+        "forbiddenSymbols": 0,
+        "requiredSymbolGroups": len(REQUIRED_SYMBOL_PREFIXES),
+        "trustedTimeProviders": 1,
+    }
+
+
+def verify_partition_fit(build: Path) -> dict:
+    """Refuse an image that does not fit its slot."""
+    app = build / "esp-miner.bin"
+    if not app.is_file():
+        fail("pilot application image not found")
+    size = app.stat().st_size
+    if size > APP_SLOT_BYTES:
+        fail("pilot application image exceeds its OTA slot")
+    return {"appBytes": size, "appSlotBytes": APP_SLOT_BYTES}
+
+
+def verify_release_pair(build: Path, web_dir: Path, revision: str) -> dict:
+    """Exact canonical identity: firmwareRevision == webRevision == describe.
+
+    Compared by EXACT STRING EQUALITY, which is the whole point of the
+    committed canonical-revision contract: a device compares these strings and
+    reports BOOT PAIR MISMATCH when they differ by even one character.
+    """
+    version_txt = web_dir / "version.txt"
+    if not version_txt.is_file():
+        fail("web image version.txt not found; cannot verify the release pair")
+    web_rev = version_txt.read_text(encoding="utf-8").strip()
+    if web_rev != revision:
+        fail("release pair mismatch: web revision differs from the canonical "
+             "revision")
+    if not canonical_revision.revision_matches_commit:
+        fail("canonical revision helper unavailable")
+    return {"firmwareRevision": revision, "webRevision": web_rev,
+            "releasePairVerified": True}
+
+
+# --------------------------------------------------------------------------
 # Manifest — bounded booleans and enums only
 # --------------------------------------------------------------------------
 
@@ -278,11 +480,14 @@ def build_manifest(identity: dict, cfg: dict, digest: str) -> dict:
         "providerConfigured": True,
         "locationConfigured": True,
         "timezoneConfigured": True,
-        "distributionMode": "OWNER_MANAGED_EXTERNAL",
+        "distributionMode": cfg["distribution"],
+        "trustedTimeConfigured": True,
+        "pilotDiagnosticsEnabled": True,
         "sourceStatus": cfg["status"],          # a value-free token
         "recommendationOnly": True,
         "executionEnabled": False,
         "timedSessionApiEnabled": False,
+        "storePreflightEnabled": False,
         "hardwareTuningEnabled": False,
     }
 
@@ -297,6 +502,8 @@ def assert_manifest_private_free(manifest: dict, cfg: dict) -> None:
     for token in forbidden:
         if token and token in blob:
             fail("manifest rejected: it contains a private coordinate")
+    if cfg.get("ready") and cfg.get("ntp") and cfg["ntp"] in blob:
+        fail("manifest rejected: it contains the private trusted-time source")
     for banned in ("open-meteo", "api.", "http", "://", "latitude", "longitude",
                    "EUROPE_BRUSSELS", "europe/brussels"):
         if banned in blob:

@@ -23,8 +23,17 @@ SYN_LAT_E4 = 12345
 SYN_LON_E4 = -67890
 
 
-def env(provider="open-meteo", lat=SYN_LAT, lon=SYN_LON, tz="europe/brussels"):
+SYN_NTP = "time.example.org"
+SYN_DIST = "owner-managed-external"
+
+
+def env(provider="open-meteo", lat=SYN_LAT, lon=SYN_LON, tz="europe/brussels",
+        ntp=SYN_NTP, dist=SYN_DIST):
     out = {}
+    if ntp is not None:
+        out[w5.ENV_NTP] = ntp
+    if dist is not None:
+        out[w5.ENV_DISTRIBUTION] = dist
     if provider is not None:
         out[w5.ENV_PROVIDER] = provider
     if lat is not None:
@@ -70,8 +79,8 @@ class ConfigValidation(unittest.TestCase):
         self.assertFalse(cfg["ready"])
 
     def test_partial_is_incomplete(self):
-        for missing in (w5.ENV_PROVIDER, w5.ENV_LATITUDE,
-                        w5.ENV_LONGITUDE, w5.ENV_TIMEZONE):
+        for missing in (w5.ENV_NTP, w5.ENV_DISTRIBUTION, w5.ENV_PROVIDER,
+                        w5.ENV_LATITUDE, w5.ENV_LONGITUDE, w5.ENV_TIMEZONE):
             e = env()
             del e[missing]
             cfg = w5.read_private_config(e)
@@ -176,7 +185,8 @@ class ManifestPrivacy(unittest.TestCase):
                       "12345", "67890"):
             self.assertNotIn(token, blob)
         for token in ("open-meteo", "api.", "http", "://", "latitude",
-                      "longitude", "EUROPE_BRUSSELS", "Kalmthout", "city"):
+                      "longitude", "EUROPE_BRUSSELS", "Kalmthout", "city",
+                      SYN_NTP, "time.example"):
             self.assertNotIn(token, blob)
         for var in w5.ENV_VARS:
             self.assertNotIn(var, blob)
@@ -210,7 +220,7 @@ class CliSurface(unittest.TestCase):
             self.assertIn(w5.SRC_READY, out)
             # The values must never be echoed.
             for token in (SYN_LAT, SYN_LON, str(SYN_LAT_E4), str(SYN_LON_E4),
-                          "open-meteo", "europe/brussels"):
+                          "open-meteo", "europe/brussels", SYN_NTP):
                 self.assertNotIn(token, out)
         finally:
             for k, v in saved.items():
@@ -269,8 +279,195 @@ class SourceHygiene(unittest.TestCase):
 
     def test_helper_declares_the_expected_environment_names(self):
         self.assertEqual(w5.ENV_VARS,
-                         ("NX_WEATHER_PROVIDER", "NX_WEATHER_LATITUDE",
+                         ("NX_PILOT_NTP_SERVER", "NX_WEATHER_DISTRIBUTION",
+                          "NX_WEATHER_PROVIDER", "NX_WEATHER_LATITUDE",
                           "NX_WEATHER_LONGITUDE", "NX_WEATHER_TIMEZONE"))
+
+
+class TrustedTimeSource(unittest.TestCase):
+    """Gate W6 adds a private trusted-time source to the pilot inputs."""
+
+    def test_accepts_plausible_hostnames_and_ipv4(self):
+        for good in ("time.example.org", "ntp.example.com", "a-b.example.net",
+                     "192.0.2.10", "10.1.2.3"):
+            self.assertTrue(w5.ntp_source_valid(good), good)
+
+    def test_rejects_schemes_ports_paths_and_odd_forms(self):
+        for bad in ("", "localhost", "http://time.example.org",
+                    "time.example.org:123", "time.example.org/path",
+                    "-lead.example.org", "trail-.example.org",
+                    "time..example.org", "2001:db8::1", "192.0.2.010",
+                    "256.0.0.1", "1.2.3", "time example org"):
+            self.assertFalse(w5.ntp_source_valid(bad), bad)
+
+    def test_missing_or_invalid_ntp_is_reported_without_the_value(self):
+        cfg = w5.read_private_config(env(ntp=None))
+        self.assertEqual(cfg["status"], w5.SRC_INCOMPLETE)
+        cfg = w5.read_private_config(env(ntp="http://time.example.org"))
+        self.assertEqual(cfg["status"], w5.SRC_INVALID_NTP)
+        self.assertFalse(any(ch.isdigit() for ch in w5.SRC_INVALID_NTP))
+
+    def test_unsupported_distribution_is_rejected(self):
+        self.assertEqual(w5.read_private_config(env(dist="commercial"))["status"],
+                         w5.SRC_INVALID_DISTRIBUTION)
+        self.assertEqual(w5.read_private_config(env(dist="self-hosted"))["status"],
+                         w5.SRC_INVALID_DISTRIBUTION)
+
+
+class PilotPosture(unittest.TestCase):
+    """The fragment must pin the exact recommendation-only pilot posture."""
+
+    IDENT = {"describe": "v0.0.0-0-gdeadbee", "commit": "d" * 40, "branch": "t"}
+
+    def test_fragment_enables_pilot_and_disables_execution_surfaces(self):
+        text = w5.pilot_defaults_text(w5.read_private_config(env()))
+        for required in ("CONFIG_NX_TIMED_SESSIONS=y",
+                         "CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE=y",
+                         "CONFIG_NX_WEATHER_AWARE_TUNING=y",
+                         "CONFIG_NX_WEATHER_SOURCE_POLICY=y",
+                         "CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS=y",
+                         "CONFIG_NX_WEATHER_DIST_OWNER_MANAGED_EXTERNAL=y"):
+            self.assertIn(required, text)
+        for forbidden in ("CONFIG_NX_TIMED_SESSIONS_EXECUTION is not set",
+                          "CONFIG_NX_TIMED_SESSIONS_API is not set",
+                          "CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT is not set"):
+            self.assertIn(forbidden, text)
+
+    def test_fragment_is_the_only_home_of_the_ntp_source(self):
+        cfg = w5.read_private_config(env())
+        self.assertIn(SYN_NTP, w5.pilot_defaults_text(cfg))
+        blob = json.dumps(w5.build_manifest(self.IDENT, cfg, "digest"))
+        self.assertNotIn(SYN_NTP, blob)
+
+    def test_manifest_records_the_pilot_flags(self):
+        cfg = w5.read_private_config(env())
+        m = w5.build_manifest(self.IDENT, cfg, "digest")
+        self.assertTrue(m["trustedTimeConfigured"])
+        self.assertTrue(m["pilotDiagnosticsEnabled"])
+        self.assertTrue(m["recommendationOnly"])
+        self.assertFalse(m["executionEnabled"])
+        self.assertFalse(m["timedSessionApiEnabled"])
+        self.assertFalse(m["storePreflightEnabled"])
+        self.assertFalse(m["hardwareTuningEnabled"])
+        w5.assert_manifest_private_free(m, cfg)
+
+    def test_manifest_guard_rejects_a_leaked_ntp_source(self):
+        cfg = w5.read_private_config(env())
+        bad = w5.build_manifest(self.IDENT, cfg, "digest")
+        bad["timeSource"] = cfg["ntp"]
+        with self.assertRaises(w5.PilotError):
+            w5.assert_manifest_private_free(bad, cfg)
+
+
+class VerificationContracts(unittest.TestCase):
+    """The post-build proofs Gate W6 requires."""
+
+    def test_symbol_sets_are_declared_in_both_directions(self):
+        for pfx in ("pool_session_execution_", "nx_pool_session_api_",
+                    "nx_tps_preflight_", "nx_weather_apply_"):
+            self.assertIn(pfx, w5.FORBIDDEN_SYMBOL_PREFIXES)
+        for pfx in ("nx_weather_pilot_", "nx_weather_source_",
+                    "weather_runtime_", "pool_time_sntp_"):
+            self.assertIn(pfx, w5.REQUIRED_SYMBOL_PREFIXES)
+        self.assertIn("nx_pool_session_api_send_conflict",
+                      w5.ALLOWED_DESPITE_PREFIX)
+
+    def test_sdkconfig_contract_lists_both_directions(self):
+        for sym in ("CONFIG_NX_WEATHER_AWARE_TUNING",
+                    "CONFIG_NX_WEATHER_SOURCE_POLICY",
+                    "CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS",
+                    "CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE"):
+            self.assertIn(sym, w5.REQUIRED_SDKCONFIG)
+        for sym in ("CONFIG_NX_TIMED_SESSIONS_EXECUTION",
+                    "CONFIG_NX_TIMED_SESSIONS_API",
+                    "CONFIG_NX_TIMED_SESSIONS_STORE_PREFLIGHT"):
+            self.assertIn(sym, w5.FORBIDDEN_SDKCONFIG)
+
+    def test_sdkconfig_verification_rejects_a_wrong_posture(self):
+        import shutil
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="nx-w6-test-"))
+        try:
+            cfgdir = work / "config"
+            cfgdir.mkdir(parents=True)
+            ok = "\n".join("#define %s 1" % s for s in w5.REQUIRED_SDKCONFIG)
+            (cfgdir / "sdkconfig.h").write_text(ok, encoding="utf-8")
+            w5.verify_sdkconfig_h(work)
+
+            bad = ok + "\n#define CONFIG_NX_TIMED_SESSIONS_EXECUTION 1"
+            (cfgdir / "sdkconfig.h").write_text(bad, encoding="utf-8")
+            with self.assertRaises(w5.PilotError):
+                w5.verify_sdkconfig_h(work)
+
+            (cfgdir / "sdkconfig.h").write_text("#define UNRELATED 1",
+                                                encoding="utf-8")
+            with self.assertRaises(w5.PilotError):
+                w5.verify_sdkconfig_h(work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_release_pair_requires_exact_string_equality(self):
+        import shutil
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="nx-w6-pair-"))
+        try:
+            web = work / "web"
+            web.mkdir()
+            (web / "version.txt").write_text("v2.14.2-76-gf4aee75\n",
+                                             encoding="utf-8")
+            out = w5.verify_release_pair(work, web, "v2.14.2-76-gf4aee75")
+            self.assertTrue(out["releasePairVerified"])
+            with self.assertRaises(w5.PilotError):
+                w5.verify_release_pair(work, web, "v2.14.2-76-gf4aee76")
+            (web / "version.txt").unlink()
+            with self.assertRaises(w5.PilotError):
+                w5.verify_release_pair(work, web, "v2.14.2-76-gf4aee75")
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    # ---------- Gate W6.1: authoritative mutation observability ----------
+
+    def test_fragment_enables_mutation_observability(self):
+        """Without it the pilot has no authority to read at the mutation
+        boundaries, so every mutation fact is UNAVAILABLE and the monitor can
+        never report a healthy pilot."""
+        text = w5.pilot_defaults_text(w5.read_private_config(env()))
+        self.assertIn("CONFIG_NX_MUTATION_OBSERVABILITY=y", text)
+
+    def test_mutation_observability_is_a_required_build_option(self):
+        self.assertIn("CONFIG_NX_MUTATION_OBSERVABILITY", w5.REQUIRED_SDKCONFIG)
+        self.assertNotIn("CONFIG_NX_MUTATION_OBSERVABILITY",
+                         w5.FORBIDDEN_SDKCONFIG)
+
+    def test_sdkconfig_verification_rejects_a_pilot_without_counters(self):
+        import shutil
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="nx-w61-cfg-"))
+        try:
+            cfgdir = work / "config"
+            cfgdir.mkdir()
+            lines = [f"#define {s} 1" for s in w5.REQUIRED_SDKCONFIG]
+            full = chr(10).join(lines)
+            (cfgdir / "sdkconfig.h").write_text(full, encoding="utf-8")
+            w5.verify_sdkconfig_h(work)
+
+            # Exactly one option removed: the counters.
+            without = chr(10).join(
+                x for x in lines
+                if "CONFIG_NX_MUTATION_OBSERVABILITY" not in x)
+            (cfgdir / "sdkconfig.h").write_text(without, encoding="utf-8")
+            with self.assertRaises(w5.PilotError):
+                w5.verify_sdkconfig_h(work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_mutation_symbols_are_required_in_the_pilot_image(self):
+        self.assertIn("nx_mutation_", w5.REQUIRED_SYMBOL_PREFIXES)
+        # The observability symbols are REQUIRED, never forbidden: the pilot
+        # reads them and the weather component never increments them.
+        for pfx in w5.FORBIDDEN_SYMBOL_PREFIXES:
+            self.assertFalse("nx_mutation_".startswith(pfx))
+            self.assertFalse(pfx.startswith("nx_mutation_"))
 
 
 if __name__ == "__main__":

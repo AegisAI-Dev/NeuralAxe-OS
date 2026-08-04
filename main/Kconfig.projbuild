@@ -562,6 +562,57 @@ menu "Stratum Configuration"
         help
             PRIVATE. See the latitude help text. Never commit a real value.
 
+    config NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+        bool "NeuralAxe weather recommendation-only pilot diagnostics (Gate W6)"
+        default n
+        help
+            EXPERIMENTAL, OWNER-SUPERVISED PILOT ONLY. Compiles bounded,
+            read-only diagnostics for a recommendation-only weather pilot:
+            edge-triggered state events, a once-per-minute summary, and a
+            read-only invariant monitor.
+
+            IT OBSERVES AND REPORTS ONLY. It creates no task, timer, queue or
+            HTTP endpoint, writes no NVS and persists nothing. An invariant
+            violation is reported and nothing else happens: the diagnostics
+            never restart, never clear state, never change mining and never
+            authorize an execution.
+
+            EVERY LINE IS BOUNDED MACHINE TOKENS. No coordinate, city,
+            timezone, provider hostname, request URL, forecast body, NTP
+            server, pool identity or session identifier can appear — the
+            diagnostic line type has no field that could hold one.
+
+            Leave disabled for production. It is meaningful only in an
+            owner-built pilot image together with the weather flags above.
+
     endif
+
+    config NX_MUTATION_OBSERVABILITY
+        bool "NeuralAxe authoritative mutation observability (Gate W6.1)"
+        default n
+        help
+            EXPERIMENTAL, OWNER-SUPERVISED PILOT ONLY. Compiles saturating
+            read-only counters at the CONFIGURATION MUTATION BOUNDARIES owned
+            by each subsystem, so a recommendation-only pilot can prove that
+            weather changed no configuration.
+
+            IT OBSERVES ONLY. No task, timer, queue, HTTP endpoint, persistent
+            storage or logging, and no behaviour change at any instrumented
+            boundary. With it disabled every increment compiles away and the
+            image contains no observability symbol or RAM object.
+
+            CONFIGURATION, NOT ACTIVITY. Normal fan PWM control, the boot
+            frequency ramp, the initial voltage application, pool reconnects
+            on unchanged configuration, protocol state transitions and
+            trusted-time synchronisation are NOT counted: the boundary is the
+            persistent-configuration writer, which runtime activity never
+            reaches. Only an accepted EFFECTIVE change to stored configuration
+            counts, plus an explicit restart request and an accepted OTA.
+
+            Independently default-disabled: it is useful together with the
+            Gate W6 pilot diagnostics but depends on no other flag. With it
+            off, the default image contains ZERO symbols and ZERO bytes of
+            static RAM from this component - verified by an ELF symbol audit,
+            not asserted.
 
 endmenu

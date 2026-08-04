@@ -15,6 +15,10 @@ REQUIRES
     "json"
     "mbedtls"
     "app_update"
+    # Gate W6.1: the restart request site is recorded at the boundary that
+    # owns it. Without CONFIG_NX_MUTATION_OBSERVABILITY the call compiles
+    # away and nothing is linked.
+    "mutation_observability"
     "esp_timer"
     "tcp_transport"
     "esp_netif"
