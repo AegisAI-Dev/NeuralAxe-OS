@@ -53,6 +53,7 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 # The ONE describe invocation. Any tool that needs a display revision must use
 # these exact arguments — a test asserts the pilot helpers and the release
@@ -126,13 +127,57 @@ def validate_canonical(rev: str) -> None:
         f"`git {' '.join(CANONICAL_DESCRIBE_ARGS)}`")
 
 
+def current_branch(repo: Path) -> str:
+    """The branch name, for helpers that record it. Never a hash length."""
+    return _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+
 def identity(repo: Path) -> dict:
-    """The complete build identity: full commit plus canonical revision."""
+    """The complete build identity: full commit plus canonical revision.
+
+    The keys are exactly `commit`, `revision` and `dirty`. There has never been
+    a `describe` key here — a consumer that reaches for one is reading a
+    different helper's local dictionary shape, and will KeyError. Prefer
+    build_identity() below, whose attribute access makes that mistake a
+    loud AttributeError at the point of misuse rather than a dict lookup that
+    only fails at run time deep inside a build.
+    """
     return {
         "commit": full_commit(repo),
         "revision": canonical_revision(repo),
         "dirty": working_tree_dirty(repo),
     }
+
+
+class BuildIdentity(NamedTuple):
+    """THE typed build identity. Immutable, explicit, no dictionary keys.
+
+    `revision` is the canonical describe — the single string that must equal
+    the firmware PROJECT_VER, the packed web version.txt and the manifest's
+    canonicalGitDescribe. It is never abbreviated or re-derived downstream.
+    """
+
+    commit: str      # full 40 characters, never truncated
+    revision: str    # canonical `git describe`, exactly as this module defines
+    dirty: bool      # exact clean-tree state; True means: do not package
+    branch: str
+
+    def require_clean(self) -> None:
+        """Refuse to build from a tree whose content is not the commit."""
+        if self.dirty:
+            raise RevisionError(
+                "the working tree is dirty; a packaged artifact must be "
+                "reproducible from its commit alone")
+
+
+def build_identity(repo: Path) -> BuildIdentity:
+    """The complete identity as a typed value. The preferred accessor."""
+    return BuildIdentity(
+        commit=full_commit(repo),
+        revision=canonical_revision(repo),
+        dirty=working_tree_dirty(repo),
+        branch=current_branch(repo),
+    )
 
 
 def abbreviated_commit(commit: str) -> str:

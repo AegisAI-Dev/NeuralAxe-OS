@@ -74,6 +74,10 @@ DEFAULT_IDF_IMAGE = "espressif/idf:v5.5.3"
 CONTAINER_REPO = "/nx/repo"
 CONTAINER_WORK = "/nx/work"
 
+WEB_SRC_REL = "main/http_server/axe-os"
+WEB_DIST_REL = "main/http_server/axe-os/dist"
+WEB_DIST_INNER = "main/http_server/axe-os/dist/axe-os"
+
 # The one provider Gate W5 supports, and the one timezone Gate W3 implements.
 SUPPORTED_PROVIDERS = {"open-meteo": "OPEN_METEO"}
 SUPPORTED_TIMEZONES = {"europe/brussels": "EUROPE_BRUSSELS"}
@@ -436,23 +440,70 @@ def verify_partition_fit(build: Path) -> dict:
     return {"appBytes": size, "appSlotBytes": APP_SLOT_BYTES}
 
 
-def verify_release_pair(build: Path, web_dir: Path, revision: str) -> dict:
-    """Exact canonical identity: firmwareRevision == webRevision == describe.
+APP_DESC_MAGIC = b"\x32\x54\xcd\xab"
+WWW_REVISION_PATTERN = re.compile(
+    rb"v\d+\.\d+\.\d+(?:-\d+-g[0-9a-f]{7,12})?(?:-dirty)?")
 
-    Compared by EXACT STRING EQUALITY, which is the whole point of the
-    committed canonical-revision contract: a device compares these strings and
-    reports BOOT PAIR MISMATCH when they differ by even one character.
+
+def read_app_desc_version(path: Path) -> str:
+    """The revision the FIRMWARE actually embeds, from its app descriptor."""
+    if not path.is_file():
+        fail("the built firmware image is missing")
+    with path.open("rb") as handle:
+        header = handle.read(0x60)
+    if len(header) < 0x60 or header[0x20:0x24] != APP_DESC_MAGIC:
+        fail("esp_app_desc_t magic not found — not an ESP-IDF app image?")
+    return header[0x30:0x50].split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+
+
+def read_embedded_www_revision(www_bin: Path) -> str:
+    """The revision the packed WEB IMAGE actually embeds.
+
+    Read from the generated SPIFFS image rather than from the build host's
+    dist directory, which can be stale or newer than what was packed.
     """
-    version_txt = web_dir / "version.txt"
-    if not version_txt.is_file():
-        fail("web image version.txt not found; cannot verify the release pair")
-    web_rev = version_txt.read_text(encoding="utf-8").strip()
-    if web_rev != revision:
-        fail("release pair mismatch: web revision differs from the canonical "
-             "revision")
-    if not canonical_revision.revision_matches_commit:
-        fail("canonical revision helper unavailable")
-    return {"firmwareRevision": revision, "webRevision": web_rev,
+    if not www_bin.is_file():
+        fail("the generated web image is missing")
+    matches = sorted({m.group(0).decode("ascii")
+                      for m in WWW_REVISION_PATTERN.finditer(www_bin.read_bytes())})
+    if not matches:
+        fail("no embedded web revision found in the generated www image")
+    if len(matches) > 1:
+        fail("the generated www image embeds multiple distinct revisions — "
+             "ambiguous web identity")
+    return matches[0]
+
+
+def verify_release_pair(build: Path, revision: str) -> dict:
+    """THE gate: firmwareRevision == webRevision == canonicalGitDescribe.
+
+    Both sides are read from the BUILT ARTEFACTS, never assumed from the value
+    that was passed in. Compared by EXACT STRING EQUALITY — a device compares
+    these strings and reports BOOT PAIR MISMATCH when they differ by even one
+    character, so a prefix test would not do.
+    """
+    fw = read_app_desc_version(build / "esp-miner.bin")
+    web = read_embedded_www_revision(build / "www.bin")
+
+    if "-dirty" in fw or "-dirty" in web:
+        fail("a built image embeds a dirty identity")
+    if fw != web:
+        fail(f"BOOT PAIR MISMATCH would ship: firmware '{fw}' != web '{web}'")
+    if fw != revision:
+        fail(f"the built firmware '{fw}' does not match the canonical "
+             f"revision '{revision}'")
+    if web != revision:
+        fail(f"the packed web image '{web}' does not match the canonical "
+             f"revision '{revision}'")
+
+    # Agreement is necessary but not sufficient: both could agree on a
+    # non-canonical shape. Pin the shape too.
+    for value in (fw, web):
+        try:
+            canonical_revision.validate_canonical(value)
+        except canonical_revision.RevisionError as exc:
+            fail(f"a built identity is not canonical: {exc}")
+    return {"firmwareRevision": fw, "webRevision": web,
             "releasePairVerified": True}
 
 
@@ -460,7 +511,8 @@ def verify_release_pair(build: Path, web_dir: Path, revision: str) -> dict:
 # Manifest — bounded booleans and enums only
 # --------------------------------------------------------------------------
 
-def build_manifest(identity: dict, cfg: dict, digest: str) -> dict:
+def build_manifest(identity: canonical_revision.BuildIdentity, cfg: dict,
+                   digest: str, pair: dict | None = None) -> dict:
     """Record WHETHER things were configured, never WHAT they were.
 
     Deliberately absent: latitude, longitude, any coordinate in any unit, a
@@ -468,12 +520,25 @@ def build_manifest(identity: dict, cfg: dict, digest: str) -> dict:
     timezone identifier (which would narrow the private location), and the
     environment variable values.
     """
+    # ONE canonical revision, recorded under every name a consumer may look
+    # for. When the release pair has been verified against the built images,
+    # the manifest carries the values READ FROM THEM; otherwise it carries the
+    # canonical revision for all three, and they are equal by construction.
+    fw_rev = pair["firmwareRevision"] if pair else identity.revision
+    web_rev = pair["webRevision"] if pair else identity.revision
+    if fw_rev != web_rev or fw_rev != identity.revision:
+        fail("refusing to write a manifest whose revisions disagree")
+
     return {
         "schemaVersion": SCHEMA_VERSION,
-        "gate": "W5",
+        "gate": "W6",
         "kind": "weather-recommendation-pilot",
-        "revision": identity["describe"],
-        "commit": identity["commit"],
+        "canonicalGitDescribe": identity.revision,
+        "firmwareRevision": fw_rev,
+        "webRevision": web_rev,
+        "releasePairVerified": bool(pair),
+        "commit": identity.commit,
+        "branch": identity.branch,
         "trackedTreeDigest": digest,
         # Bounded booleans/enums only.
         "weatherConfigured": True,
@@ -516,6 +581,88 @@ def assert_manifest_private_free(manifest: dict, cfg: dict) -> None:
 # --------------------------------------------------------------------------
 # Build
 # --------------------------------------------------------------------------
+
+def resolve_identity(repo: Path) -> canonical_revision.BuildIdentity:
+    """THE single source of build identity. Never recomputed here.
+
+    Everything comes from the shared canonical_revision contract through its
+    TYPED accessor, so a field this helper does not have is an AttributeError
+    at the point of misuse rather than a KeyError deep inside a build. Any
+    failure — a missing tag, an unreadable repository, a contract change —
+    becomes a bounded PilotError instead of a traceback.
+    """
+    try:
+        identity = canonical_revision.build_identity(repo)
+        identity.require_clean()
+        canonical_revision.validate_canonical(identity.revision)
+        if not canonical_revision.revision_matches_commit(identity.revision,
+                                                          identity.commit):
+            fail("the canonical revision does not name HEAD")
+    except canonical_revision.RevisionError as exc:
+        fail(f"canonical identity unavailable: {exc}")
+    except (AttributeError, KeyError, TypeError) as exc:
+        # A changed canonical-revision contract must surface as a controlled
+        # failure naming the field, never as a raw traceback mid-build.
+        fail(f"the canonical-revision contract is not the expected shape: "
+             f"{type(exc).__name__}: {exc}")
+    return identity
+
+
+def remove_stale_web_output(repo: Path) -> None:
+    """Delete any pre-existing dist so a stale identity cannot be packaged.
+
+    The firmware build runs with GITHUB_ACTIONS=true, which makes CMake pack
+    the PREBUILT dist rather than rebuild it. Without this removal the image
+    could carry a web revision from an earlier commit — precisely the
+    mismatched pair the canonical-revision contract exists to prevent.
+    """
+    dist = repo / WEB_DIST_REL
+    if dist.exists():
+        shutil.rmtree(dist, ignore_errors=True)
+
+
+def build_frontend(repo: Path, revision: str, npm_install: str = "ci") -> str:
+    """Build the production frontend FRESH and return its version.txt.
+
+    `generate-version.js` is handed the EXACT canonical revision through the
+    shared environment variable, so neither the web nor the firmware side
+    derives its own abbreviation.
+    """
+    remove_stale_web_output(repo)
+
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm is None:
+        fail("npm was not found in PATH; the pilot package requires a freshly "
+             "built web image and will not reuse an existing one")
+
+    web = repo / WEB_SRC_REL
+    if not web.is_dir():
+        fail("the frontend source directory is missing")
+
+    if npm_install != "skip":
+        print(f"building the web UI: npm {npm_install}")
+        if subprocess.run([npm, npm_install], cwd=str(web)).returncode != 0:
+            fail(f"npm {npm_install} failed")
+
+    env = {**os.environ, canonical_revision.REVISION_ENV: revision}
+    print("building the web UI: npm run build (production)")
+    if subprocess.run([npm, "run", "build"], cwd=str(web), env=env).returncode != 0:
+        fail("the production web build failed")
+
+    version_txt = repo / WEB_DIST_INNER / "version.txt"
+    if not version_txt.is_file():
+        fail("the web build produced no version.txt; refusing to package an "
+             "image with no identity")
+    built = version_txt.read_text(encoding="utf-8").strip()
+    if not built:
+        fail("the web build produced an empty version.txt")
+    if "-dirty" in built:
+        fail("the web build embeds a dirty identity")
+    if built != revision:
+        fail("the freshly built web revision does not match the canonical "
+             "revision — refusing to package a mismatched pair")
+    return built
+
 
 def find_container_runtime() -> str:
     for candidate in ("docker", "podman"):
@@ -563,6 +710,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--idf-image", default=DEFAULT_IDF_IMAGE)
     parser.add_argument("--check-config-only", action="store_true",
                         help="validate the private configuration and exit; builds nothing")
+    parser.add_argument("--npm-install", choices=("ci", "install", "skip"),
+                        default="ci",
+                        help="how to prepare frontend dependencies before the fresh web build")
     args = parser.parse_args(argv)
 
     try:
@@ -581,27 +731,52 @@ def main(argv: list[str] | None = None) -> int:
 
         repo = args.repo.resolve()
         require_clean_tree(repo)
-        identity = canonical_revision.identity(repo)
-        canonical_revision.validate_canonical(identity["describe"])
+        identity = resolve_identity(repo)
         digest_before = tracked_tree_digest(repo)
 
-        work = Path(tempfile.mkdtemp(prefix="nx-w5-"))
-        defaults_path = work / "weather.sdkconfig.defaults"
+        work: Path | None = None
+        manifest_path = args.output / "manifest.json"
+        wrote_manifest = False
+        built_frontend = False
         try:
+            # ONE canonical revision reaches the web build, the firmware
+            # PROJECT_VER, the release-pair check and the manifest.
+            build_frontend(repo, identity.revision, args.npm_install)
+            built_frontend = True
+
+            work = Path(tempfile.mkdtemp(prefix="nx-w6-"))
             write_pilot_defaults(work, cfg)
             run_build(repo, work, image=args.idf_image,
-                      revision=identity["describe"])
+                      revision=identity.revision)
 
-            manifest = build_manifest(identity, cfg, digest_before)
+            build_dir = work / "build"
+            verify_sdkconfig_h(build_dir)
+            verify_symbols(build_dir / "esp-miner.elf")
+            verify_partition_fit(build_dir)
+            pair = verify_release_pair(build_dir, identity.revision)
+            print(f"release pair verified: firmware == web == "
+                  f"{pair['firmwareRevision']}")
+
+            manifest = build_manifest(identity, cfg, digest_before, pair)
             assert_manifest_private_free(manifest, cfg)
             args.output.mkdir(parents=True, exist_ok=True)
-            (args.output / "manifest.json").write_text(
+            manifest_path.write_text(
                 json.dumps(manifest, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8")
+            wrote_manifest = True
         finally:
-            shred(defaults_path)
-            shred(work / "sdkconfig")
-            shutil.rmtree(work, ignore_errors=True)
+            # Runs after a failure at ANY stage, including identity, frontend
+            # and firmware. Nothing private and nothing partial is left behind.
+            if work is not None:
+                shred(work / "weather.sdkconfig.defaults")
+                shred(work / "sdkconfig")
+                shutil.rmtree(work, ignore_errors=True)
+            if built_frontend and not wrote_manifest:
+                # The helper owns this dist: it deleted any prior one and built
+                # it. A failed run must not leave it for a later build to reuse.
+                remove_stale_web_output(repo)
+            if not wrote_manifest and manifest_path.exists():
+                manifest_path.unlink(missing_ok=True)
 
         if tracked_tree_digest(repo) != digest_before:
             fail("the build modified the tracked tree")

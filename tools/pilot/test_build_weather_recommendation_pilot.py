@@ -24,6 +24,9 @@ SYN_LON_E4 = -67890
 
 
 SYN_NTP = "time.example.org"
+REPO = Path(__file__).resolve().parents[2]
+HELPER_PATH = (Path(__file__).resolve().parent
+               / "build_weather_recommendation_pilot.py")
 SYN_DIST = "owner-managed-external"
 
 
@@ -43,6 +46,16 @@ def env(provider="open-meteo", lat=SYN_LAT, lon=SYN_LON, tz="europe/brussels",
     if tz is not None:
         out[w5.ENV_TIMEZONE] = tz
     return out
+
+
+
+def _write_app_image(path: Path, version: str) -> None:
+    """A minimal image whose esp_app_desc_t carries `version`."""
+    header = bytearray(0x60)
+    header[0x20:0x24] = w5.APP_DESC_MAGIC
+    encoded = version.encode()
+    header[0x30:0x30 + len(encoded)] = encoded
+    path.write_bytes(bytes(header))
 
 
 class DegreeParsing(unittest.TestCase):
@@ -162,8 +175,9 @@ class TemporaryConfiguration(unittest.TestCase):
 
 
 class ManifestPrivacy(unittest.TestCase):
-    IDENTITY = {"describe": "v0.0.0-0-gdeadbee", "commit": "d" * 40,
-                "branch": "test"}
+    IDENTITY = w5.canonical_revision.BuildIdentity(
+        revision="v0.0.0-0-gdeadbee", commit="d" * 40, dirty=False,
+        branch="test")
 
     def test_manifest_is_booleans_and_enums_only(self):
         cfg = w5.read_private_config(env())
@@ -317,7 +331,8 @@ class TrustedTimeSource(unittest.TestCase):
 class PilotPosture(unittest.TestCase):
     """The fragment must pin the exact recommendation-only pilot posture."""
 
-    IDENT = {"describe": "v0.0.0-0-gdeadbee", "commit": "d" * 40, "branch": "t"}
+    IDENT = w5.canonical_revision.BuildIdentity(
+        revision="v0.0.0-0-gdeadbee", commit="d" * 40, dirty=False, branch="t")
 
     def test_fragment_enables_pilot_and_disables_execution_surfaces(self):
         text = w5.pilot_defaults_text(w5.read_private_config(env()))
@@ -406,24 +421,44 @@ class VerificationContracts(unittest.TestCase):
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
-    def test_release_pair_requires_exact_string_equality(self):
+    def test_release_pair_reads_both_identities_from_the_built_images(self):
+        """The pair is read from the artefacts, never assumed from the input."""
         import shutil
         import tempfile
         work = Path(tempfile.mkdtemp(prefix="nx-w6-pair-"))
         try:
-            web = work / "web"
-            web.mkdir()
-            (web / "version.txt").write_text("v2.14.2-76-gf4aee75\n",
-                                             encoding="utf-8")
-            out = w5.verify_release_pair(work, web, "v2.14.2-76-gf4aee75")
+            rev = "v2.14.2-78-g09b19d8d"
+            build = work / "build"
+            build.mkdir()
+            _write_app_image(build / "esp-miner.bin", rev)
+            (build / "www.bin").write_bytes(b"\x00" * 32 + rev.encode() + b"\x00" * 32)
+
+            out = w5.verify_release_pair(build, rev)
+            self.assertEqual(out["firmwareRevision"], rev)
+            self.assertEqual(out["webRevision"], rev)
             self.assertTrue(out["releasePairVerified"])
+
+            # A firmware/web disagreement is the BOOT PAIR MISMATCH case.
+            _write_app_image(build / "esp-miner.bin", "v2.14.2-77-g4fab888f")
             with self.assertRaises(w5.PilotError):
-                w5.verify_release_pair(work, web, "v2.14.2-76-gf4aee76")
-            (web / "version.txt").unlink()
+                w5.verify_release_pair(build, rev)
+
+            # Agreement on a revision that is not HEAD is still refused.
+            _write_app_image(build / "esp-miner.bin", "v2.14.2-77-g4fab888f")
+            (build / "www.bin").write_bytes(b"v2.14.2-77-g4fab888f")
             with self.assertRaises(w5.PilotError):
-                w5.verify_release_pair(work, web, "v2.14.2-76-gf4aee75")
+                w5.verify_release_pair(build, rev)
+
+            # A missing artefact fails closed rather than assuming.
+            (build / "www.bin").unlink()
+            with self.assertRaises(w5.PilotError):
+                w5.verify_release_pair(build, rev)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+
+
+class MutationObservabilityContract(unittest.TestCase):
+    """Gate W6.1: the pilot artifact must carry the mutation counters."""
 
     # ---------- Gate W6.1: authoritative mutation observability ----------
 
@@ -447,11 +482,10 @@ class VerificationContracts(unittest.TestCase):
             cfgdir = work / "config"
             cfgdir.mkdir()
             lines = [f"#define {s} 1" for s in w5.REQUIRED_SDKCONFIG]
-            full = chr(10).join(lines)
-            (cfgdir / "sdkconfig.h").write_text(full, encoding="utf-8")
+            (cfgdir / "sdkconfig.h").write_text(chr(10).join(lines),
+                                                encoding="utf-8")
             w5.verify_sdkconfig_h(work)
 
-            # Exactly one option removed: the counters.
             without = chr(10).join(
                 x for x in lines
                 if "CONFIG_NX_MUTATION_OBSERVABILITY" not in x)
@@ -469,6 +503,218 @@ class VerificationContracts(unittest.TestCase):
             self.assertFalse("nx_mutation_".startswith(pfx))
             self.assertFalse(pfx.startswith("nx_mutation_"))
 
+
+class CanonicalIdentityRegression(unittest.TestCase):
+    """The KeyError: 'describe' regression and the contract that prevents it.
+
+    canonical_revision.identity() has never had a `describe` key; that name
+    belongs to the B10.1/B10.2 helpers' own local repo_state dictionaries. The
+    weather helper reached for it while calling the shared contract, so the
+    real build failed with a raw KeyError after the private configuration had
+    already validated.
+    """
+
+    def test_the_shared_contract_has_no_describe_key(self):
+        keys = set(w5.canonical_revision.identity(REPO).keys())
+        self.assertEqual(keys, {"commit", "revision", "dirty"})
+        self.assertNotIn("describe", keys)
+
+    def test_the_typed_accessor_exposes_every_required_value(self):
+        ident = w5.canonical_revision.build_identity(REPO)
+        self.assertEqual(len(ident.commit), 40)
+        self.assertRegex(ident.commit, r"^[0-9a-f]{40}$")
+        w5.canonical_revision.validate_canonical(ident.revision)
+        self.assertIsInstance(ident.dirty, bool)
+        self.assertTrue(ident.branch)
+        self.assertTrue(w5.canonical_revision.revision_matches_commit(
+            ident.revision, ident.commit))
+
+    def test_the_obsolete_describe_lookup_is_gone_from_the_helper(self):
+        src = HELPER_PATH.read_text(encoding="utf-8")
+        self.assertNotIn('["describe"]', src)
+        self.assertNotIn("['describe']", src)
+
+    def test_the_helper_never_recomputes_git_identity(self):
+        src = HELPER_PATH.read_text(encoding="utf-8")
+        for flag in ("--tags", "--long", "--always", "--dirty", "--abbrev="):
+            self.assertNotIn(flag, src, "helper assembles its own " + flag)
+        self.assertIn("canonical_revision.build_identity(", src)
+
+    def test_a_typed_field_that_does_not_exist_fails_loudly(self):
+        ident = w5.canonical_revision.build_identity(REPO)
+        with self.assertRaises(AttributeError):
+            _ = ident.describe
+
+    def test_missing_identity_is_a_controlled_error_not_a_traceback(self):
+        import shutil
+        import tempfile
+        empty = Path(tempfile.mkdtemp(prefix="nx-w6-noidentity-"))
+        try:
+            with self.assertRaises(w5.PilotError) as ctx:
+                w5.resolve_identity(empty)
+            self.assertIn("canonical identity", str(ctx.exception).lower())
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
+
+    def test_a_changed_contract_shape_is_reported_not_raised(self):
+        original = w5.canonical_revision.build_identity
+        try:
+            def broken(_repo):
+                raise KeyError("describe")
+            w5.canonical_revision.build_identity = broken
+            with self.assertRaises(w5.PilotError) as ctx:
+                w5.resolve_identity(REPO)
+            self.assertIn("contract", str(ctx.exception).lower())
+        finally:
+            w5.canonical_revision.build_identity = original
+
+    def test_a_dirty_tree_is_refused_by_the_typed_identity(self):
+        ident = w5.canonical_revision.BuildIdentity(
+            commit="a" * 40, revision="v0.0.0-0-gdeadbee", dirty=True,
+            branch="b")
+        with self.assertRaises(w5.canonical_revision.RevisionError):
+            ident.require_clean()
+
+
+class ProductionCallPath(unittest.TestCase):
+    """main() must exercise identity, frontend, firmware and the pair."""
+
+    def test_main_calls_every_verification_stage(self):
+        import inspect
+        src = inspect.getsource(w5.main)
+        for call in ("resolve_identity(", "build_frontend(", "run_build(",
+                     "verify_sdkconfig_h(", "verify_symbols(",
+                     "verify_partition_fit(", "verify_release_pair(",
+                     "build_manifest(", "assert_manifest_private_free("):
+            self.assertIn(call, src, "main() never calls " + call)
+
+    def test_the_one_canonical_revision_reaches_web_and_firmware(self):
+        import inspect
+        src = inspect.getsource(w5.main)
+        self.assertEqual(src.count("resolve_identity("), 1)
+        self.assertIn("build_frontend(repo, identity.revision", src)
+        self.assertIn("revision=identity.revision", src)
+        self.assertIn("verify_release_pair(build_dir, identity.revision)", src)
+
+    def test_the_frontend_build_hands_over_the_canonical_revision(self):
+        import inspect
+        src = inspect.getsource(w5.build_frontend)
+        self.assertIn("canonical_revision.REVISION_ENV", src)
+        self.assertIn("built != revision", src)
+
+    def test_release_pair_equality_is_mandatory_in_the_manifest(self):
+        ident = w5.canonical_revision.BuildIdentity(
+            commit="d" * 40, revision="v0.0.0-0-gdeadbee", dirty=False,
+            branch="b")
+        cfg = w5.read_private_config(env())
+        pair = {"firmwareRevision": ident.revision,
+                "webRevision": ident.revision, "releasePairVerified": True}
+        m = w5.build_manifest(ident, cfg, "digest", pair)
+        self.assertEqual(m["firmwareRevision"], m["webRevision"])
+        self.assertEqual(m["firmwareRevision"], m["canonicalGitDescribe"])
+        with self.assertRaises(w5.PilotError):
+            w5.build_manifest(ident, cfg, "digest",
+                              {"firmwareRevision": ident.revision,
+                               "webRevision": "v0.0.0-0-gfeedfac"})
+
+
+def _synthetic_env(case):
+    """Give main() a valid synthetic configuration for the duration."""
+    import os
+    saved = {k: os.environ.get(k) for k in w5.ENV_VARS}
+    for key, value in env().items():
+        os.environ[key] = value
+
+    def restore():
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    case.addCleanup(restore)
+
+
+class FailureCleanup(unittest.TestCase):
+    """The finally path must clear private and partial state at every stage."""
+
+    def _drive(self, out_dir, fail_at):
+        real = {name: getattr(w5, name) for name in
+                ("resolve_identity", "build_frontend", "run_build")}
+
+        def boom(*_a, **_k):
+            w5.fail("synthetic " + fail_at + " failure")
+
+        def good_identity(_repo):
+            return w5.canonical_revision.BuildIdentity(
+                commit="d" * 40, revision="v0.0.0-0-gdeadbee", dirty=False,
+                branch="b")
+        try:
+            w5.resolve_identity = boom if fail_at == "identity" else good_identity
+            w5.build_frontend = boom if fail_at == "frontend" \
+                else (lambda *a, **k: "v0.0.0-0-gdeadbee")
+            if fail_at == "firmware":
+                w5.run_build = boom
+            return w5.main(["--output", str(out_dir), "--repo", str(REPO)])
+        finally:
+            for name, fn in real.items():
+                setattr(w5, name, fn)
+
+    def _cleanup_case(self, stage):
+        import os
+        import shutil
+        import tempfile
+        _synthetic_env(self)
+        out = Path(tempfile.mkdtemp(prefix="nx-w6-out-")) / "artifact"
+        tmp_root = tempfile.gettempdir()
+        before = {d for d in os.listdir(tmp_root) if d.startswith("nx-w6-")}
+        try:
+            rc = self._drive(out, stage)
+            self.assertEqual(rc, 2, stage + " failure must exit 2, not raise")
+            self.assertFalse((out / "manifest.json").exists(),
+                             "a partial manifest survived")
+            after = {d for d in os.listdir(tmp_root) if d.startswith("nx-w6-")}
+            leaked = after - before
+            self.assertEqual(leaked, set(), "leaked work dirs: %s" % leaked)
+        finally:
+            shutil.rmtree(out.parent, ignore_errors=True)
+
+    def test_cleanup_after_identity_stage_failure(self):
+        self._cleanup_case("identity")
+
+    def test_cleanup_after_frontend_stage_failure(self):
+        self._cleanup_case("frontend")
+
+    def test_cleanup_after_firmware_stage_failure(self):
+        self._cleanup_case("firmware")
+
+    def test_no_private_value_reaches_stdout_stderr_or_the_error(self):
+        import contextlib
+        import io
+        import shutil
+        import tempfile
+        _synthetic_env(self)
+        out = Path(tempfile.mkdtemp(prefix="nx-w6-out-")) / "artifact"
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), \
+                    contextlib.redirect_stderr(stderr):
+                self._drive(out, "firmware")
+        finally:
+            shutil.rmtree(out.parent, ignore_errors=True)
+        blob = stdout.getvalue() + stderr.getvalue()
+        for secret in (SYN_NTP, SYN_LAT, SYN_LON, "europe/brussels",
+                       str(SYN_LAT_E4), str(abs(SYN_LON_E4))):
+            self.assertNotIn(secret, blob, repr(secret) + " reached the console")
+
+    def test_the_tracked_tree_is_unchanged_outside_the_pilot_tooling(self):
+        import subprocess
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=str(REPO),
+                             capture_output=True, text=True).stdout
+        changed = [line[3:] for line in out.splitlines()
+                   if line[:2].strip() and not line.startswith("??")]
+        unexpected = [c for c in changed if not c.startswith("tools/pilot/")]
+        self.assertEqual(unexpected, [],
+                         "unexpected tracked changes: %s" % unexpected)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
