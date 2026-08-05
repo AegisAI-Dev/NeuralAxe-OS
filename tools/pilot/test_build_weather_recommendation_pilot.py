@@ -716,5 +716,126 @@ class FailureCleanup(unittest.TestCase):
         self.assertEqual(unexpected, [],
                          "unexpected tracked changes: %s" % unexpected)
 
+
+# A realistic failed-build log carrying every kind of private value the real
+# fragment can contribute. Synthetic throughout.
+DIRTY_LOG = """
+-- Building ESP-IDF components for target esp32s3
+CONFIG_NX_WEATHER_LATITUDE_E4=12345
+CONFIG_NX_WEATHER_LONGITUDE_E4=-67890
+CONFIG_NX_TIMED_SESSIONS_NTP_SERVER="time.example.org"
+CONFIG_NX_WEATHER_TZ_EUROPE_BRUSSELS=y
+-- Loading defaults file /nx/work/weather.sdkconfig.defaults...
+/nx/repo/main/nx_mutation_adapter.c:88:5: error: implicit declaration of \
+function 'thermal_curve_parse'
+FAILED: esp-idf/main/CMakeFiles/__idf_main.dir/nx_mutation_adapter.c.obj
+ninja: build stopped: subcommand failed.
+ninja failed with exit code 1, output is in /nx/work/log/idf_py_stderr
+"""
+
+
+class BuildFailureDiagnostics(unittest.TestCase):
+    """A firmware failure must be diagnosable AND value-free."""
+
+    def cfg(self):
+        return w5.read_private_config(env())
+
+    def test_every_private_input_is_redacted(self):
+        cfg = self.cfg()
+        out = "\n".join(w5.sanitize_line(l, cfg) for l in DIRTY_LOG.splitlines())
+        for secret in (SYN_NTP, str(SYN_LAT_E4), str(abs(SYN_LON_E4)),
+                       "time.example.org", "12345", "67890"):
+            self.assertNotIn(secret, out, repr(secret) + " survived redaction")
+        self.assertNotIn("weather.sdkconfig.defaults", out)
+
+    def test_no_raw_sdkconfig_value_is_printed(self):
+        """Even an unknown CONFIG_* symbol cannot leak its value."""
+        line = w5.sanitize_line('CONFIG_SOMETHING_NOBODY_KNEW="secret-value"')
+        self.assertIn("CONFIG_SOMETHING_NOBODY_KNEW=<redacted>", line)
+        self.assertNotIn("secret-value", line)
+        bare = w5.sanitize_line("CONFIG_NX_WEATHER_LATITUDE_E4=12345")
+        self.assertNotIn("12345", bare)
+
+    def test_compiler_errors_stay_useful_after_redaction(self):
+        summary = w5.summarize_build_failure(DIRTY_LOG, self.cfg())
+        joined = " ".join(summary["lines"])
+        # The diagnosis survives: file, line, category.
+        self.assertIn("nx_mutation_adapter.c", joined)
+        self.assertIn("error:", joined)
+        self.assertIn("implicit declaration", joined)
+        self.assertEqual(summary["sourceFile"], "nx_mutation_adapter.c")
+        self.assertTrue(summary["privateValuesRedacted"])
+
+    def test_the_stage_is_named_for_each_failure_class(self):
+        cases = {
+            "container-runtime":
+                "error during connect: cannot connect to the docker daemon",
+            "cmake-configure": "CMake Error at CMakeLists.txt:12 (message):",
+            "spiffs-image":
+                "RuntimeError: given base directory /x/dist/axe-os does not exist",
+            "link": "undefined reference to `nx_mutation_counter_note'",
+            "compile": "foo.c:1:1: error: expected ';'",
+        }
+        for stage, text in cases.items():
+            self.assertEqual(w5.classify_build_failure(text), stage, text)
+        self.assertEqual(w5.classify_build_failure("nothing to see"), "unknown")
+
+    def test_the_diagnostic_is_bounded(self):
+        huge = "\n".join("x.c:%d:1: error: boom" % i for i in range(500))
+        summary = w5.summarize_build_failure(huge, self.cfg())
+        self.assertLessEqual(len(summary["lines"]), w5.MAX_DIAGNOSTIC_LINES)
+        for line in summary["lines"]:
+            self.assertLessEqual(len(line), w5.MAX_DIAGNOSTIC_WIDTH)
+
+    def test_a_log_with_no_marker_still_yields_a_bounded_tail(self):
+        summary = w5.summarize_build_failure("quiet\nlines\nonly", self.cfg())
+        self.assertTrue(summary["lines"])
+        self.assertEqual(summary["stage"], "unknown")
+
+    def test_the_raw_log_is_removed_after_a_failed_build(self):
+        """run_build writes the log into the work tree and shreds it."""
+        import inspect
+        src = inspect.getsource(w5.run_build)
+        self.assertIn("finally:", src)
+        self.assertIn("shred(log_path)", src)
+        # The raw log never reaches the console.
+        self.assertNotIn("print(proc.stdout", src)
+        self.assertNotIn("print(proc.stderr", src)
+
+    def test_report_prints_the_redaction_flag_and_no_raw_log(self):
+        import contextlib
+        import io
+        summary = w5.summarize_build_failure(DIRTY_LOG, self.cfg())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(w5.PilotError):
+                w5.report_build_failure(summary)
+        text = err.getvalue()
+        self.assertIn("private-values-redacted=true", text)
+        self.assertIn("firmware build failed at stage:", text)
+        for secret in (SYN_NTP, "12345", "67890"):
+            self.assertNotIn(secret, text)
+
+    def test_the_symbol_audit_survives_a_hostless_toolchain(self):
+        """The xtensa toolchain lives in the image, not on the host."""
+        import inspect
+        src = inspect.getsource(w5.elf_symbols)
+        self.assertIn("FileNotFoundError", src)   # no raw traceback
+        self.assertIn("CONTAINER_WORK", src)      # container fallback
+
+    def test_the_helper_writes_no_bytecode_into_the_tree(self):
+        src = HELPER_PATH.read_text(encoding="utf-8")
+        self.assertIn("sys.dont_write_bytecode = True", src)
+
+    def test_a_successful_build_is_unaffected(self):
+        """No diagnostic path runs when the build succeeds."""
+        import inspect
+        src = inspect.getsource(w5.run_build)
+        # The report is reached only on a non-zero return code.
+        self.assertIn("if proc.returncode != 0:", src)
+        idx_check = src.index("if proc.returncode != 0:")
+        idx_report = src.index("report_build_failure(")
+        self.assertLess(idx_check, idx_report)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

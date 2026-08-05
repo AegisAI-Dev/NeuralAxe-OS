@@ -56,6 +56,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Importing a sibling module writes tools/pilot/__pycache__, which
+# `git status --porcelain` reports as untracked — so the FIRST run left the
+# tree dirty and the SECOND run failed its own clean-tree gate before doing
+# anything. The helper must not modify the repository merely by running.
+sys.dont_write_bytecode = True
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import canonical_revision  # noqa: E402
 
@@ -385,24 +391,61 @@ def verify_sdkconfig_h(build: Path) -> None:
             fail(f"forbidden build option enabled: {sym}")
 
 
-def elf_symbols(elf: Path) -> set[str]:
+def _parse_nm(text: str) -> set[str]:
+    out = set()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            out.add(parts[-1])
+    return out
+
+
+def elf_symbols(elf: Path, *, work: Path | None = None,
+                image: str = DEFAULT_IDF_IMAGE) -> set[str]:
+    """Read the defined symbols of a cross-compiled ELF.
+
+    The xtensa toolchain lives INSIDE the build image, not on the host: on a
+    Windows or bare host `xtensa-esp32s3-elf-nm` simply does not exist, and
+    invoking it raised FileNotFoundError straight out of subprocess — an
+    unhandled traceback immediately after a SUCCESSFUL firmware build. The host
+    is tried first (it is faster when a toolchain is present) and the container
+    is the fallback that always works, because it is the same image that just
+    produced the ELF.
+    """
     for nm in ("xtensa-esp32s3-elf-nm", "nm"):
-        proc = subprocess.run([nm, "-g", "--defined-only", str(elf)],
-                              capture_output=True, text=True)
+        try:
+            proc = subprocess.run([nm, "-g", "--defined-only", str(elf)],
+                                  capture_output=True, text=True)
+        except (FileNotFoundError, OSError):
+            continue          # not on this host; try the next candidate
         if proc.returncode == 0:
-            out = set()
-            for line in proc.stdout.splitlines():
-                parts = line.split()
-                if len(parts) >= 3:
-                    out.add(parts[-1])
-            return out
-    fail("no usable nm binary found for the ELF symbol audit")
+            return _parse_nm(proc.stdout)
+
+    if work is not None:
+        try:
+            runtime = find_container_runtime()
+        except PilotError:
+            runtime = ""
+        if runtime:
+            rel = elf.relative_to(work).as_posix()
+            proc = subprocess.run(
+                [runtime, "run", "--rm", "-v", f"{work}:{CONTAINER_WORK}", image,
+                 "bash", "-lc",
+                 f". $IDF_PATH/export.sh > /dev/null 2>&1 && "
+                 f"xtensa-esp32s3-elf-nm -g --defined-only {CONTAINER_WORK}/{rel}"],
+                capture_output=True, text=True)
+            if proc.returncode == 0:
+                return _parse_nm(proc.stdout)
+
+    fail("no usable nm found for the ELF symbol audit, on the host or in the "
+         "build image")
     return set()
 
 
-def verify_symbols(elf: Path) -> dict:
+def verify_symbols(elf: Path, *, work: Path | None = None,
+                   image: str = DEFAULT_IDF_IMAGE) -> dict:
     """Prove at the binary level what this pilot may and may not contain."""
-    syms = elf_symbols(elf)
+    syms = elf_symbols(elf, work=work, image=image)
 
     offending = sorted(
         s for s in syms
@@ -684,7 +727,134 @@ def build_command(repo_path: str, work_path: str, *, revision: str) -> str:
     )
 
 
-def run_build(repo: Path, work: Path, *, image: str, revision: str) -> None:
+# --------------------------------------------------------------------------
+# Bounded, sanitized build diagnostics
+#
+# WHY THIS EXISTS. An earlier revision discarded the firmware build log
+# entirely — "log withheld: it may contain private values" — on the grounds
+# that it may echo the sdkconfig fragment. That is true of a handful of lines
+# and false of the rest, and the result was a build failure nobody could
+# diagnose: not the owner, who must not paste an unredacted log, and not a
+# reviewer, who never sees it at all. Most build failures (a stopped container
+# daemon, an unshared mount, a compile error) carry no private value whatever.
+#
+# The log is therefore captured to an EPHEMERAL file outside the repository,
+# reduced to the few lines that establish the failure, sanitized field by
+# field, and the raw file is removed in a finally.
+# --------------------------------------------------------------------------
+
+#: Every build stage the classifier can name, most specific first.
+BUILD_STAGES = (
+    ("container-runtime", re.compile(
+        r"docker api|cannot connect to the docker|daemon is running|"
+        r"error during connect|permission denied while trying to connect|"
+        r"is not shared from the host|invalid mount|no such image|"
+        r"pull access denied", re.I)),
+    ("spiffs-image", re.compile(
+        r"spiffs_\w*bin|spiffs_create_partition|given base directory", re.I)),
+    ("partition-check", re.compile(
+        r"does not fit|exceeds the partition|partition table|binary size .*"
+        r"larger", re.I)),
+    ("link", re.compile(r"undefined reference|ld returned|multiple definition|"
+                        r"region \S+ overflowed", re.I)),
+    ("compile", re.compile(r"\berror:|\bfatal error\b", re.I)),
+    ("kconfig", re.compile(r"Kconfig[\w.]*:\d+|invalid symbol|"
+                           r"unknown config symbol|recursive dependency", re.I)),
+    ("cmake-configure", re.compile(r"CMake Error|configure step failed", re.I)),
+)
+
+#: Lines worth keeping when reducing a failed log.
+DIAGNOSTIC_LINE = re.compile(
+    r"\berror\b|FAILED|CMake Error|undefined reference|ninja: |"
+    r"RuntimeError|Traceback|fatal|does not exist|no such file|"
+    r"cannot connect|denied|overflowed|does not fit", re.I)
+
+MAX_DIAGNOSTIC_LINES = 12
+MAX_DIAGNOSTIC_WIDTH = 200
+
+
+def sanitize_line(line: str, cfg: dict | None = None) -> str:
+    """Remove every private value from one build-log line.
+
+    Redacts, in this order: the owner's configured values, ANY sdkconfig
+    assignment (so a symbol this function has never heard of still cannot leak
+    its value), the private fragment's path, and the temporary work path.
+    """
+    out = line
+    if cfg:
+        for key in ("ntp", "provider_input", "timezone_input",
+                    "latitude_input", "longitude_input", "distribution_input"):
+            value = cfg.get(key)
+            if value:
+                out = out.replace(str(value), "<redacted>")
+        for key in ("latitude_e4", "longitude_e4"):
+            value = cfg.get(key)
+            if value is not None:
+                for form in (str(value), str(abs(value))):
+                    out = out.replace(form, "<redacted>")
+    # Any CONFIG_* assignment, quoted or bare — value never survives.
+    out = re.sub(r"(CONFIG_[A-Z0-9_]+)\s*=\s*(\"[^\"]*\"|[^\s,;)]+)",
+                 r"\1=<redacted>", out)
+    # The private fragment and the temporary work tree.
+    out = re.sub(r"\S*weather\.sdkconfig\.defaults", "<private-fragment>", out)
+    out = re.sub(re.escape(CONTAINER_WORK) + r"\S*", "<work>", out)
+    out = re.sub(r"[A-Za-z]:[\\/][^\s:]*[\\/]nx-w6-\S*", "<work>", out)
+    return out[:MAX_DIAGNOSTIC_WIDTH]
+
+
+def classify_build_failure(text: str) -> str:
+    """Name the stage a failed build reached. Total; never raises."""
+    for stage, pattern in BUILD_STAGES:
+        if pattern.search(text):
+            return stage
+    return "unknown"
+
+
+def summarize_build_failure(log_text: str, cfg: dict | None = None) -> dict:
+    """A bounded, sanitized diagnostic. Never the complete raw log."""
+    lines = log_text.splitlines()
+    hits = [l for l in lines if DIAGNOSTIC_LINE.search(l)]
+    if not hits:                      # no recognised marker: keep the tail
+        hits = lines[-MAX_DIAGNOSTIC_LINES:]
+    kept = [sanitize_line(l.rstrip(), cfg) for l in hits[-MAX_DIAGNOSTIC_LINES:]]
+    source = ""
+    for line in hits:
+        match = re.search(r"([\w./-]+\.(?:c|cpp|h|py|txt|cmake))[:(]", line)
+        if match:
+            # The basename only: a path could name a private work tree, and
+            # the file name is what a reader actually needs.
+            source = match.group(1).rsplit("/", 1)[-1].rsplit(chr(92), 1)[-1]
+            break
+    return {
+        # Classified from the kept evidence: scanning the whole log would let
+        # an incidental mention outrank the line that actually failed.
+        "stage": classify_build_failure(chr(10).join(hits[-MAX_DIAGNOSTIC_LINES:])),
+        "sourceFile": source,
+        "lines": kept,
+        "privateValuesRedacted": True,
+    }
+
+
+def report_build_failure(summary: dict) -> None:
+    """Print the bounded diagnostic, then fail with a bounded message."""
+    print(f"firmware build failed at stage: {summary['stage']}", file=sys.stderr)
+    if summary["sourceFile"]:
+        print(f"  source: {summary['sourceFile']}", file=sys.stderr)
+    for line in summary["lines"]:
+        print(f"  | {line}", file=sys.stderr)
+    print(f"  private-values-redacted={str(summary['privateValuesRedacted']).lower()}",
+          file=sys.stderr)
+    fail(f"firmware build failed during {summary['stage']}")
+
+
+def run_build(repo: Path, work: Path, *, image: str, revision: str,
+              cfg: dict | None = None) -> None:
+    """Build the firmware. On failure, report a bounded sanitized diagnostic.
+
+    The complete output goes to an EPHEMERAL file outside the repository so it
+    can be reduced and sanitized; that file is removed in the finally, so no
+    raw log is ever retained.
+    """
     runtime = find_container_runtime()
     cmd = [
         runtime, "run", "--rm",
@@ -694,11 +864,18 @@ def run_build(repo: Path, work: Path, *, image: str, revision: str) -> None:
         image, "bash", "-lc",
         build_command(CONTAINER_REPO, CONTAINER_WORK, revision=revision),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        # The build log may echo the sdkconfig fragment, so it is never
-        # forwarded to the caller.
-        fail("firmware build failed (log withheld: it may contain private values)")
+    log_path = work / "firmware-build.log"
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        log_path.write_text((proc.stdout or "") + (proc.stderr or ""),
+                            encoding="utf-8", errors="replace")
+        if proc.returncode != 0:
+            report_build_failure(
+                summarize_build_failure(
+                    log_path.read_text(encoding="utf-8", errors="replace"), cfg))
+    finally:
+        # The raw log never outlives the call, on success or failure.
+        shred(log_path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -747,11 +924,12 @@ def main(argv: list[str] | None = None) -> int:
             work = Path(tempfile.mkdtemp(prefix="nx-w6-"))
             write_pilot_defaults(work, cfg)
             run_build(repo, work, image=args.idf_image,
-                      revision=identity.revision)
+                      revision=identity.revision, cfg=cfg)
 
             build_dir = work / "build"
             verify_sdkconfig_h(build_dir)
-            verify_symbols(build_dir / "esp-miner.elf")
+            verify_symbols(build_dir / "esp-miner.elf", work=work,
+                           image=args.idf_image)
             verify_partition_fit(build_dir)
             pair = verify_release_pair(build_dir, identity.revision)
             print(f"release pair verified: firmware == web == "
