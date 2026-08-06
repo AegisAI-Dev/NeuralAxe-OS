@@ -555,7 +555,8 @@ def verify_release_pair(build: Path, revision: str) -> dict:
 # --------------------------------------------------------------------------
 
 def build_manifest(identity: canonical_revision.BuildIdentity, cfg: dict,
-                   digest: str, pair: dict | None = None) -> dict:
+                   digest: str, pair: dict | None = None,
+                   artifacts: list | None = None) -> dict:
     """Record WHETHER things were configured, never WHAT they were.
 
     Deliberately absent: latitude, longitude, any coordinate in any unit, a
@@ -576,13 +577,22 @@ def build_manifest(identity: canonical_revision.BuildIdentity, cfg: dict,
         "schemaVersion": SCHEMA_VERSION,
         "gate": "W6",
         "kind": "weather-recommendation-pilot",
+        # Identity: the full commit, never abbreviated, plus the ONE canonical
+        # revision that both images embed.
+        "gitCommit": identity.commit,
         "canonicalGitDescribe": identity.revision,
         "firmwareRevision": fw_rev,
         "webRevision": web_rev,
         "releasePairVerified": bool(pair),
-        "commit": identity.commit,
+        "webImageFreshlyBuilt": True,
         "branch": identity.branch,
         "trackedTreeDigest": digest,
+        # Target.
+        "boardVersion": 601,
+        "asicModel": "BM1370",
+        # The complete deliverable set, each with its size and SHA-256 taken
+        # from the STAGED COPY.
+        "artifacts": artifacts or [],
         # Bounded booleans/enums only.
         "weatherConfigured": True,
         "providerConfigured": True,
@@ -597,6 +607,7 @@ def build_manifest(identity: canonical_revision.BuildIdentity, cfg: dict,
         "timedSessionApiEnabled": False,
         "storePreflightEnabled": False,
         "hardwareTuningEnabled": False,
+        "mutationObservabilityEnabled": True,
     }
 
 
@@ -705,6 +716,219 @@ def build_frontend(repo: Path, revision: str, npm_install: str = "ci") -> str:
         fail("the freshly built web revision does not match the canonical "
              "revision — refusing to package a mismatched pair")
     return built
+
+
+# --------------------------------------------------------------------------
+# Package staging
+#
+# WHY THIS EXISTS. An earlier revision wrote manifest.json into the output
+# directory and printed success — while copying NO binary at all. Worse, the
+# finally block removed the whole work tree, so esp-miner.bin and www.bin were
+# destroyed moments after being verified. The result was a package that
+# reported "built" and could not be flashed.
+#
+# Staging is therefore atomic: everything is assembled in a temporary
+# directory beside the requested output, every postcondition is proven against
+# the STAGED COPIES, and only a complete package is published. Success is
+# printed last, after the PUBLISHED directory has been re-opened and re-proven.
+# --------------------------------------------------------------------------
+
+#: The bounded suffix every pilot artifact filename carries.
+ARTIFACT_SUFFIX = "weather-pilot-601-BM1370"
+
+ARTIFACT_OTA = "ota-application"
+ARTIFACT_WWW = "www-spiffs"
+
+MANIFEST_NAME = "manifest.json"
+SHA256SUMS_NAME = "SHA256SUMS.txt"
+
+#: Exactly what a complete package contains — nothing more, nothing less.
+def package_filenames(revision: str) -> dict:
+    base = f"NeuralAxe-OS-{revision}-{ARTIFACT_SUFFIX}"
+    return {ARTIFACT_OTA: f"{base}-ota.bin", ARTIFACT_WWW: f"{base}-www.bin"}
+
+
+def expected_package_files(revision: str) -> set:
+    names = package_filenames(revision)
+    return {names[ARTIFACT_OTA], names[ARTIFACT_WWW],
+            MANIFEST_NAME, SHA256SUMS_NAME}
+
+
+#: Deliberately NOT the factory image, the merged image, the bootloader, the
+#: partition table, the OTA-data image or any NVS blob: a recommendation-only
+#: pilot is delivered over the NVS-preserving OTA route, and shipping a
+#: factory image would invite an erase that destroys the owner's settings.
+ARTIFACT_SOURCES = ((ARTIFACT_OTA, "esp-miner.bin"), (ARTIFACT_WWW, "www.bin"))
+
+
+def sha256_file(path: Path) -> str:
+    """Hash a file in bounded chunks. Used on the STAGED COPY, never only the
+    source, so a truncated or failed copy cannot inherit a correct hash."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stage_package(staging: Path, build_dir: Path,
+                  identity: canonical_revision.BuildIdentity, cfg: dict,
+                  digest: str, pair: dict) -> dict:
+    """Assemble the complete package in `staging`. Returns the manifest."""
+    staging.mkdir(parents=True, exist_ok=False)
+    names = package_filenames(identity.revision)
+
+    artifacts = []
+    for kind, source_name in ARTIFACT_SOURCES:
+        source = build_dir / source_name
+        if not source.is_file():
+            fail(f"the build produced no {source_name}; refusing to publish an "
+                 f"incomplete package")
+        if source.stat().st_size == 0:
+            fail(f"the build produced an empty {source_name}")
+        target = staging / names[kind]
+        shutil.copyfile(source, target)
+        if not target.is_file():
+            fail(f"staging {kind} failed: the copy does not exist")
+        # Hash the COPY. A short read or a full disk shows up here, not later.
+        size = target.stat().st_size
+        if size != source.stat().st_size:
+            fail(f"staging {kind} failed: the copy is a different size")
+        artifacts.append({
+            "filename": names[kind],
+            "type": kind,
+            "sizeBytes": size,
+            "sha256": sha256_file(target),
+        })
+
+    lines = [f"{a['sha256']}  {a['filename']}" for a in artifacts]
+    (staging / SHA256SUMS_NAME).write_text("\n".join(lines) + "\n",
+                                           encoding="utf-8")
+
+    manifest = build_manifest(identity, cfg, digest, pair, artifacts)
+    assert_manifest_private_free(manifest, cfg)
+    (staging / MANIFEST_NAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return manifest
+
+
+def read_sha256sums(path: Path) -> dict:
+    out = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("  ", 1)
+        if len(parts) != 2:
+            fail("SHA256SUMS.txt is malformed")
+        out[parts[1].strip()] = parts[0].strip()
+    return out
+
+
+def verify_package(pkg: Path, identity: canonical_revision.BuildIdentity,
+                   cfg: dict | None = None) -> dict:
+    """Re-open a package directory and prove it is complete and consistent.
+
+    Everything here is read back FROM DISK. It is deliberately independent of
+    whatever the staging step believed it wrote, because the whole point is to
+    catch a package that only looks finished.
+    """
+    if not pkg.is_dir():
+        fail("the package directory does not exist")
+    present = {p.name for p in pkg.iterdir()}
+    expected = expected_package_files(identity.revision)
+
+    missing = sorted(expected - present)
+    if missing:
+        fail(f"incomplete package: missing {len(missing)} required file(s): "
+             f"{', '.join(missing)}")
+    unexpected = sorted(present - expected)
+    if unexpected:
+        fail(f"unexpected file(s) in the package: {', '.join(unexpected)}")
+    if len(present) != len(expected):
+        fail(f"package file count is {len(present)}, expected {len(expected)}")
+
+    manifest = json.loads((pkg / MANIFEST_NAME).read_text(encoding="utf-8"))
+    sums = read_sha256sums(pkg / SHA256SUMS_NAME)
+    entries = manifest.get("artifacts") or []
+    if len(entries) != len(ARTIFACT_SOURCES):
+        fail("the manifest records no complete artifact set")
+
+    names = package_filenames(identity.revision)
+    for entry in entries:
+        name = entry.get("filename", "")
+        blob = pkg / name
+        if not blob.is_file():
+            fail(f"the manifest names a file that is not in the package: {name}")
+        size = blob.stat().st_size
+        if size == 0:
+            fail(f"{name} is empty")
+        if size != entry.get("sizeBytes"):
+            fail(f"{name}: size on disk differs from the manifest")
+        actual = sha256_file(blob)
+        if actual != entry.get("sha256"):
+            fail(f"{name}: SHA-256 on disk differs from the manifest")
+        if sums.get(name) != actual:
+            fail(f"{name}: SHA-256 on disk differs from {SHA256SUMS_NAME}")
+
+    # The published images must still carry the canonical revision.
+    fw = read_app_desc_version(pkg / names[ARTIFACT_OTA])
+    web = read_embedded_www_revision(pkg / names[ARTIFACT_WWW])
+    if fw != identity.revision or web != identity.revision:
+        fail("a published image does not carry the canonical revision")
+    if manifest.get("firmwareRevision") != fw or \
+            manifest.get("webRevision") != web:
+        fail("the manifest revisions disagree with the published images")
+
+    # No private value in any retained text file.
+    for text_name in (MANIFEST_NAME, SHA256SUMS_NAME):
+        blob = (pkg / text_name).read_text(encoding="utf-8")
+        assert_text_private_free(blob, cfg)
+    return manifest
+
+
+def assert_text_private_free(text: str, cfg: dict | None) -> None:
+    """Fail closed if a private value reached a retained text file.
+
+    The forbidden set mirrors the committed manifest contract exactly: the
+    coordinates, the trusted-time source, the provider and the timezone are
+    private. `distributionMode` is NOT — it is an approved bounded enum the
+    Gate W5 manifest is specified to carry, and treating it as a leak would
+    make the guard reject a correct package.
+    """
+    if not cfg or not cfg.get("ready"):
+        return
+    forbidden = [str(abs(cfg["latitude_e4"])), str(abs(cfg["longitude_e4"])),
+                 str(cfg["latitude_e4"]), str(cfg["longitude_e4"]),
+                 cfg["ntp"], cfg["provider"], cfg["timezone"]]
+    for value in forbidden:
+        if value and str(value) in text:
+            fail("a private value reached a retained package file")
+    for banned in ("open-meteo", "api.", "http", "://", "latitude", "longitude",
+                   "europe/brussels"):
+        if banned in text:
+            fail("a retained package file names a host, URL or private locale")
+    for name in ENV_VARS:
+        if name in text:
+            fail("a private environment variable name reached a package file")
+
+
+def publish_package(staging: Path, output: Path) -> None:
+    """Atomically move a COMPLETE staged package into place.
+
+    A pre-existing output directory is replaced only when it holds nothing but
+    pilot-package files; anything else is the owner's and is never removed.
+    """
+    if output.exists():
+        present = {p.name for p in output.iterdir()}
+        foreign = {n for n in present
+                   if not (n.endswith(".bin") or n in (MANIFEST_NAME,
+                                                       SHA256SUMS_NAME))}
+        if foreign:
+            fail("the output directory holds files this helper did not create; "
+                 "refusing to replace it")
+        shutil.rmtree(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staging, output)
 
 
 def find_container_runtime() -> str:
@@ -911,13 +1135,14 @@ def main(argv: list[str] | None = None) -> int:
         identity = resolve_identity(repo)
         digest_before = tracked_tree_digest(repo)
 
+        output = args.output.resolve()
+        staging = output.parent / f"{output.name}.staging-{os.getpid()}"
         work: Path | None = None
-        manifest_path = args.output / "manifest.json"
-        wrote_manifest = False
         built_frontend = False
+        published = False
         try:
-            # ONE canonical revision reaches the web build, the firmware
-            # PROJECT_VER, the release-pair check and the manifest.
+            # 1-2. Build the web image FRESH and the firmware, both from the
+            #      one canonical revision.
             build_frontend(repo, identity.revision, args.npm_install)
             built_frontend = True
 
@@ -925,8 +1150,9 @@ def main(argv: list[str] | None = None) -> int:
             write_pilot_defaults(work, cfg)
             run_build(repo, work, image=args.idf_image,
                       revision=identity.revision, cfg=cfg)
-
             build_dir = work / "build"
+
+            # 3-6. Prove the posture BEFORE anything is copied anywhere.
             verify_sdkconfig_h(build_dir)
             verify_symbols(build_dir / "esp-miner.elf", work=work,
                            image=args.idf_image)
@@ -935,30 +1161,43 @@ def main(argv: list[str] | None = None) -> int:
             print(f"release pair verified: firmware == web == "
                   f"{pair['firmwareRevision']}")
 
-            manifest = build_manifest(identity, cfg, digest_before, pair)
-            assert_manifest_private_free(manifest, cfg)
-            args.output.mkdir(parents=True, exist_ok=True)
-            manifest_path.write_text(
-                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8")
-            wrote_manifest = True
+            # 7-10. Stage the COMPLETE package beside the requested output:
+            #       copy both binaries, hash the copies, write SHA256SUMS.txt
+            #       and the manifest with artifact entries.
+            shutil.rmtree(staging, ignore_errors=True)
+            stage_package(staging, build_dir, identity, cfg, digest_before, pair)
+
+            # 11. Prove the staged package is complete before publishing it.
+            verify_package(staging, identity, cfg)
+
+            # 12. Publish atomically.
+            publish_package(staging, output)
+            published = True
         finally:
-            # Runs after a failure at ANY stage, including identity, frontend
-            # and firmware. Nothing private and nothing partial is left behind.
+            # Never touches a PUBLISHED package. Removes, in order: the private
+            # fragment, the helper-owned firmware work tree, an unpublished
+            # staging directory, and the helper-owned frontend output.
             if work is not None:
                 shred(work / "weather.sdkconfig.defaults")
                 shred(work / "sdkconfig")
                 shutil.rmtree(work, ignore_errors=True)
-            if built_frontend and not wrote_manifest:
-                # The helper owns this dist: it deleted any prior one and built
-                # it. A failed run must not leave it for a later build to reuse.
-                remove_stale_web_output(repo)
-            if not wrote_manifest and manifest_path.exists():
-                manifest_path.unlink(missing_ok=True)
+            if not published:
+                shutil.rmtree(staging, ignore_errors=True)
+                if built_frontend:
+                    remove_stale_web_output(repo)
 
         if tracked_tree_digest(repo) != digest_before:
             fail("the build modified the tracked tree")
-        print("weather recommendation pilot built; no private value was printed")
+
+        # 13. Re-open the PUBLISHED directory and prove it again, then and only
+        #     then report success. Verifying the staging copy is not enough:
+        #     the publish step itself must be proven to have delivered.
+        manifest = verify_package(output, identity, cfg)
+        for entry in manifest["artifacts"]:
+            print(f"  {entry['filename']}  {entry['sizeBytes']} bytes  "
+                  f"sha256={entry['sha256'][:16]}...")
+        print(f"PILOT BUILD OK: {len(expected_package_files(identity.revision))} "
+              f"files published; no private value was printed")
         return 0
     except PilotError as exc:
         print(f"error: {exc}", file=sys.stderr)

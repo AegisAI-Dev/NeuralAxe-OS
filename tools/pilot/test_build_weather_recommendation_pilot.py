@@ -585,8 +585,12 @@ class ProductionCallPath(unittest.TestCase):
         for call in ("resolve_identity(", "build_frontend(", "run_build(",
                      "verify_sdkconfig_h(", "verify_symbols(",
                      "verify_partition_fit(", "verify_release_pair(",
-                     "build_manifest(", "assert_manifest_private_free("):
+                     "stage_package(", "verify_package(", "publish_package("):
             self.assertIn(call, src, "main() never calls " + call)
+        # The manifest is written by the stager, which main() drives.
+        stage_src = inspect.getsource(w5.stage_package)
+        self.assertIn("build_manifest(", stage_src)
+        self.assertIn("assert_manifest_private_free(", stage_src)
 
     def test_the_one_canonical_revision_reaches_web_and_firmware(self):
         import inspect
@@ -836,6 +840,263 @@ class BuildFailureDiagnostics(unittest.TestCase):
         idx_check = src.index("if proc.returncode != 0:")
         idx_report = src.index("report_build_failure(")
         self.assertLess(idx_check, idx_report)
+
+
+REV = "v0.0.0-0-gdeadbee"
+
+
+def _identity(rev=REV):
+    return w5.canonical_revision.BuildIdentity(
+        commit="d" * 40, revision=rev, dirty=False, branch="b")
+
+
+def _fake_build(build: Path, rev=REV, *, ota=True, www=True):
+    """A build directory carrying images that embed `rev`."""
+    build.mkdir(parents=True, exist_ok=True)
+    if ota:
+        header = bytearray(0x60)
+        header[0x20:0x24] = w5.APP_DESC_MAGIC
+        header[0x30:0x30 + len(rev)] = rev.encode()
+        (build / "esp-miner.bin").write_bytes(bytes(header) + b"\xff" * 512)
+    if www:
+        (build / "www.bin").write_bytes(b"\x00" * 64 + rev.encode() + b"\x00" * 64)
+    return build
+
+
+class PackageStaging(unittest.TestCase):
+    """Success must be impossible without a complete, verified package."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="nx-w6-pkg-"))
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.cfg = w5.read_private_config(env())
+        self.ident = _identity()
+
+    def _stage(self, build=None, rev=REV):
+        build = build or _fake_build(self.tmp / "build", rev)
+        staging = self.tmp / "pkg"
+        pair = {"firmwareRevision": rev, "webRevision": rev,
+                "releasePairVerified": True}
+        return staging, w5.stage_package(staging, build, _identity(rev),
+                                         self.cfg, "digest", pair)
+
+    # ---------------- the reported defect ----------------
+
+    def test_a_manifest_only_directory_cannot_succeed(self):
+        """THE regression: manifest.json alone must fail closed."""
+        pkg = self.tmp / "manifest-only"
+        pkg.mkdir()
+        (pkg / w5.MANIFEST_NAME).write_text("{}", encoding="utf-8")
+        with self.assertRaises(w5.PilotError) as ctx:
+            w5.verify_package(pkg, self.ident, self.cfg)
+        self.assertIn("missing", str(ctx.exception))
+
+    def test_an_empty_directory_cannot_succeed(self):
+        pkg = self.tmp / "empty"
+        pkg.mkdir()
+        with self.assertRaises(w5.PilotError):
+            w5.verify_package(pkg, self.ident, self.cfg)
+
+    # ---------------- sources ----------------
+
+    def test_a_missing_ota_source_fails(self):
+        build = _fake_build(self.tmp / "b1", ota=False)
+        with self.assertRaises(w5.PilotError) as ctx:
+            self._stage(build)
+        self.assertIn("esp-miner.bin", str(ctx.exception))
+
+    def test_a_missing_www_source_fails(self):
+        build = _fake_build(self.tmp / "b2", www=False)
+        with self.assertRaises(w5.PilotError) as ctx:
+            self._stage(build)
+        self.assertIn("www.bin", str(ctx.exception))
+
+    def test_an_empty_source_fails(self):
+        build = _fake_build(self.tmp / "b3")
+        (build / "www.bin").write_bytes(b"")
+        with self.assertRaises(w5.PilotError):
+            self._stage(build)
+
+    def test_a_copy_failure_fails(self):
+        import shutil as _sh
+        build = _fake_build(self.tmp / "b4")
+        original = w5.shutil.copyfile
+
+        def broken(src, dst):
+            raise OSError("no space left on device")
+        try:
+            w5.shutil.copyfile = broken
+            with self.assertRaises(OSError):
+                self._stage(build)
+        finally:
+            w5.shutil.copyfile = original
+
+    # ---------------- hashes ----------------
+
+    def test_hashes_come_from_the_staged_copies(self):
+        staging, manifest = self._stage()
+        for entry in manifest["artifacts"]:
+            staged = staging / entry["filename"]
+            self.assertEqual(w5.sha256_file(staged), entry["sha256"])
+            self.assertEqual(staged.stat().st_size, entry["sizeBytes"])
+        # Corrupting a staged copy must be detected on verification.
+        first = manifest["artifacts"][0]["filename"]
+        (staging / first).write_bytes(b"tampered")
+        with self.assertRaises(w5.PilotError):
+            w5.verify_package(staging, self.ident, self.cfg)
+
+    def test_the_manifest_and_sha256sums_agree(self):
+        staging, manifest = self._stage()
+        sums = w5.read_sha256sums(staging / w5.SHA256SUMS_NAME)
+        self.assertEqual(len(sums), len(manifest["artifacts"]))
+        for entry in manifest["artifacts"]:
+            self.assertEqual(sums[entry["filename"]], entry["sha256"])
+        # A SHA256SUMS that disagrees is caught.
+        (staging / w5.SHA256SUMS_NAME).write_text(
+            "0" * 64 + "  " + manifest["artifacts"][0]["filename"] + chr(10),
+            encoding="utf-8")
+        with self.assertRaises(w5.PilotError):
+            w5.verify_package(staging, self.ident, self.cfg)
+
+    # ---------------- completeness ----------------
+
+    def test_a_complete_package_verifies(self):
+        staging, manifest = self._stage()
+        got = w5.verify_package(staging, self.ident, self.cfg)
+        self.assertEqual(len(got["artifacts"]), 2)
+        self.assertEqual({p.name for p in staging.iterdir()},
+                         w5.expected_package_files(REV))
+
+    def test_an_unexpected_extra_file_fails(self):
+        staging, _ = self._stage()
+        (staging / "surprise.bin").write_bytes(b"x")
+        with self.assertRaises(w5.PilotError) as ctx:
+            w5.verify_package(staging, self.ident, self.cfg)
+        self.assertIn("unexpected", str(ctx.exception))
+
+    def test_a_revision_mismatch_fails(self):
+        staging, _ = self._stage()
+        # The package is complete but names a different revision than asked.
+        with self.assertRaises(w5.PilotError):
+            w5.verify_package(staging, _identity("v9.9.9-9-gfeedfac"), self.cfg)
+
+    def test_an_image_that_lost_its_revision_fails(self):
+        staging, manifest = self._stage()
+        names = w5.package_filenames(REV)
+        blob = staging / names[w5.ARTIFACT_WWW]
+        blob.write_bytes(b"\x00" * 128)          # no embedded revision
+        # Keep the hashes consistent so ONLY the revision check can fail.
+        entry = [a for a in manifest["artifacts"]
+                 if a["filename"] == blob.name][0]
+        entry["sha256"] = w5.sha256_file(blob)
+        entry["sizeBytes"] = blob.stat().st_size
+        (staging / w5.MANIFEST_NAME).write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + chr(10),
+            encoding="utf-8")
+        lines = [a["sha256"] + "  " + a["filename"] for a in manifest["artifacts"]]
+        (staging / w5.SHA256SUMS_NAME).write_text(chr(10).join(lines) + chr(10),
+                                                  encoding="utf-8")
+        with self.assertRaises(w5.PilotError):
+            w5.verify_package(staging, self.ident, self.cfg)
+
+    # ---------------- naming and content policy ----------------
+
+    def test_filenames_carry_the_revision_and_the_bounded_suffix(self):
+        names = w5.package_filenames(REV)
+        for name in names.values():
+            self.assertIn(REV, name)
+            self.assertIn("weather-pilot", name)
+            self.assertTrue(name.endswith(".bin"))
+
+    def test_the_package_excludes_every_forbidden_deliverable(self):
+        staging, _ = self._stage()
+        present = " ".join(p.name for p in staging.iterdir()).lower()
+        for banned in ("factory", "merged", "bootloader", "partition-table",
+                       "ota_data", "nvs", "sdkconfig"):
+            self.assertNotIn(banned, present)
+
+    def test_no_private_value_reaches_a_retained_package_file(self):
+        staging, _ = self._stage()
+        for name in (w5.MANIFEST_NAME, w5.SHA256SUMS_NAME):
+            text = (staging / name).read_text(encoding="utf-8")
+            for secret in (SYN_NTP, SYN_LAT, SYN_LON, "europe/brussels",
+                           "open-meteo", str(SYN_LAT_E4),
+                           str(abs(SYN_LON_E4))):
+                self.assertNotIn(secret, text, repr(secret) + " leaked")
+            for var in w5.ENV_VARS:
+                self.assertNotIn(var, text)
+        # And a planted value is actually caught (the guard is not vacuous).
+        with self.assertRaises(w5.PilotError):
+            w5.assert_text_private_free("host=" + SYN_NTP, self.cfg)
+
+    def test_the_manifest_records_every_required_field(self):
+        _, manifest = self._stage()
+        self.assertEqual(len(manifest["gitCommit"]), 40)
+        self.assertEqual(manifest["canonicalGitDescribe"], REV)
+        self.assertEqual(manifest["firmwareRevision"], REV)
+        self.assertEqual(manifest["webRevision"], REV)
+        self.assertTrue(manifest["releasePairVerified"])
+        self.assertTrue(manifest["webImageFreshlyBuilt"])
+        self.assertEqual(manifest["boardVersion"], 601)
+        self.assertEqual(manifest["asicModel"], "BM1370")
+        self.assertTrue(manifest["recommendationOnly"])
+        self.assertFalse(manifest["hardwareTuningEnabled"])
+        self.assertFalse(manifest["executionEnabled"])
+        self.assertFalse(manifest["timedSessionApiEnabled"])
+        self.assertTrue(manifest["mutationObservabilityEnabled"])
+        for entry in manifest["artifacts"]:
+            self.assertIn(entry["type"], (w5.ARTIFACT_OTA, w5.ARTIFACT_WWW))
+            self.assertGreater(entry["sizeBytes"], 0)
+            self.assertRegex(entry["sha256"], r"^[0-9a-f]{64}$")
+
+    def test_the_manifest_holds_no_path(self):
+        _, manifest = self._stage()
+        blob = json.dumps(manifest)
+        for marker in ("/", chr(92), ":"):
+            offenders = [k for k, v in manifest.items()
+                         if isinstance(v, str) and marker in v]
+            self.assertEqual(offenders, [], "path-like value in " + str(offenders))
+        self.assertNotIn("nx-w6-", blob)
+
+    # ---------------- publish ----------------
+
+    def test_publish_is_atomic_and_leaves_no_staging_directory(self):
+        staging, _ = self._stage()
+        out = self.tmp / "published"
+        w5.publish_package(staging, out)
+        self.assertFalse(staging.exists())
+        self.assertEqual({p.name for p in out.iterdir()},
+                         w5.expected_package_files(REV))
+        w5.verify_package(out, self.ident, self.cfg)
+
+    def test_publish_refuses_to_replace_a_directory_it_does_not_own(self):
+        staging, _ = self._stage()
+        out = self.tmp / "owner-data"
+        out.mkdir()
+        (out / "owner-notes.txt").write_text("keep me", encoding="utf-8")
+        with self.assertRaises(w5.PilotError):
+            w5.publish_package(staging, out)
+        self.assertTrue((out / "owner-notes.txt").exists())
+
+    def test_cleanup_cannot_delete_a_published_package(self):
+        """The finally must key off `published`, never delete the output."""
+        import inspect
+        src = inspect.getsource(w5.main)
+        finally_block = src[src.index("finally:"):src.index("if tracked_tree_digest")]
+        self.assertIn("if not published:", finally_block)
+        # Nothing in the finally removes the published output directory.
+        self.assertNotIn("rmtree(output", finally_block)
+
+    def test_success_is_printed_only_after_the_published_package_verifies(self):
+        import inspect
+        src = inspect.getsource(w5.main)
+        i_publish = src.index("publish_package(staging, output)")
+        i_verify = src.index("verify_package(output, identity, cfg)")
+        i_ok = src.index("PILOT BUILD OK")
+        self.assertLess(i_publish, i_verify, "published output verified too early")
+        self.assertLess(i_verify, i_ok, "success printed before verification")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
