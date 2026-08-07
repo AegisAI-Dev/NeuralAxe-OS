@@ -6,16 +6,31 @@
 
 #include "nx_weather_source.h"   /* NxWeatherSourceStatus, config model */
 #include "weather_runtime.h"     /* WeatherRuntimeState, recommendation */
+#include "pool_time_source.h"    /* Gate B10 sanitized trusted-time model */
 
 /*
  * NeuralAxe Weather-Aware Tuning — RECOMMENDATION-ONLY PILOT DIAGNOSTICS
  * (Phase 2W, Gate W6). Board 601 / BM1370 only.
  *
- * W6 prepares a SUPERVISED PHYSICAL PILOT in which the device obtains trusted
- * time from the committed B2/B10 provider, evaluates the committed Brussels
- * schedule, retrieves ONE forecast from the explicitly configured W3
- * provider, evaluates the committed W1 policy, and emits a RECOMMENDATION —
- * and changes nothing.
+ * W6 prepares a SUPERVISED PHYSICAL PILOT for a device that will eventually
+ * obtain trusted time from the committed B2/B10 provider, evaluate the
+ * committed Brussels schedule, retrieve ONE forecast from the explicitly
+ * configured W3 provider, evaluate the committed W1 policy, and emit a
+ * RECOMMENDATION — and change nothing.
+ *
+ * WHAT W6 ITSELF DOES, EXACTLY. The pilot steps the W4 runtime with NO
+ * injected clock, transport or store. That is deliberate — it is what makes
+ * the pilot inert — but it has a consequence that must be stated plainly
+ * rather than implied: the runtime state the pilot reports is fixed at boot
+ * and is ALWAYS WAITING_FOR_TRUSTED_TIME with NO_TRUSTED_TIME as its reason,
+ * on every device, forever, no matter what the trusted-time provider does.
+ * `trusted_time_available` on a pilot line is read from that runtime and is
+ * therefore a CONSTANT false, not a measurement.
+ *
+ * A supervised pilot must still be able to see whether the device acquired
+ * trusted time, so Gate W6.2 adds a separate, read-only PROJECTION of the
+ * committed Gate B10 diagnostics (the time_* fields below). Those ARE the
+ * measurement. Do not read the two as one fact.
  *
  * This module is the pilot's EYES, never its hands. It:
  *   - reads snapshots and counters, and mutates nothing;
@@ -298,6 +313,39 @@ typedef struct {
     uint32_t mut_ota;
     uint32_t mut_session;
     bool     tuning_unchanged;
+
+    /*
+     * Gate W6.2 — the READ-ONLY projection of the committed Gate B10
+     * sanitized trusted-time diagnostics.
+     *
+     * WHY IT EXISTS. Before this, the only trusted-time fact on a W6 line was
+     * `trusted_time_available`, and that field is read from the W4 runtime
+     * recommendation — a runtime the pilot deliberately steps with NO injected
+     * clock. It is therefore permanently false BY CONSTRUCTION and says
+     * nothing whatever about whether the device acquired trusted time. An
+     * owner watching a real pilot could not distinguish "SNTP never started",
+     * "SNTP started and is syncing", "the candidate was rejected" and "trusted
+     * time is healthy and the pilot simply never consults it".
+     *
+     * These fields answer that question from the ONE authority that owns it:
+     * the B10 diagnostics published by the single Gate B6 owner task. They
+     * create no second provider, start nothing, change no trust policy and
+     * feed no decision — nx_weather_pilot_check() does not read them, so the
+     * invariant verdict is byte-for-byte what it was.
+     *
+     * PRIVACY. Every member is a bounded scalar or a token id. There is no
+     * string field, so the configured hostname, a resolved address, DNS error
+     * text, a raw epoch or a sync generation cannot be expressed here.
+     */
+    NxWeatherFactState time_fact;   /* provenance of the eight fields below */
+    bool     time_source_configured;/* a VALID source exists (never which)  */
+    uint8_t  time_source_state;     /* PoolTimeSourceState as a token id    */
+    uint32_t time_sync_attempts;    /* bounded start attempts               */
+    bool     time_operational;      /* available AND the service is healthy */
+    bool     time_available;        /* B2 says trusted right now            */
+    bool     time_sync_age_valid;
+    uint32_t time_sync_age_s;       /* MONOTONIC age, saturating, never epoch */
+    uint8_t  last_time_sync_result; /* PoolTimeError as a token id          */
 } NxWeatherPilotLine;
 
 /*
@@ -318,6 +366,26 @@ typedef struct {
 } NxWeatherPilotDiag;
 
 void nx_weather_pilot_diag_init(NxWeatherPilotDiag *d);
+
+/*
+ * Gate W6.2 — PURE projection of the Gate B10 sanitized trusted-time
+ * diagnostics onto the pilot line. Total, side-effect free and NULL-safe.
+ *
+ * `runtime_linked` states whether CONFIG_NX_TIMED_SESSIONS put a runtime
+ * instance in this image at all; the caller knows, this function does not.
+ *
+ *   runtime_linked == false          -> STRUCTURAL: no provider can exist.
+ *   `d` NULL or structurally invalid -> UNAVAILABLE: nothing may be quoted.
+ *   otherwise                        -> OBSERVED, copied field for field.
+ *
+ * It never derives, smooths or infers a state: an unreadable authority is
+ * reported as unreadable, never as a reassuring zero. It authorizes nothing
+ * and is deliberately NOT consulted by nx_weather_pilot_check() — the pilot's
+ * invariant verdict does not depend on trusted time and must not begin to.
+ */
+void nx_weather_pilot_time_project(const PoolTimeSourceDiagnostics *d,
+                                   bool runtime_linked,
+                                   NxWeatherPilotLine *out);
 
 /*
  * Classify one runtime observation into an event. Pure: it maps the W5 status

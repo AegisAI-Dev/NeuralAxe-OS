@@ -46,6 +46,16 @@
  *                    absent, when the baseline was refused, or when an
  *                    authority stopped answering.
  *
+ *  time_*            W6.2. OBSERVED from the committed Gate B10 sanitized
+ *                    trusted-time diagnostics that the single Gate B6 owner
+ *                    task publishes (pool_session_runtime_time_diagnostics).
+ *                    Update ownership: that one task. Lifetime: the boot.
+ *                    STRUCTURAL when CONFIG_NX_TIMED_SESSIONS is absent — no
+ *                    runtime instance exists, so no provider can exist.
+ *                    UNAVAILABLE when the instance exists but published no
+ *                    structurally valid model. This projection READS; it
+ *                    starts nothing and feeds no invariant.
+ *
  *  resources         OBSERVED from ESP-IDF: heap_caps_get_free_size /
  *                    _minimum_free_size (MALLOC_CAP_INTERNAL),
  *                    uxTaskGetStackHighWaterMark(NULL), esp_timer_get_time().
@@ -67,6 +77,7 @@
 #include "nx_weather_pilot_facts.h"
 #include "nx_mutation_baseline.h"
 #include "pool_session_runtime.h"
+#include "pool_time_source.h"
 
 /* ------------------------------------------------------------------ */
 /* Timed-session authorities (Gate B5 / B6)                            */
@@ -187,6 +198,33 @@ void nx_weather_pilot_prereq_gather(NxBaselinePrereq *out, bool host_task_valid)
     out->protocol_normal_source = true;
     out->session_posture_clean  = true;
     out->no_terminal_pending    = true;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
+/* Trusted-time authority (Gate B10, projected at Gate W6.2)           */
+/* ------------------------------------------------------------------ */
+
+void nx_weather_pilot_time_gather(NxWeatherPilotLine *out)
+{
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    PoolSessionRuntime       *rt = pool_session_runtime_default_instance();
+    PoolTimeSourceDiagnostics d;
+
+    /*
+     * ONE read of the already-published model. The accessor copies it under
+     * the runtime's own short critical section, so this can never observe a
+     * torn value and never holds a lock of its own. It starts no provider,
+     * registers no callback, opens no socket and performs no DNS: there is
+     * exactly one trusted-time provider in this image and this is not it.
+     */
+    if (rt == NULL || pool_session_runtime_time_diagnostics(rt, &d) != RUNTIME_OK) {
+        nx_weather_pilot_time_project(NULL, true, out);
+        return;
+    }
+    nx_weather_pilot_time_project(&d, true, out);
+#else
+    nx_weather_pilot_time_project(NULL, false, out);
 #endif
 }
 

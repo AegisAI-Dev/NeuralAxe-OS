@@ -269,6 +269,54 @@ void nx_weather_pilot_diag_init(NxWeatherPilotDiag *d)
     d->first_violation = WX_INV_OK;
 }
 
+void nx_weather_pilot_time_project(const PoolTimeSourceDiagnostics *d,
+                                   bool runtime_linked,
+                                   NxWeatherPilotLine *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    /*
+     * Fail closed FIRST, so every early return below leaves an unreadable
+     * projection rather than a passing zero. TIME_SOURCE_UNCONFIGURED and
+     * TIME_ERR_NOT_INITIALIZED are the honest "nothing was read" tokens.
+     */
+    out->time_fact              = NX_WX_FACT_UNAVAILABLE;
+    out->time_source_configured = false;
+    out->time_source_state      = (uint8_t)TIME_SOURCE_UNCONFIGURED;
+    out->time_sync_attempts     = 0u;
+    out->time_operational       = false;
+    out->time_available         = false;
+    out->time_sync_age_valid    = false;
+    out->time_sync_age_s        = 0u;
+    out->last_time_sync_result  = (uint8_t)TIME_ERR_NOT_INITIALIZED;
+
+    if (!runtime_linked) {
+        /* No runtime instance exists in this image, so no trusted-time
+         * provider can exist. A property of the LINK, not a reading — which
+         * is stronger evidence than any value could be. */
+        out->time_fact = NX_WX_FACT_STRUCTURAL;
+        return;
+    }
+    if (!pool_time_source_diagnostics_valid(d)) {
+        /* The runtime exists but published nothing this pilot may quote.
+         * Say exactly that; do not invent a state on its behalf. */
+        return;
+    }
+
+    out->time_fact              = NX_WX_FACT_OBSERVED;
+    out->time_source_configured = d->source_configured;
+    out->time_source_state      = (uint8_t)d->state;
+    out->time_sync_attempts     = d->sync_attempt_count;
+    out->time_operational       = d->trusted_time_operational;
+    out->time_available         = d->trusted_time_available;
+    out->time_sync_age_valid    = d->sync_age_valid;
+    /* B10 already saturates the age; restating the gate here makes the bound
+     * a property of the projection too, not one it merely inherits. */
+    out->time_sync_age_s        = d->sync_age_valid ? d->sync_age_s : 0u;
+    out->last_time_sync_result  = (uint8_t)d->last_sync_result;
+}
+
 bool nx_weather_pilot_should_emit(const NxWeatherPilotDiag *d,
                                   NxWeatherPilotEvent e, uint64_t now_us)
 {

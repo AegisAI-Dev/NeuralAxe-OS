@@ -30,6 +30,8 @@
 #include "nx_weather_pilot_diag_log.h"
 #include "nx_weather_pilot_facts.h"
 #include "nx_mutation_baseline.h"
+#include "pool_time_source.h"
+#include "pool_session_runtime.h"
 
 static const char *TAG = "nx_wx_pilot";
 
@@ -38,18 +40,87 @@ static NxWeatherPilotDiag s_diag;
 static bool               s_booted;
 
 /*
- * The W5 configuration and the W4 runtime posture as observed at boot. They
- * are derived from BUILD-TIME configuration and from a runtime step with no
- * injected clock, transport or store, so they cannot change while the device
- * runs. Caching them lets the periodic observation avoid rebuilding a runtime
- * whose answer is fixed by construction. No private value is stored: the
- * config here is the same bounded structure the boot notice already holds.
+ * The W5 configuration, and THE ONE weather runtime instance.
+ *
+ * GATE W6.2 — WHY THIS IS NO LONGER CACHED. Until now the pilot stepped a
+ * throwaway runtime with NO injected clock and cached the verdict, so
+ * `state` and `trusted_time` on every line were compile-time constants:
+ * WAITING_FOR_TRUSTED_TIME / false, on every device, forever, no matter what
+ * the trusted-time provider did. That is not an observation, and a pilot
+ * whose central reading cannot change is not a pilot.
+ *
+ * The runtime now LIVES across ticks and is stepped for real, so the schedule
+ * progress, the climate hysteresis stance and the idempotence witness it
+ * carries mean what they say. It is bound once, lazily, because the B6
+ * runtime that owns the clock boots AFTER this notice (main.c:150 vs :161).
+ *
+ * RAM-only. No private value is stored: the config is the same bounded
+ * structure the boot notice already held.
  */
 static NxWeatherSourceConfig s_cfg;
 static NxWeatherSourceStatus s_status;
+static WeatherRuntimeConfig  s_runtime_cfg;
+static WeatherRuntime        s_rt;
+static bool                  s_rt_bound;
 static WeatherRuntimeState   s_state;
 static WeatherRecommendation s_rec;
 static bool                  s_posture_cached;
+
+/*
+ * Bind the weather runtime to the PRODUCTION trusted-time authority.
+ *
+ * It BORROWS the clock and the trust policy the committed Gate B6/B10
+ * runtime already owns. It constructs no clock, starts no SNTP, writes no
+ * anchor and sets no epoch floor — there is no API here that could — so
+ * `trusted(weather)` implies `trusted(B2/B10)` structurally: the only anchor
+ * reachable is the one B2 already accepted, judged by B2's own policy.
+ *
+ * TRANSPORT IS DELIBERATELY NULL. The committed W3 adapter
+ * (weather_open_meteo_http.c) is a SYNCHRONOUS blocking fetch bounded at
+ * WEATHER_HTTP_TIMEOUT_MS = 8000 ms, and the only host offered to the pilot
+ * is the 1 s statistics task. Wiring it here would stall that task for up to
+ * eight of its own periods and run a TLS handshake on its 8 KB shared stack.
+ * A NULL transport is not an oversight; it is the honest posture until an
+ * asynchronous W3 execution context exists. `weather_runtime_fetch` checks
+ * the transport pointer before anything else, so no request can occur.
+ *
+ * Returns true once bound. Before the B6 runtime exists the clock is NULL and
+ * this simply reports "not yet" — the pilot then waits, untrusted, which is
+ * the correct reading rather than a fabricated one.
+ */
+static bool wx_bind_runtime(const WeatherRuntimeConfig *runtime_cfg)
+{
+    WeatherRuntimeDeps deps;
+
+    if (s_rt_bound) {
+        return true;
+    }
+    if (runtime_cfg == NULL || !nx_weather_source_ready(s_status)) {
+        return false;
+    }
+    memset(&deps, 0, sizeof(deps));
+#ifdef CONFIG_NX_TIMED_SESSIONS
+    {
+        const PoolSessionRuntime *rt = pool_session_runtime_default_instance();
+
+        deps.clock       = pool_session_runtime_clock(rt);
+        deps.time_policy = pool_session_runtime_trust_policy(rt);
+    }
+#endif
+    /* No clock means no trusted time is obtainable, and a runtime bound to
+     * nothing would freeze this pilot exactly as the old one did. Wait. */
+    if (deps.clock == NULL || deps.time_policy == NULL) {
+        return false;
+    }
+    deps.transport     = NULL;   /* see the contract above */
+    deps.transport_ctx = NULL;
+
+    if (weather_runtime_init(&s_rt, runtime_cfg, &deps) != WEATHER_RUNTIME_OK) {
+        return false;
+    }
+    s_rt_bound = true;
+    return true;
+}
 
 /*
  * The task the periodic observation is expected to run on. Latched on the
@@ -120,6 +191,21 @@ static void fill_evidence(NxWeatherPilotLine *line,
     line->tuning_unchanged     = posture->tuning_unchanged;
 }
 
+/*
+ * Gate W6.2 — project the committed Gate B10 trusted-time diagnostics onto
+ * the line. Called on EVERY emitted line, including the boot notice, because
+ * "the provider had not started yet" is exactly as informative as "it is
+ * trusted" and an owner needs to see the transition between them.
+ *
+ * Read-only: it starts no provider, registers no callback and changes no
+ * policy. The invariant verdict above was already computed and does not
+ * consult any of these fields.
+ */
+static void fill_time(NxWeatherPilotLine *line)
+{
+    nx_weather_pilot_time_gather(line);
+}
+
 static void emit(const NxWeatherPilotLine *l)
 {
     /*
@@ -135,7 +221,10 @@ static void emit(const NxWeatherPilotLine *l)
              "mut_obs=%d base=%s block=%s base_us=%llu base_zero=%d "
              "hist_lost=%d "
              "mut_hw=%u mut_pool=%u mut_proto=%u mut_restart=%u mut_ota=%u "
-             "mut_session=%u tuning_same=%d",
+             "mut_session=%u tuning_same=%d "
+             "time_fact=%s time_src_cfg=%d time_src=%s time_attempts=%u "
+             "time_operational=%d time_available=%d time_age_valid=%d "
+             "time_age_s=%u time_last=%s",
              nx_weather_pilot_event_str(l->event),
              (unsigned)l->sequence,
              nx_weather_source_status_str(l->source_status),
@@ -163,7 +252,14 @@ static void emit(const NxWeatherPilotLine *l)
              (unsigned)l->mut_hardware, (unsigned)l->mut_pool,
              (unsigned)l->mut_protocol, (unsigned)l->mut_restart,
              (unsigned)l->mut_ota, (unsigned)l->mut_session,
-             (int)l->tuning_unchanged);
+             (int)l->tuning_unchanged,
+             nx_weather_fact_state_str(l->time_fact),
+             (int)l->time_source_configured,
+             pool_time_source_state_str((PoolTimeSourceState)l->time_source_state),
+             (unsigned)l->time_sync_attempts,
+             (int)l->time_operational, (int)l->time_available,
+             (int)l->time_sync_age_valid, (unsigned)l->time_sync_age_s,
+             pool_time_error_str((PoolTimeError)l->last_time_sync_result));
 }
 
 void nx_weather_pilot_log_boot(void)
@@ -180,6 +276,7 @@ void nx_weather_pilot_log_boot(void)
                                 WX_INV_OK, &line)) {
         fill_resources(&line);
         fill_evidence(&line, NULL);
+        fill_time(&line);
         emit(&line);
     }
     /*
@@ -220,6 +317,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
                                     inv, &line)) {
             fill_resources(&line);
             fill_evidence(&line, posture);
+            fill_time(&line);
             emit(&line);
         }
     }
@@ -230,6 +328,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
                                     rec, schedule_due, inv, &line)) {
             fill_resources(&line);
             fill_evidence(&line, posture);
+            fill_time(&line);
             emit(&line);
         }
     }
@@ -241,6 +340,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
                                     &line)) {
             fill_resources(&line);
             fill_evidence(&line, posture);
+            fill_time(&line);
             emit(&line);
         }
     }
@@ -266,7 +366,6 @@ void nx_weather_pilot_boot_notice(void)
 {
     NxWeatherSourceConfig cfg;
     WeatherRuntimeConfig  runtime_cfg;
-    WeatherRuntime        rt;
     WeatherRecommendation rec;
     WeatherRuntimeState   state;
     NxWeatherSourceStatus status;
@@ -287,27 +386,33 @@ void nx_weather_pilot_boot_notice(void)
     memset(&res, 0, sizeof(res));
     nx_weather_pilot_facts_gather(&cfg, status, &posture, &res);
 
+    /* The configuration is needed by the binder below, so publish it first. */
+    s_cfg        = cfg;
+    s_status     = status;
+    s_runtime_cfg = runtime_cfg;
+
     memset(&rec, 0, sizeof(rec));
     state = WEATHER_RUNTIME_DISABLED;
-    if (nx_weather_source_ready(status) &&
-        weather_runtime_init(&rt, &runtime_cfg, NULL) == WEATHER_RUNTIME_OK) {
+    /*
+     * Try to bind to the production clock now. It will NOT succeed here: this
+     * notice runs before nx_timed_sessions_boot_init(), so no B6 runtime
+     * exists yet and there is no anchor to borrow. The attempt is made anyway
+     * so the boot line reports the real posture rather than a rehearsed one,
+     * and the periodic observation retries until the clock appears.
+     */
+    if (wx_bind_runtime(&s_runtime_cfg)) {
+        state = weather_runtime_step(&s_rt, NULL, NULL, &rec);
+    } else if (nx_weather_source_ready(status)) {
         /*
-         * NO dependencies injected — no clock, no transport, no store — so
-         * this step performs ZERO network requests and reports a bounded
-         * waiting state. That is a structural fact, not a promise.
+         * Configured but not yet bound. Report the bounded WAITING state that
+         * an unbound runtime genuinely is, without constructing a throwaway
+         * runtime whose answer would then be mistaken for a measurement.
          */
-        state = weather_runtime_step(&rt, NULL, NULL, &rec);
+        state = WEATHER_RUNTIME_WAITING_FOR_TRUSTED_TIME;
+        rec.not_executed = WEATHER_NOT_EXECUTED_NO_TRUSTED_TIME;
+        rec.time_state   = WEATHER_TIME_PROVIDER_ABSENT;
     }
 
-    /*
-     * Cache the posture for the periodic observation. Both inputs are fixed
-     * by construction — the configuration is compile-time, and a runtime step
-     * with no injected clock, transport or store always reaches the same
-     * bounded state — so re-deriving them every second would produce an
-     * identical answer at a cost the pilot has no reason to pay.
-     */
-    s_cfg            = cfg;
-    s_status         = status;
     s_state          = state;
     s_rec            = rec;
     s_posture_cached = true;
@@ -340,6 +445,26 @@ void nx_weather_pilot_observe(void)
      */
     nx_weather_pilot_prereq_gather(&pre, host_task_valid());
     (void)nx_mutation_baseline_capture((uint64_t)esp_timer_get_time(), &pre);
+
+    /*
+     * GATE W6.2 — step the runtime FOR REAL.
+     *
+     * Bind first (a no-op once bound; before the B6 runtime exists it simply
+     * reports "not yet"). Then one bounded, non-blocking, allocation-free
+     * step: it reads the borrowed anchor, evaluates the committed Brussels
+     * schedule when time is trusted, and returns a state that can now
+     * actually CHANGE — which is the whole point of the correction.
+     *
+     * `observation` stays NULL because the transport is NULL, so no fetch is
+     * attempted and no network request is possible. `env` stays NULL because
+     * the W1 policy inputs belong to the integrator and are not wired yet;
+     * the runtime reports that honestly as NO_PROFILE_SELECTED rather than
+     * substituting defaults.
+     */
+    if (wx_bind_runtime(&s_runtime_cfg)) {
+        memset(&s_rec, 0, sizeof(s_rec));
+        s_state = weather_runtime_step(&s_rt, NULL, NULL, &s_rec);
+    }
 
     /* Re-gather from the authorities. Nothing here mutates the subsystems it
      * reads, allocates, touches NVS or issues a network request. */

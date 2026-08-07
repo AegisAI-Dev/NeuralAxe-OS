@@ -319,6 +319,43 @@ uint32_t pool_session_runtime_time_sync_callbacks(const PoolSessionRuntime *rt);
  * required the trust. Observation never authorizes anything. */
 bool pool_session_runtime_time_observation_active(const PoolSessionRuntime *rt);
 
+/* ------------------------------------------------------------------ */
+/* Gate W6.2 — READ-ONLY loan of the ONE trusted-time clock            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Borrow the runtime's PoolTimeClock so another READER (the Gate W4 weather
+ * runtime) can consume the SAME accepted anchor this runtime already owns.
+ *
+ * THE POINT. Handing out this pointer is what makes "no second SNTP
+ * provider, no second anchor, no second epoch floor" a structural fact
+ * instead of a promise: the borrower has no way to construct trust, only to
+ * read whatever B2/B10 already accepted. `trusted(borrower)` therefore
+ * implies `trusted(B2/B10)` by construction, not by convention.
+ *
+ * READ-ONLY AND CROSS-TASK SAFE. The ops are two pure reads: the injected
+ * monotonic source, and the provider's accepted anchor — which
+ * pool_time_sntp reads inside its own bounded spinlock, so a caller on a
+ * different task can never observe a torn anchor. Neither op starts,
+ * stops, initializes or deinitializes anything, takes a B5 lease, touches
+ * NVS or logs. Before the provider is initialized the anchor read simply
+ * reports "no anchor", which is untrusted — never a guess.
+ *
+ * Returns NULL for a NULL or uninitialized runtime, so a borrower that
+ * ignores the result degrades to an untrusted bounded wait rather than
+ * dereferencing anything.
+ */
+const PoolTimeClock *pool_session_runtime_clock(const PoolSessionRuntime *rt);
+
+/*
+ * Borrow the trust policy the SAME runtime applies, so a borrower judges an
+ * anchor by identical rules (epoch bounds, maximum age, regression floor).
+ * A borrower supplying its own policy could otherwise call an anchor
+ * trusted that B2/B10 refuses — the exact divergence this prevents.
+ */
+const PoolTimeTrustPolicy *pool_session_runtime_trust_policy(
+    const PoolSessionRuntime *rt);
+
 #ifdef CONFIG_NX_TIMED_SESSIONS_EXECUTION
 /*
  * Gate B7 executor hook (exists ONLY under the execution flag; with it off

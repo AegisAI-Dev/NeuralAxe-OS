@@ -981,6 +981,55 @@ static void runtime_refresh_time_diagnostics(PoolSessionRuntime *rt)
  * or the mining grant, and never restarts the device. Reaching the bound
  * changes only what is REPORTED — normal source mining continues untouched.
  */
+/*
+ * Gate W6.2 — the bounded observation START RETRY.
+ *
+ * THE DEFECT THIS CLOSES. The observation start was reachable from exactly
+ * ONE place: the owner-task branch that fires on the FIRST applied
+ * RUNTIME_EVENT_NETWORK_READY. `pool_runtime_control_apply` sets that bit
+ * only while `!c->network_ready`, and `outcome.start_time_provider` requires
+ * RUNTIME_WAITING_FOR_TRUSTED_TIME, which an observation device (FREE) never
+ * enters. So a device whose single attempt was refused could never spend
+ * attempts 2..POOL_TIME_SOURCE_ATTEMPTS_MAX, and — because
+ * `time_observation_active` is only set by a SUCCESSFUL start — its
+ * diagnostics then froze at that one publication for the rest of the boot.
+ *
+ * WHAT THIS IS NOT. It is not a second retry mechanism: the decision, the
+ * bounded budget and the monotonic backoff all still belong to
+ * runtime_start_time_provider() / pool_time_source_retry_decide(). This only
+ * OFFERS the existing path another opportunity, on the same 1 s owner-task
+ * tick that already exists, from the same single task. Between attempts the
+ * committed backoff (15 s doubling to a 120 s ceiling) refuses, so a tick
+ * that is too early costs one pure comparison and nothing else.
+ *
+ * It never runs when the provider is already started (so a trusted device is
+ * untouched), when the source is unconfigured or invalid (so no DNS or SNTP
+ * can be reached), when the budget is spent, when the network is not ready,
+ * or when a session owner exists. It performs no restart, no session
+ * mutation, no store write and no lease operation, and normal EMPTY-store
+ * mining stays ALLOW_SOURCE throughout.
+ */
+static void runtime_step_observation_retry(PoolSessionRuntime *rt)
+{
+    if (rt->time_provider_started || !rt->deps.observe_enabled ||
+        !rt->control.network_ready || rt->time_attempts_exhausted) {
+        return;
+    }
+    /* Observation is only ever for a device with NO session owner; anything
+     * else is the B4 plan's business, and the plan has its own start path. */
+    if (rt->plan.trusted_time_required || rt->plan.restore_required ||
+        rt->record_present) {
+        return;
+    }
+    /* An absent or malformed source is never retried: retrying could not
+     * change the answer, and it must not consume the bounded budget. */
+    if (!runtime_time_source_configured(rt)) {
+        return;
+    }
+    (void)runtime_start_time_provider(rt);
+    runtime_refresh_time_diagnostics(rt);
+}
+
 static void runtime_step_observation(PoolSessionRuntime *rt)
 {
     /*
@@ -1462,6 +1511,25 @@ uint32_t pool_session_runtime_time_sync_callbacks(const PoolSessionRuntime *rt)
     return n;
 }
 
+const PoolTimeClock *pool_session_runtime_clock(const PoolSessionRuntime *rt)
+{
+    /* Uninitialized means the clock ops/ctx were never bound, so there is
+     * nothing safe to lend. NULL degrades the borrower to untrusted. */
+    if (rt == NULL || !rt->initialized) {
+        return NULL;
+    }
+    return &rt->clock;
+}
+
+const PoolTimeTrustPolicy *pool_session_runtime_trust_policy(
+    const PoolSessionRuntime *rt)
+{
+    if (rt == NULL || !rt->initialized) {
+        return NULL;
+    }
+    return &rt->time_policy;
+}
+
 bool pool_session_runtime_time_observation_active(const PoolSessionRuntime *rt)
 {
     return (rt == NULL) ? false : rt->time_observation_active;
@@ -1555,6 +1623,9 @@ static void runtime_task(void *arg)
         }
 
 #ifdef CONFIG_NX_TIMED_SESSIONS_TIME_OBSERVE
+        /* Gate W6.2: offer the EXISTING bounded start path another chance
+         * when the first attempt was refused. No-op once started. */
+        runtime_step_observation_retry(rt);
         /* Bounded observation tick — measurement only, never authorization. */
         runtime_step_observation(rt);
         /* Gate B10.1 — bounded, read-only pilot diagnostics on the SAME owner
