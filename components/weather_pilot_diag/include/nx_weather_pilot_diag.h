@@ -12,25 +12,51 @@
  * NeuralAxe Weather-Aware Tuning — RECOMMENDATION-ONLY PILOT DIAGNOSTICS
  * (Phase 2W, Gate W6). Board 601 / BM1370 only.
  *
- * W6 prepares a SUPERVISED PHYSICAL PILOT for a device that will eventually
- * obtain trusted time from the committed B2/B10 provider, evaluate the
- * committed Brussels schedule, retrieve ONE forecast from the explicitly
- * configured W3 provider, evaluate the committed W1 policy, and emit a
- * RECOMMENDATION — and change nothing.
+ * W6 prepares a SUPERVISED PHYSICAL PILOT. Gate W6.2 wired the first half of
+ * it: the device obtains trusted time from the committed B2/B10 provider and
+ * evaluates the committed Brussels schedule. The rest is still ahead —
+ * retrieve ONE forecast from the explicitly configured W3 provider, evaluate
+ * the committed W1 policy, emit a RECOMMENDATION — and throughout, change
+ * nothing.
  *
- * WHAT W6 ITSELF DOES, EXACTLY. The pilot steps the W4 runtime with NO
- * injected clock, transport or store. That is deliberate — it is what makes
- * the pilot inert — but it has a consequence that must be stated plainly
- * rather than implied: the runtime state the pilot reports is fixed at boot
- * and is ALWAYS WAITING_FOR_TRUSTED_TIME with NO_TRUSTED_TIME as its reason,
- * on every device, forever, no matter what the trusted-time provider does.
- * `trusted_time_available` on a pilot line is read from that runtime and is
- * therefore a CONSTANT false, not a measurement.
+ * WHAT W6 ITSELF DOES, EXACTLY. The pilot steps the W4 runtime with a live
+ * BORROWED clock, and with NO transport and NO store. That is what keeps it
+ * inert: it can read trusted time and evaluate the schedule, and it holds no
+ * seam through which a fetch, a persisted write or a hardware apply could
+ * occur.
  *
- * A supervised pilot must still be able to see whether the device acquired
- * trusted time, so Gate W6.2 adds a separate, read-only PROJECTION of the
- * committed Gate B10 diagnostics (the time_* fields below). Those ARE the
- * measurement. Do not read the two as one fact.
+ * THE CLOCK IS BORROWED, NEVER OWNED. When CONFIG_NX_TIMED_SESSIONS is linked
+ * and the bind succeeds, Gate W6.2 lends the pilot the SAME live PoolTimeClock
+ * and PoolTimeTrustPolicy objects the committed B2/B10 runtime already owns
+ * (pool_session_runtime_clock() / _trust_policy()). Lending a pointer is what
+ * makes the next four STRUCTURAL rather than promised — there is no API here
+ * through which any of them could be constructed, copied or owned:
+ *   - no second SNTP provider;
+ *   - no second trusted-time anchor;
+ *   - no second accepted-epoch floor;
+ *   - no independent wall-clock trust source.
+ * So trusted(weather) implies trusted(B2/B10): the only anchor reachable is
+ * the one B2 accepted, judged by B2's own policy.
+ *
+ * IN THE BOUND POSTURE THE READINGS ARE LIVE. `trusted_time_available` comes
+ * from the runtime recommendation the pilot just stepped against the borrowed
+ * anchor, and the time_* fields below are a read-only PROJECTION of that same
+ * B2/B10 authority. Both are measurements, and both can change during a boot.
+ * They are still two distinct facts — one is the runtime's position, the other
+ * the provider's lifecycle — so do not read them as one.
+ *
+ * WHEN THE AUTHORITY IS STRUCTURALLY ABSENT, SAY SO. Without
+ * CONFIG_NX_TIMED_SESSIONS no runtime instance exists, the clock acquisition
+ * is compiled out and the bind can never succeed; the pilot then holds the
+ * bounded WAITING_FOR_TRUSTED_TIME / NO_TRUSTED_TIME position for the whole
+ * boot and the projection stamps time_fact = STRUCTURAL. A runtime that is
+ * linked but publishes nothing quotable is stamped UNAVAILABLE. Neither
+ * posture is a live trusted-time measurement, and neither is reported as a
+ * reassuring zero — so read time_fact before trusting any time_* value.
+ *
+ * STILL NOT INJECTED, DELIBERATELY: no production W3 transport (so no fetch is
+ * possible), no weather persistence or store seam, and no hardware execution
+ * path. Each is later, separately gated work.
  *
  * This module is the pilot's EYES, never its hands. It:
  *   - reads snapshots and counters, and mutates nothing;
@@ -318,20 +344,22 @@ typedef struct {
      * Gate W6.2 — the READ-ONLY projection of the committed Gate B10
      * sanitized trusted-time diagnostics.
      *
-     * WHY IT EXISTS. Before this, the only trusted-time fact on a W6 line was
-     * `trusted_time_available`, and that field is read from the W4 runtime
-     * recommendation — a runtime the pilot deliberately steps with NO injected
-     * clock. It is therefore permanently false BY CONSTRUCTION and says
-     * nothing whatever about whether the device acquired trusted time. An
-     * owner watching a real pilot could not distinguish "SNTP never started",
-     * "SNTP started and is syncing", "the candidate was rejected" and "trusted
-     * time is healthy and the pilot simply never consults it".
+     * WHY IT EXISTS. `trusted_time_available` is ONE bit read from the W4
+     * runtime recommendation: whether the anchor was trusted at the moment of
+     * the last evaluation. It says nothing about how the provider reached that
+     * position, so from it alone an owner watching a real pilot could not
+     * distinguish "SNTP never started", "SNTP started and is syncing", "the
+     * candidate was rejected" and "the runtime was never bound at all" — every
+     * one of those prints trusted_time=0.
      *
      * These fields answer that question from the ONE authority that owns it:
-     * the B10 diagnostics published by the single Gate B6 owner task. They
-     * create no second provider, start nothing, change no trust policy and
-     * feed no decision — nx_weather_pilot_check() does not read them, so the
-     * invariant verdict is byte-for-byte what it was.
+     * the B10 diagnostics published by the single Gate B6 owner task. In the
+     * bound posture they are a live projection of that authority, re-read on
+     * every emitted line; when it is structurally or temporarily unreadable,
+     * `time_fact` says which rather than inventing a value. They create no
+     * second provider, start nothing, change no trust policy and feed no
+     * decision — nx_weather_pilot_check() does not read them, so the invariant
+     * verdict is byte-for-byte what it was.
      *
      * PRIVACY. Every member is a bounded scalar or a token id. There is no
      * string field, so the configured hostname, a resolved address, DNS error
