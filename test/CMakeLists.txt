@@ -32,7 +32,7 @@ set(EXTRA_COMPONENT_DIRS "../components")
 #       weather_source_policy weather_pilot_diag mutation_observability \
 #       weather_io" build
 #
-set(TEST_COMPONENTS "stratum asic thermal_control pool_session pool_time pool_session_store pool_session_recovery pool_operation_coordinator pool_session_runtime pool_session_execution pool_session_api pool_session_preflight tuning_profile tuning_store local_schedule weather_client weather_runtime weather_source_policy weather_pilot_diag mutation_observability weather_io" CACHE STRING "List of components to test")
+set(TEST_COMPONENTS "stratum asic thermal_control pool_session pool_time pool_session_store pool_session_recovery pool_operation_coordinator pool_session_runtime pool_session_execution pool_session_api pool_session_preflight tuning_profile tuning_store local_schedule weather_client weather_runtime weather_source_policy weather_pilot_diag mutation_observability weather_io telemetry_safety" CACHE STRING "List of components to test")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 

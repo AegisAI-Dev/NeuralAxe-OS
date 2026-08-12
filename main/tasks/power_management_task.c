@@ -6,6 +6,8 @@
 #include "vcore.h"
 #include "thermal.h"
 #include "power.h"
+#include "TPS546.h"
+#include "nx_telemetry_safety.h"
 #include "asic.h"
 #include "utils.h"
 #include "asic_init.h"
@@ -142,6 +144,31 @@ void POWER_MANAGEMENT_task(void * pvParameters)
         power_management->chip_temp2_avg = Thermal_get_chip_temp2(GLOBAL_STATE);
 
         power_management->vr_temp = Power_get_vreg_temp(GLOBAL_STATE);
+
+        /*
+         * Gate W6.3T-B: publish the power-owned safety facts for THIS cycle as
+         * one bounded update, immediately after the acquisition above and
+         * BEFORE the pause/fault early-exit below — a paused or faulted device
+         * still owes a consumer honest telemetry.
+         *
+         * This performs no sensor read of its own: every value was just
+         * computed. The VRM freshness fact comes from the committed W6.3T-A
+         * authority, so a cached temperature returned after an SMBus failure
+         * is published as NOT read_ok rather than as a plausible number.
+         */
+        {
+            NxTelemetryPowerFacts tf;
+
+            tf.asic_temp_dc    = (int32_t)(power_management->chip_temp_avg * 10.0f);
+            tf.asic_temp_valid = (power_management->chip_temp_avg > 0.0f);
+            tf.vrm_temp_dc     = (int32_t)(power_management->vr_temp * 10.0f);
+            tf.vrm_read_ok     = GLOBAL_STATE->DEVICE_CONFIG.TPS546
+                                     ? TPS546_temperature_read_ok() : false;
+            tf.vrm_expected    = GLOBAL_STATE->DEVICE_CONFIG.TPS546;
+            tf.emergency_thermal_active = sys_module->overheat_mode;
+            nx_telemetry_safety_publish_power(&tf);
+        }
+
         // User pause, hardware fault, or all pools unreachable
         bool wants_stop = sys_module->mining_paused || sys_module->hardware_fault || sys_module->pools_unavailable;
         if (wants_stop && !is_paused) {

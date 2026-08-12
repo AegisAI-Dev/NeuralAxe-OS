@@ -95,6 +95,10 @@ PRIV_REQUIRES
     # reason; every increment compiles away without
     # CONFIG_NX_MUTATION_OBSERVABILITY, so the default image links nothing.
     "mutation_observability"
+    # Gate W6.3T-B: the coherent telemetry safety snapshot. The power and fan
+    # producers publish their already-computed facts into it; it acquires no
+    # hardware, makes no decision and depends on no policy or weather code.
+    "telemetry_safety"
     "driver"
     "thermal_control"
     "esp_adc"

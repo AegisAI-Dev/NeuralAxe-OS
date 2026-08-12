@@ -8,6 +8,7 @@
 #include "fan_controller_task.h"
 #include "nvs_config.h"
 #include "thermal.h"
+#include "nx_telemetry_safety.h"
 #include "thermal_control.h"
 #include "PID.h"
 
@@ -294,6 +295,24 @@ void FAN_CONTROLLER_task(void * pvParameters)
 
         power_management->fan_rpm = Thermal_get_fan_speed(&GLOBAL_STATE->DEVICE_CONFIG);
         power_management->fan2_rpm = Thermal_get_fan2_speed(&GLOBAL_STATE->DEVICE_CONFIG);
+
+        /*
+         * Gate W6.3T-B: publish the fan-owned safety facts for THIS cycle as
+         * one bounded update, after the tach read above and after any
+         * PWM-write fault this cycle has already been recorded. It re-reads no
+         * hardware and takes no fan action; `fan_expected` is the DECLARED
+         * board fact, never a runtime guess.
+         */
+        {
+            NxTelemetryFanFacts tf;
+
+            tf.fan_rpm      = power_management->fan_rpm;
+            tf.fan_expected = GLOBAL_STATE->DEVICE_CONFIG.EMC2101 ||
+                              GLOBAL_STATE->DEVICE_CONFIG.EMC2103 ||
+                              GLOBAL_STATE->DEVICE_CONFIG.EMC2302;
+            tf.fan_control_fault = GLOBAL_STATE->SYSTEM_MODULE.hardware_fault;
+            nx_telemetry_safety_publish_fan(&tf);
+        }
 
         vTaskDelayUntil(&taskWakeTime, POLL_TIME_MS / portTICK_PERIOD_MS);
     }
