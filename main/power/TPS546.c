@@ -41,6 +41,22 @@ static float last_iout = 0.0f;
 static float last_vout = 0.0f;
 static int last_temp = 0;
 
+/*
+ * Gate W6.3T: did the LAST temperature read actually reach the device?
+ *
+ * TPS546_get_temperature() returns `last_temp` when the SMBus read fails, so a
+ * caller receives a perfectly plausible temperature and cannot tell it is a
+ * cached value from an unknown time ago. That is exactly the failure the W1
+ * sensor model calls STALE, and until now the only way to infer it was to watch
+ * for repeated identical readings — a proxy, not an observation.
+ *
+ * This flag turns the proxy into a fact. It is written only inside
+ * TPS546_get_temperature() and read only through TPS546_temperature_read_ok().
+ * It starts false: before the first successful read nothing has been observed,
+ * so nothing may be claimed.
+ */
+static bool last_temp_read_ok = false;
+
 
 static esp_err_t TPS546_parse_status(uint16_t);
 
@@ -713,12 +729,19 @@ int TPS546_get_temperature(void)
 
     if (smb_read_word(PMBUS_READ_TEMPERATURE_1, &value) != ESP_OK) {
         ESP_LOGE(TAG, "Could not read temperature");
+        last_temp_read_ok = false;   /* Gate W6.3T: the value below is CACHED */
         return last_temp;
     }
     
     temp = slinear11_2_int(value);
     last_temp = temp;
+    last_temp_read_ok = true;
     return temp;
+}
+
+bool TPS546_temperature_read_ok(void)
+{
+    return last_temp_read_ok;
 }
 
 float TPS546_get_vin(void)

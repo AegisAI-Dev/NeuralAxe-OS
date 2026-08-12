@@ -332,6 +332,39 @@ TuningSensorStatus tuning_classify_vrm_temp_dc(int32_t temp_dc, bool read_error,
                                                uint32_t unchanged_streak,
                                                uint32_t stale_streak_limit);
 
+/*
+ * Classify a fan TACHOMETER reading (Gate W6.3T).
+ *
+ * WHY THIS EXISTS. Gate W6.3.1 could not honestly build TuningSensorHealth
+ * because `fan_tach` had no classifier, and TUNING_SENSOR_OK is the ZERO of
+ * this enum — so a zero-initialised TuningSensorHealth silently asserts a
+ * healthy fan. This function is the authority that removes the guess.
+ *
+ * IT INVENTS NO RPM THRESHOLD. The audited driver semantics already make 0 the
+ * committed "no tach signal" answer, and it is the answer for BOTH failure
+ * directions at once:
+ *   - EMC2101_get_fan_speed() returns 0 when either TACH register read fails;
+ *   - it also maps the 0xFFFF idle reading (which computes to 82 RPM) to 0,
+ *     i.e. "not rotating";
+ *   - Thermal_get_fan_speed() returns 0 when the board declares no fan
+ *     controller at all.
+ * W1 already defines TUNING_SENSOR_INVALID as "read error / -1 sentinel /
+ * <= 0", so mapping rpm == 0 onto INVALID restates two committed contracts
+ * rather than adding a third.
+ *
+ * `fan_expected` is the DECLARED installation fact (DeviceConfig EMC2101 /
+ * EMC2103 / EMC2302), never a runtime guess. `read_error` is for callers whose
+ * acquisition path can distinguish a bus failure; pass false when it cannot,
+ * because rpm == 0 already fails closed for that case.
+ *
+ * FAIL CLOSED, AND ZERO-SAFE BY CONSTRUCTION: the all-zero argument set
+ * (rpm 0, not expected, no error) returns MISSING, never OK. There is no
+ * argument combination that yields OK without a strictly positive measured
+ * RPM on a board that declares a fan.
+ */
+TuningSensorStatus tuning_classify_fan_tach(uint16_t rpm, bool fan_expected,
+                                            bool read_error);
+
 /* All sensors healthy enough to permit an UPGRADE (fail closed). */
 bool tuning_sensor_health_upgrade_ok(const TuningSensorHealth *h);
 

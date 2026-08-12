@@ -195,6 +195,16 @@ void TPS546_write_entire_config(void);
 int TPS546_get_frequency(void);
 void TPS546_set_frequency(int);
 int TPS546_get_temperature(void);
+
+/*
+ * Gate W6.3T: was the value returned by the most recent
+ * TPS546_get_temperature() call actually read from the device?
+ *
+ * False means that call returned the CACHED last value because the SMBus read
+ * failed — the number is plausible but its age is unknown. False before the
+ * first successful read. Read-only; performs no bus traffic.
+ */
+bool TPS546_temperature_read_ok(void);
 float TPS546_get_vin(void);
 float TPS546_get_iout(void);
 float TPS546_get_vout(void);

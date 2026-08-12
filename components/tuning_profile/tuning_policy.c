@@ -161,6 +161,34 @@ TuningSensorStatus tuning_classify_vrm_temp_dc(int32_t temp_dc, bool read_error,
     return TUNING_SENSOR_OK;
 }
 
+TuningSensorStatus tuning_classify_fan_tach(uint16_t rpm, bool fan_expected,
+                                            bool read_error)
+{
+    /*
+     * A board that declares no fan controller has no tach to be healthy or
+     * unhealthy. MISSING ("expected but absent") is the closest honest token
+     * and it fails closed for upgrades, which is the safe direction; it is
+     * reported BEFORE the error and value checks so a caller cannot turn a
+     * non-existent fan into a measurement.
+     */
+    if (!fan_expected) {
+        return TUNING_SENSOR_MISSING;
+    }
+    if (read_error) {
+        return TUNING_SENSOR_INVALID;
+    }
+    /*
+     * Zero is the acquisition layer's committed answer for "no tach signal",
+     * covering a failed register read, the 0xFFFF idle encoding and a stopped
+     * fan alike. All three are equally not-OK for a fan the board expects, so
+     * they collapse to one honest verdict rather than a guess about which.
+     */
+    if (rpm == 0u) {
+        return TUNING_SENSOR_INVALID;
+    }
+    return TUNING_SENSOR_OK;
+}
+
 static bool sensor_status_in_range(TuningSensorStatus s)
 {
     return (unsigned)s < TUNING_SENSOR__COUNT;

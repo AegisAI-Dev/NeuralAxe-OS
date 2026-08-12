@@ -1403,3 +1403,155 @@ TEST_CASE("strings: policy enums all have distinct tokens", "[tuning_policy]")
     TEST_ASSERT_EQUAL_STRING("UNKNOWN", tuning_actor_str((TuningActorClass)250));
     TEST_ASSERT_EQUAL_STRING("ERR_UNKNOWN", tuning_policy_error_str((TuningPolicyError)250));
 }
+
+/* ================================================================== */
+/* Gate W6.3T — fan tachometer classifier                              */
+/* ================================================================== */
+
+/*
+ * The load-bearing property of this whole gate: TUNING_SENSOR_OK is the ZERO
+ * of TuningSensorStatus, so a zero-initialised TuningSensorHealth asserts a
+ * healthy fan. The classifier must make that impossible to reach by accident.
+ */
+TEST_CASE("w63t fan: an all-zero argument set can never yield OK",
+          "[tuning_policy]")
+{
+    /* rpm 0, fan not expected, no read error — the exact shape a zeroed
+     * struct plus a zeroed reading would produce. */
+    TEST_ASSERT_NOT_EQUAL(TUNING_SENSOR_OK,
+                          tuning_classify_fan_tach(0u, false, false));
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_MISSING,
+                      tuning_classify_fan_tach(0u, false, false));
+}
+
+TEST_CASE("w63t fan: expected fan with a real rpm is OK", "[tuning_policy]")
+{
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_OK, tuning_classify_fan_tach(1u, true, false));
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_OK, tuning_classify_fan_tach(3200u, true, false));
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_OK, tuning_classify_fan_tach(65535u, true, false));
+}
+
+TEST_CASE("w63t fan: expected fan reporting zero rpm is INVALID",
+          "[tuning_policy]")
+{
+    /* Zero is the acquisition layer's committed answer for a failed TACH
+     * register read, the 0xFFFF idle encoding and a stopped fan alike. */
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_INVALID,
+                      tuning_classify_fan_tach(0u, true, false));
+}
+
+TEST_CASE("w63t fan: an explicit read error is INVALID at any rpm",
+          "[tuning_policy]")
+{
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_INVALID,
+                      tuning_classify_fan_tach(0u, true, true));
+    /* A stale non-zero value must not rescue a failed read. */
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_INVALID,
+                      tuning_classify_fan_tach(3200u, true, true));
+}
+
+TEST_CASE("w63t fan: a board with no fan controller is MISSING, never OK",
+          "[tuning_policy]")
+{
+    /* Not-expected is decided BEFORE the value, so a stale non-zero reading
+     * on a board that declares no fan cannot become a measurement. */
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_MISSING,
+                      tuning_classify_fan_tach(3200u, false, false));
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_MISSING,
+                      tuning_classify_fan_tach(0u, false, true));
+}
+
+TEST_CASE("w63t fan: every verdict is in range and blocks upgrades unless OK",
+          "[tuning_policy]")
+{
+    TuningSensorHealth h;
+
+    /* The classifier's output must always satisfy the range gate that
+     * tuning_policy_evaluate() applies to sensors. */
+    memset(&h, 0, sizeof(h));
+    h.asic_temp = TUNING_SENSOR_OK;
+    h.vrm_temp  = TUNING_SENSOR_OK;
+    h.vrm_expected = true;
+    h.fan_tach  = tuning_classify_fan_tach(0u, true, false);
+    TEST_ASSERT_FALSE(tuning_sensor_health_upgrade_ok(&h));
+    /* A tach-only problem blocks upgrades but is NOT an integrity failure —
+     * the committed W1 rule, unchanged by this gate. */
+    TEST_ASSERT_FALSE(tuning_sensor_health_integrity_failed(&h));
+
+    h.fan_tach = tuning_classify_fan_tach(3200u, true, false);
+    TEST_ASSERT_TRUE(tuning_sensor_health_upgrade_ok(&h));
+}
+
+/* ================================================================== */
+/* Gate W6.3T §8 — W6.3.1 READINESS PROBE                              */
+/* ================================================================== */
+
+/*
+ * READ-ONLY. This probe calls no weather code, touches no runtime, mutates no
+ * tuning state and reaches no hardware. It proves ONE thing: that every
+ * TuningSensorHealth field W6.3.1 needs can now be produced by a COMMITTED
+ * classifier from an authoritative raw fact, rather than by a default.
+ *
+ * The raw values below stand in for the acquisition layer; the point of the
+ * test is which FUNCTION produces each verdict, not the numbers.
+ *
+ *   asic_temp            <- tuning_classify_asic_temp_dc()   (committed, W1)
+ *   vrm_temp             <- tuning_classify_vrm_temp_dc()    (committed, W1)
+ *   vrm_expected         <- declared board fact (Gamma 601: true)
+ *   fan_tach             <- tuning_classify_fan_tach()       (NEW, this gate)
+ *   fan_control_uncertain<- SystemModule.hardware_fault, set by the fan
+ *                           controller on a PWM write failure
+ *   emergency_thermal    <- SystemModule.overheat_mode
+ */
+TEST_CASE("w63t probe: every W1 sensor field has a committed classifier",
+          "[tuning_policy]")
+{
+    TuningSensorHealth h;
+
+    memset(&h, 0, sizeof(h));
+
+    /* Healthy device: every verdict comes from a classifier, none from zero. */
+    h.asic_temp    = tuning_classify_asic_temp_dc(552, false);   /* 55.2 C   */
+    h.vrm_temp     = tuning_classify_vrm_temp_dc(610, false, 0u, 0u);
+    h.vrm_expected = true;                       /* declared 601 fact        */
+    h.fan_tach     = tuning_classify_fan_tach(3200u, true, false);
+    h.fan_control_uncertain = false;             /* hardware_fault           */
+
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_OK, h.asic_temp);
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_OK, h.vrm_temp);
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_OK, h.fan_tach);
+    TEST_ASSERT_TRUE(tuning_sensor_health_upgrade_ok(&h));
+    TEST_ASSERT_FALSE(tuning_sensor_health_integrity_failed(&h));
+
+    /* Degraded device: each authority independently forces the safe stance. */
+    h.asic_temp = tuning_classify_asic_temp_dc(-1, false);   /* -1 sentinel  */
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_INVALID, h.asic_temp);
+    TEST_ASSERT_TRUE(tuning_sensor_health_integrity_failed(&h));
+
+    h.asic_temp = tuning_classify_asic_temp_dc(552, false);
+    h.vrm_temp  = tuning_classify_vrm_temp_dc(610, true, 0u, 0u); /* read err */
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_INVALID, h.vrm_temp);
+    TEST_ASSERT_TRUE(tuning_sensor_health_integrity_failed(&h));
+
+    h.vrm_temp = tuning_classify_vrm_temp_dc(610, false, 0u, 0u);
+    h.fan_tach = tuning_classify_fan_tach(0u, true, false);
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_INVALID, h.fan_tach);
+    TEST_ASSERT_FALSE(tuning_sensor_health_upgrade_ok(&h));
+}
+
+/*
+ * The VRM read-validity seam this gate opens: with the acquisition layer now
+ * able to say "that number was cached", the classifier's FIRST parameter
+ * carries the fact directly. This pins the semantic W6.3.1 will rely on —
+ * a cached value inside the plausible temperature band is still INVALID.
+ */
+TEST_CASE("w63t vrm: a cached reading in-band is INVALID, not healthy",
+          "[tuning_policy]")
+{
+    /* 61.0 C is a perfectly plausible VRM temperature. */
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_OK,
+                      tuning_classify_vrm_temp_dc(610, false, 0u, 0u));
+    /* The identical number, reported as a failed read, must not be healthy. */
+    TEST_ASSERT_EQUAL(TUNING_SENSOR_INVALID,
+                      tuning_classify_vrm_temp_dc(610, true, 0u, 0u));
+}
