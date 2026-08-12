@@ -7,6 +7,7 @@
 #include "nx_weather_source.h"   /* NxWeatherSourceStatus, config model */
 #include "weather_runtime.h"     /* WeatherRuntimeState, recommendation */
 #include "pool_time_source.h"    /* Gate B10 sanitized trusted-time model */
+#include "nx_weather_io.h"       /* Gate W6.3 bounded async I/O model    */
 
 /*
  * NeuralAxe Weather-Aware Tuning — RECOMMENDATION-ONLY PILOT DIAGNOSTICS
@@ -374,6 +375,49 @@ typedef struct {
     bool     time_sync_age_valid;
     uint32_t time_sync_age_s;       /* MONOTONIC age, saturating, never epoch */
     uint8_t  last_time_sync_result; /* PoolTimeError as a token id          */
+
+    /*
+     * Gate W6.3 — the READ-ONLY projection of the bounded asynchronous
+     * weather I/O machine.
+     *
+     * WHY IT EXISTS. W6.2 made trusted time observable but left the transport
+     * unwired, so a pilot could reach "time is trusted, the schedule is due"
+     * and then simply stop, with no way to see why. These fields make the one
+     * remaining step visible: whether a request was submitted, whether it is
+     * in flight, whether a result is waiting, and how the last attempt ended.
+     *
+     * `io_fact` is the provenance, exactly as `time_fact` is for B10:
+     * STRUCTURAL when CONFIG_NX_WEATHER_IO_WORKER is not in the image at all,
+     * UNAVAILABLE when the machine exists but cannot be read, OBSERVED
+     * otherwise. A zeroed line is ABSENT and can never look healthy.
+     *
+     * `io_worker_stack_free` is the honest half of the stack-size decision.
+     * The 12 KB default in Kconfig is conservative, NOT measured; this number
+     * is the measurement, and a physical pilot must read it before that size
+     * is treated as proven.
+     *
+     * PRIVACY. Every member is a bounded scalar or a token id. There is no
+     * string field, so a coordinate, provider host, URL, query string,
+     * response body or raw epoch cannot be expressed here.
+     */
+    NxWeatherFactState io_fact;
+    uint8_t  io_state;              /* NxWeatherIoState as a token id       */
+    uint8_t  io_last_event;         /* NxWeatherIoState as a token id       */
+    uint32_t io_generation;         /* last accepted request id             */
+    bool     io_in_flight;
+    bool     io_result_pending;
+    uint32_t io_submit_count;
+    uint32_t io_reject_busy_count;
+    uint32_t io_reject_pending_count;
+    uint32_t io_success_count;
+    uint32_t io_failure_count;
+    uint32_t io_timeout_count;
+    uint32_t io_discard_count;
+    uint32_t io_consume_count;
+    uint8_t  io_last_result;        /* WeatherProviderResult as a token id  */
+    uint32_t io_request_age_s;      /* MONOTONIC, saturating, never an epoch */
+    uint32_t io_worker_count;       /* structurally 0 or 1; proves unicity  */
+    uint32_t io_worker_stack_free;  /* high-water headroom, 0 when no worker */
 } NxWeatherPilotLine;
 
 /*
@@ -414,6 +458,26 @@ void nx_weather_pilot_diag_init(NxWeatherPilotDiag *d);
 void nx_weather_pilot_time_project(const PoolTimeSourceDiagnostics *d,
                                    bool runtime_linked,
                                    NxWeatherPilotLine *out);
+
+/*
+ * Gate W6.3 — PURE projection of the bounded async weather I/O diagnostics
+ * onto the pilot line. Total, side-effect free and NULL-SAFE, with exactly the
+ * same fail-closed shape as the W6.2 trusted-time projection above.
+ *
+ * `worker_linked` states whether CONFIG_NX_WEATHER_IO_WORKER put an execution
+ * context in this image at all; the caller knows, this function does not.
+ *
+ *   worker_linked == false     -> STRUCTURAL: no weather I/O can occur.
+ *   `d` NULL or not present    -> UNAVAILABLE: nothing may be quoted.
+ *   otherwise                  -> OBSERVED, copied field for field.
+ *
+ * It authorizes nothing, starts nothing and is deliberately NOT consulted by
+ * nx_weather_pilot_check(): the pilot's invariant verdict does not depend on
+ * whether a forecast was fetched, and must not begin to.
+ */
+void nx_weather_pilot_io_project(const NxWeatherIoDiag *d, bool worker_linked,
+                                 uint32_t worker_count, uint32_t worker_stack_free,
+                                 NxWeatherPilotLine *out);
 
 /*
  * Classify one runtime observation into an event. Pure: it maps the W5 status

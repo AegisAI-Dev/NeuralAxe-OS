@@ -585,6 +585,60 @@ menu "Stratum Configuration"
             Leave disabled for production. It is meaningful only in an
             owner-built pilot image together with the weather flags above.
 
+    config NX_WEATHER_IO_WORKER
+        bool "NeuralAxe asynchronous weather I/O worker (Gate W6.3)"
+        depends on NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+        default n
+        help
+            EXPERIMENTAL, OWNER-SUPERVISED PILOT ONLY. Creates the ONE
+            execution context in which the committed Gate W3 HTTPS weather
+            transport may run.
+
+            WHY IT EXISTS. The committed W3 transport is synchronous, and its
+            8 s bound is an esp_http_client SOCKET timeout that applies to each
+            blocking operation (connect/TLS, header fetch, every body read),
+            not to the call as a whole. One fetch can therefore occupy tens of
+            seconds. The weather pilot is stepped from the ~1 s statistics
+            task, which must never perform DNS, TCP, TLS, HTTP or parsing of
+            network data. This flag adds a single low-priority worker task so
+            that work happens somewhere else.
+
+            EXACTLY ONE OF EVERYTHING. One statically allocated task (guarded
+            module-wide so repeated starts cannot duplicate it), one request
+            slot, one result slot, one in-flight fetch. No queue grows, no
+            allocation happens per request, and a wedged worker cannot latch
+            the pilot busy: the deadline is enforced by the submitter, and a
+            late result is discarded on its generation.
+
+            IT ADDS NO AUTHORITY. No tuning execution, no frequency, voltage,
+            fan, pool or protocol change, no restart, no persistence, no NVS
+            namespace, no HTTP route, no second transport, no second scheduler
+            and no second trusted-time provider. Recommendations remain
+            recommendations: executed stays false.
+
+            Leave disabled for production. Enabling it makes real outbound
+            HTTPS requests to the configured weather provider possible, so it
+            belongs only in an owner-built pilot image.
+
+    config NX_WEATHER_IO_WORKER_STACK
+        int "Weather I/O worker stack (bytes)"
+        depends on NX_WEATHER_IO_WORKER
+        range 8192 24576
+        default 12288
+        help
+            Stack for the single weather I/O worker task.
+
+            The peak consumer is the mbedTLS handshake reached through
+            esp_crt_bundle_attach (certificate chain parsing and signature
+            verification), not the HTTP or parsing code. The 12288 default is a
+            deliberately conservative margin over the 8192 used by the other
+            NeuralAxe tasks; it is NOT a measured value.
+
+            The worker reports its stack high-water mark in the pilot
+            diagnostics on every observation. Read that number from a
+            supervised pilot before treating this size as proven, and tighten
+            it with that evidence rather than by assumption.
+
     endif
 
     config NX_MUTATION_OBSERVABILITY

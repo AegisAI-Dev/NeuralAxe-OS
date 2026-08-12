@@ -202,6 +202,16 @@ typedef struct {
     /* Idempotence witness over the (time, weather, schedule) input. */
     uint64_t last_input_digest;
     bool     last_input_digest_valid;
+
+    /*
+     * Gate W6.3: the schedule plan produced by the LAST step, retained so an
+     * integrator can learn WHICH window is due without evaluating the schedule
+     * a second time. Storing it is what keeps "exactly one scheduler" true:
+     * the committed weather_schedule_evaluate() is still called exactly once
+     * per step, and this is a copy of its answer, not a re-derivation.
+     */
+    WeatherSchedulePlan last_plan;
+    bool                last_plan_valid;
 } WeatherRuntime;
 
 /* Bounded observation handed to a step: what the W3 client produced. */
@@ -233,6 +243,50 @@ WeatherProviderResult weather_runtime_fetch(WeatherRuntime *rt,
                                             WeatherObservation *out);
 
 /*
+ * THE fetch orchestration, stateless (Gate W6.3).
+ *
+ * WHY THIS EXISTS. Gate W6.3 executes the committed W3 transport on a dedicated
+ * worker task while the statistics task keeps stepping the runtime. The two
+ * must not touch the same mutable state, and weather_runtime_fetch() above has
+ * two pieces the worker cannot safely share: it advances rt->fetch_generation,
+ * and it stages the 4 KB response in a function-static buffer whose safety
+ * argument is "one integrator task only".
+ *
+ * So the orchestration was lifted out verbatim into this function, which owns
+ * NOTHING: transport, request, parse context and scratch buffer are all
+ * caller-supplied. weather_runtime_fetch() is now a thin wrapper over it, so
+ * there remains EXACTLY ONE implementation of the sequence
+ *
+ *     ops->fetch -> weather_transport_validate -> weather_open_meteo_parse
+ *
+ * and no second HTTP or weather path was introduced.
+ *
+ * `scratch` must point to a caller-owned WeatherHttpResponse (~4 KB); it is
+ * zeroed on entry and again on exit, so a response body never outlives the
+ * call. The raw body is never copied out, never logged and never stored.
+ *
+ * `fetch_counter` preserves the committed W4 generation semantics exactly.
+ * When non-NULL it is incremented at the ORIGINAL point — after the transport
+ * and HTTP validation have both succeeded and immediately before parsing — and
+ * the new value becomes the payload's source_generation. That matters: a
+ * transport or HTTP failure must NOT consume a generation, which is what the
+ * committed code did and what its tests pin. When NULL, pctx->source_generation
+ * is used verbatim; the Gate W6.3 worker uses this mode, because its identity
+ * is the I/O request generation and it owns no counter to advance.
+ *
+ * Pure apart from the injected ops call and that one optional counter: no DNS,
+ * no socket, no URL of its own, no clock read, no allocation, no runtime
+ * mutation.
+ */
+WeatherProviderResult weather_fetch_execute(const WeatherTransportOps *ops,
+                                            void *transport_ctx,
+                                            const WeatherRequest *req,
+                                            const WeatherParseContext *pctx,
+                                            uint32_t *fetch_counter,
+                                            WeatherHttpResponse *scratch,
+                                            WeatherObservation *out);
+
+/*
  * ONE bounded step. Never blocks, never sleeps, never mutates hardware.
  * `observation` may be NULL (nothing fetched this step). Always writes *out
  * when out != NULL, and returns the resulting state.
@@ -241,6 +295,15 @@ WeatherRuntimeState weather_runtime_step(WeatherRuntime *rt,
                                          const WeatherRuntimeStepEnv *env,
                                          const WeatherObservation *observation,
                                          WeatherRecommendation *out);
+
+/*
+ * Gate W6.3 — read the schedule plan the last step already computed. Returns
+ * false (writing nothing) before any step has run. Pure: it evaluates nothing
+ * and mutates nothing, so an integrator asking "is a window due, and which
+ * one?" cannot cause a second schedule evaluation or a different answer.
+ */
+bool weather_runtime_last_plan(const WeatherRuntime *rt,
+                               WeatherSchedulePlan *out);
 
 /* Stable machine tokens; never a hostname, coordinate or response fragment. */
 const char *weather_runtime_state_str(WeatherRuntimeState s);

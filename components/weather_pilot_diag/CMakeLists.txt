@@ -26,4 +26,11 @@ REQUIRES
     # include path and two pure enum-to-string maps, no provider and no
     # networking, and it starts nothing.
     "pool_time"
+    # Gate W6.3. The pilot PROJECTS the bounded async weather I/O diagnostics
+    # and, in the flag-on posture, submits to and consumes from that machine.
+    # Unconditional for the same ESP-IDF reason as the requirements above:
+    # component requirements resolve before any CONFIG_* symbol exists. With
+    # CONFIG_NX_WEATHER_IO_WORKER off this adds the pure state machine and its
+    # tokens only — no task, no stack, no transport reference.
+    "weather_io"
 )

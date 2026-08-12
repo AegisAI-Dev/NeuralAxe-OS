@@ -171,6 +171,78 @@ WeatherRuntimeError weather_runtime_init(WeatherRuntime *rt,
 /* W3 client seam                                                      */
 /* ------------------------------------------------------------------ */
 
+WeatherProviderResult weather_fetch_execute(const WeatherTransportOps *ops,
+                                            void *transport_ctx,
+                                            const WeatherRequest *req,
+                                            const WeatherParseContext *pctx,
+                                            uint32_t *fetch_counter,
+                                            WeatherHttpResponse *scratch,
+                                            WeatherObservation *out)
+{
+    WeatherParseContext   eff;
+    WeatherProviderResult r;
+
+    if (out == NULL) {
+        return WEATHER_PROVIDER_ERR_INTERNAL;
+    }
+    memset(out, 0, sizeof(*out));
+    weather_forecast_init(&out->forecast);
+    out->provider_result = WEATHER_PROVIDER_ERR_UNCONFIGURED;
+
+    /* No transport => no network request. Checked before any dereference. */
+    if (ops == NULL || ops->fetch == NULL) {
+        return out->provider_result;
+    }
+    if (req == NULL || pctx == NULL || scratch == NULL) {
+        out->provider_result = WEATHER_PROVIDER_ERR_INTERNAL;
+        return out->provider_result;
+    }
+    /* An untrusted fetch epoch cannot date a payload, so it is not fetched. */
+    if (!pctx->fetch_epoch_trusted) {
+        out->provider_result = WEATHER_PROVIDER_ERR_CACHE_STALE;
+        return out->provider_result;
+    }
+
+    memset(scratch, 0, sizeof(*scratch));
+
+    r = ops->fetch(transport_ctx, req, scratch);
+    if (r != WEATHER_PROVIDER_OK) {
+        memset(scratch, 0, sizeof(*scratch));
+        out->provider_result = r;
+        return r;
+    }
+    r = weather_transport_validate(scratch);
+    if (r != WEATHER_PROVIDER_OK) {
+        memset(scratch, 0, sizeof(*scratch));
+        out->provider_result = r;
+        return r;
+    }
+    /*
+     * The generation is consumed HERE — after the transport and HTTP layers
+     * have both accepted the response and immediately before the parse. A
+     * transport or HTTP failure therefore costs no generation, which is the
+     * committed W4 behaviour this extraction had to preserve.
+     */
+    eff = *pctx;
+    if (fetch_counter != NULL) {
+        (*fetch_counter)++;
+        eff.source_generation = *fetch_counter;
+    }
+    r = weather_open_meteo_parse(scratch->body, scratch->body_len, &eff,
+                                 &out->forecast);
+    /* The raw body is never copied out, never logged and never stored. */
+    memset(scratch, 0, sizeof(*scratch));
+
+    if (r != WEATHER_PROVIDER_OK) {
+        weather_forecast_init(&out->forecast);
+        out->provider_result = r;
+        return r;
+    }
+    out->forecast_present = true;
+    out->provider_result  = WEATHER_PROVIDER_OK;
+    return WEATHER_PROVIDER_OK;
+}
+
 WeatherProviderResult weather_runtime_fetch(WeatherRuntime *rt,
                                             const WeatherLocalDate *today,
                                             uint64_t now_utc_s, bool now_trusted,
@@ -178,7 +250,6 @@ WeatherProviderResult weather_runtime_fetch(WeatherRuntime *rt,
 {
     WeatherRequest       req;
     WeatherParseContext  pctx;
-    WeatherHttpResponse *resp;
     WeatherProviderResult r;
 
     if (out == NULL) {
@@ -214,50 +285,34 @@ WeatherProviderResult weather_runtime_fetch(WeatherRuntime *rt,
     }
 
     /*
+     * The parse context carries the trusted fetch epoch and today's trusted
+     * local date, so the W3 parser itself rejects a wrong-date or
+     * untrusted-fetch payload. W4 fabricates none of it. `source_generation` is
+     * left to the executor, which advances rt->fetch_generation at exactly the
+     * point this function used to — after validation, before the parse.
+     */
+    pctx.expected_date       = *today;
+    pctx.fetch_epoch_s       = now_utc_s;
+    pctx.fetch_epoch_trusted = true;
+    pctx.source_generation   = rt->fetch_generation;
+
+    /*
      * The bounded response buffer is large; keep it off this call frame by
-     * making it static. The runtime is stepped from ONE integrator task by
-     * contract (the same single-owner-task doctrine as Gate B6), so there is
-     * no concurrent second user of this buffer.
+     * making it static. This synchronous entry point remains stepped from ONE
+     * integrator task by contract (the same single-owner-task doctrine as Gate
+     * B6), so there is no concurrent second user of this buffer. The Gate W6.3
+     * worker never calls THIS function — it calls weather_fetch_execute() with
+     * its own scratch buffer and its own identity, which is what keeps the two
+     * paths from sharing mutable state.
      */
     {
         static WeatherHttpResponse s_resp;
-        resp = &s_resp;
-        memset(resp, 0, sizeof(*resp));
 
-        r = rt->deps.transport->fetch(rt->deps.transport_ctx, &req, resp);
-        if (r != WEATHER_PROVIDER_OK) {
-            out->provider_result = r;
-            return r;
-        }
-        r = weather_transport_validate(resp);
-        if (r != WEATHER_PROVIDER_OK) {
-            out->provider_result = r;
-            return r;
-        }
-        /* The parse context carries the trusted fetch epoch and today's
-         * trusted local date, so the W3 parser itself rejects a wrong-date
-         * or untrusted-fetch payload. W4 fabricates none of it. */
-        rt->fetch_generation++;
-        pctx.expected_date      = *today;
-        pctx.fetch_epoch_s      = now_utc_s;
-        pctx.fetch_epoch_trusted = true;
-        pctx.source_generation  = rt->fetch_generation;
-
-        r = weather_open_meteo_parse(resp->body, resp->body_len, &pctx,
-                                     &out->forecast);
-        /* The raw body is never copied out, never logged and never stored. */
-        memset(resp, 0, sizeof(*resp));
+        r = weather_fetch_execute(rt->deps.transport, rt->deps.transport_ctx,
+                                  &req, &pctx, &rt->fetch_generation, &s_resp,
+                                  out);
     }
-
-    if (r != WEATHER_PROVIDER_OK) {
-        weather_forecast_init(&out->forecast);
-        out->provider_result = r;
-        return r;
-    }
-
-    out->forecast_present = true;
-    out->provider_result  = WEATHER_PROVIDER_OK;
-    return WEATHER_PROVIDER_OK;
+    return r;
 }
 
 /* ------------------------------------------------------------------ */
@@ -432,6 +487,9 @@ WeatherRuntimeState weather_runtime_step(WeatherRuntime *rt,
     }
     weather_schedule_evaluate(&rt->cfg.schedule, &rt->progress,
                               tv.trusted_utc_s, tv.trusted_time_available, &plan);
+    /* Gate W6.3: retain the ONE evaluation for the integrator to read. */
+    rt->last_plan       = plan;
+    rt->last_plan_valid = true;
 
     digest    = input_digest(&tv, observation, &plan);
     duplicate = rt->last_input_digest_valid && rt->last_input_digest == digest;
@@ -574,4 +632,18 @@ WeatherRuntimeState weather_runtime_step(WeatherRuntime *rt,
         *out = rec;
     }
     return rt->state;
+}
+
+/* ------------------------------------------------------------------ */
+/* Gate W6.3 — schedule plan readback                                  */
+/* ------------------------------------------------------------------ */
+
+bool weather_runtime_last_plan(const WeatherRuntime *rt,
+                               WeatherSchedulePlan *out)
+{
+    if (rt == NULL || out == NULL || !rt->initialized || !rt->last_plan_valid) {
+        return false;
+    }
+    *out = rt->last_plan;
+    return true;
 }

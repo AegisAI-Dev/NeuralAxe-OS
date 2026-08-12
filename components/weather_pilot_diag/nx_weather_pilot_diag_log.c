@@ -32,6 +32,12 @@
 #include "nx_mutation_baseline.h"
 #include "pool_time_source.h"
 #include "pool_session_runtime.h"
+#include "nx_weather_io.h"
+#include "nx_weather_io_worker.h"
+#include "weather_transport.h"
+#include "weather_open_meteo.h"
+#include "local_schedule.h"
+#include "brussels_time.h"
 
 static const char *TAG = "nx_wx_pilot";
 
@@ -66,6 +72,30 @@ static WeatherRuntimeState   s_state;
 static WeatherRecommendation s_rec;
 static bool                  s_posture_cached;
 
+#ifdef CONFIG_NX_WEATHER_IO_WORKER
+/*
+ * GATE W6.3 — the ONE bounded async weather I/O machine and its identity.
+ *
+ * The state machine itself lives inside nx_weather_io_worker.c, which owns the
+ * critical section both tasks serialise on; this adapter reaches it only
+ * through the nx_weather_io_worker_* accessors, never directly. That is what
+ * keeps the statistics task and the worker task from interleaving a half-written
+ * request, result or counter.
+ *
+ * RAM-only and deliberately so: `s_io_generation` restarts at zero on every
+ * boot, which is correct for W6.3 and is NOT the W6.4 reboot-deduplication
+ * problem. A reboot naturally erases every in-flight and pending item, which is
+ * the safe direction — nothing stale can survive a restart.
+ */
+static uint32_t s_io_generation;
+static bool     s_io_started;
+
+/* The observation waiting to be handed to the next step, and the window it
+ * belongs to. One slot: the machine upstream already guarantees one result. */
+static WeatherObservation s_io_obs;
+static bool               s_io_obs_present;
+#endif
+
 /*
  * Bind the weather runtime to the PRODUCTION trusted-time authority.
  *
@@ -75,14 +105,22 @@ static bool                  s_posture_cached;
  * `trusted(weather)` implies `trusted(B2/B10)` structurally: the only anchor
  * reachable is the one B2 already accepted, judged by B2's own policy.
  *
- * TRANSPORT IS DELIBERATELY NULL. The committed W3 adapter
- * (weather_open_meteo_http.c) is a SYNCHRONOUS blocking fetch bounded at
- * WEATHER_HTTP_TIMEOUT_MS = 8000 ms, and the only host offered to the pilot
- * is the 1 s statistics task. Wiring it here would stall that task for up to
- * eight of its own periods and run a TLS handshake on its 8 KB shared stack.
- * A NULL transport is not an oversight; it is the honest posture until an
- * asynchronous W3 execution context exists. `weather_runtime_fetch` checks
- * the transport pointer before anything else, so no request can occur.
+ * THE RUNTIME TRANSPORT SEAM STAYS NULL — PERMANENTLY, AND ON PURPOSE.
+ *
+ * The committed W3 adapter (weather_open_meteo_http.c) is a SYNCHRONOUS
+ * blocking fetch, and its WEATHER_HTTP_TIMEOUT_MS = 8000 is an esp_http_client
+ * SOCKET timeout that applies to each blocking operation — connect/TLS, header
+ * fetch, every body read — not to the call as a whole. One fetch can therefore
+ * occupy tens of seconds. The only host this pilot is stepped from is the ~1 s
+ * statistics task, so wiring the transport HERE would stall that task for dozens
+ * of its own periods and run a TLS handshake on its shared stack.
+ *
+ * Gate W6.3 supplies the missing execution context, and wires the production
+ * transport into the WORKER below rather than into this seam. Leaving
+ * deps.transport NULL is what keeps weather_runtime_fetch() — the synchronous
+ * entry point reachable from this task — structurally incapable of a network
+ * call: it checks the transport pointer before anything else. The only path
+ * from this device to the provider runs through the single worker task.
  *
  * Returns true once bound. Before the B6 runtime exists the clock is NULL and
  * this simply reports "not yet" — the pilot then waits, untrusted, which is
@@ -119,8 +157,102 @@ static bool wx_bind_runtime(const WeatherRuntimeConfig *runtime_cfg)
         return false;
     }
     s_rt_bound = true;
+
+#ifdef CONFIG_NX_WEATHER_IO_WORKER
+    /*
+     * GATE W6.3 — create the ONE weather I/O execution context, now that the
+     * runtime is bound and a fetch could become due.
+     *
+     * This is where the committed W3 production transport is finally wired,
+     * and it is wired into the WORKER, never into deps.transport above: the
+     * runtime seam stays NULL, so weather_runtime_fetch() remains structurally
+     * incapable of a network call from the statistics task. The only path to
+     * the transport is through the worker.
+     *
+     * start() is idempotent and guarded module-wide, so the retry-until-bound
+     * loop this function sits in cannot produce a second task.
+     */
+    if (!s_io_started) {
+        s_io_started = nx_weather_io_worker_start(weather_open_meteo_http_ops(),
+                                                  NULL);
+    }
+#endif
     return true;
 }
+
+#ifdef CONFIG_NX_WEATHER_IO_WORKER
+/*
+ * GATE W6.3 — submit one bounded request when, and only when, the committed W3
+ * schedule says a window is due and nothing is already outstanding.
+ *
+ * EVERY refusal here is passive and costs one comparison: no work is queued, no
+ * memory is taken and the caller returns immediately. The three conditions that
+ * can refuse — no due window, a request already in flight, an unread result —
+ * are each reported through their own counter, so a stuck pilot says WHICH kind
+ * of stuck it is.
+ *
+ * It performs NO schedule evaluation of its own: it READS the plan the step
+ * just computed. That is what keeps "exactly one scheduler" true.
+ */
+static void wx_io_submit_if_due(uint64_t now_us)
+{
+    WeatherSchedulePlan  plan;
+    NxWeatherIoRequest   req;
+    WeatherTimeView      tv;
+    BrusselsLocalTime    local;
+
+    if (!s_io_started) {
+        return;   /* no worker: nothing may be submitted                    */
+    }
+    if (!weather_runtime_last_plan(&s_rt, &plan)) {
+        return;
+    }
+    if (plan.decision != WEATHER_SCHEDULE_DUE &&
+        plan.decision != WEATHER_SCHEDULE_CATCH_UP_DUE) {
+        return;   /* not due: the overwhelmingly common tick                */
+    }
+    if (plan.slot_index < 0) {
+        return;
+    }
+    /* Trusted time is required to date the fetch; the same B2/B10 authority
+     * the runtime just used, read through the same committed seam. */
+    (void)weather_time_view_read(s_rt.deps.clock, s_rt.deps.time_policy,
+                                 s_rt.cfg.max_sync_age_s, &tv);
+    if (!tv.trusted_time_available) {
+        return;
+    }
+    if (!brussels_local_from_utc(tv.trusted_utc_s, &local)) {
+        return;   /* outside the supported band: refuse, never approximate  */
+    }
+
+    memset(&req, 0, sizeof(req));
+    /* The committed W3 builder owns the allowlisted host/path and the bounded
+     * query; this adapter composes no URL and knows no hostname. */
+    if (weather_open_meteo_build_request(&s_rt.cfg.location, &req.request) !=
+        WEATHER_PROVIDER_OK) {
+        return;
+    }
+    req.generation         = ++s_io_generation;
+    req.window.date        = local.date;
+    req.window.slot_index  = plan.slot_index;
+    req.window.provider    = s_rt.cfg.expected_provider;
+    req.parse.expected_date       = local.date;
+    req.parse.fetch_epoch_s       = tv.trusted_utc_s;
+    req.parse.fetch_epoch_trusted = true;
+    req.parse.source_generation   = req.generation;
+
+    /* Serialised submit; on acceptance it also performs the O(1) wake, outside
+     * the critical section. Not a queue send: no capacity to exhaust, nothing
+     * to copy, and it cannot block the statistics task. */
+    if (nx_weather_io_worker_submit(&req, now_us) == WX_IO_SUBMIT_ACCEPTED) {
+        /* accepted; the worker has been notified */
+    } else {
+        /* Refused. Give the generation back so ids stay dense and a later
+         * tick can retry cleanly; the machine's own counters recorded why. */
+        s_io_generation--;
+    }
+}
+#endif /* CONFIG_NX_WEATHER_IO_WORKER */
 
 /*
  * The task the periodic observation is expected to run on. Latched on the
@@ -206,6 +338,26 @@ static void fill_time(NxWeatherPilotLine *line)
     nx_weather_pilot_time_gather(line);
 }
 
+/*
+ * Gate W6.3 — project the bounded async weather I/O machine onto the line.
+ * Read-only: it submits nothing, claims nothing and starts no worker. The
+ * invariant verdict above was already computed and does not consult any of
+ * these fields.
+ */
+static void fill_io(NxWeatherPilotLine *line)
+{
+#ifdef CONFIG_NX_WEATHER_IO_WORKER
+    NxWeatherIoDiag d;
+
+    nx_weather_io_worker_observe((uint64_t)esp_timer_get_time(), &d);
+    nx_weather_pilot_io_project(&d, true, nx_weather_io_worker_count(),
+                                nx_weather_io_worker_stack_high_water(), line);
+#else
+    /* No worker in this image: STRUCTURAL, and no value is quoted. */
+    nx_weather_pilot_io_project(NULL, false, 0u, 0u, line);
+#endif
+}
+
 static void emit(const NxWeatherPilotLine *l)
 {
     /*
@@ -224,7 +376,11 @@ static void emit(const NxWeatherPilotLine *l)
              "mut_session=%u tuning_same=%d "
              "time_fact=%s time_src_cfg=%d time_src=%s time_attempts=%u "
              "time_operational=%d time_available=%d time_age_valid=%d "
-             "time_age_s=%u time_last=%s",
+             "time_age_s=%u time_last=%s "
+             "io_fact=%s io=%s io_ev=%s io_gen=%u io_inflight=%d "
+             "io_pending=%d io_sub=%u io_busy=%u io_pend_rej=%u io_ok=%u "
+             "io_fail=%u io_to=%u io_disc=%u io_used=%u io_last=%s "
+             "io_age_s=%u io_workers=%u io_stack_free=%u",
              nx_weather_pilot_event_str(l->event),
              (unsigned)l->sequence,
              nx_weather_source_status_str(l->source_status),
@@ -259,7 +415,20 @@ static void emit(const NxWeatherPilotLine *l)
              (unsigned)l->time_sync_attempts,
              (int)l->time_operational, (int)l->time_available,
              (int)l->time_sync_age_valid, (unsigned)l->time_sync_age_s,
-             pool_time_error_str((PoolTimeError)l->last_time_sync_result));
+             pool_time_error_str((PoolTimeError)l->last_time_sync_result),
+             nx_weather_fact_state_str(l->io_fact),
+             nx_weather_io_state_str((NxWeatherIoState)l->io_state),
+             nx_weather_io_state_str((NxWeatherIoState)l->io_last_event),
+             (unsigned)l->io_generation, (int)l->io_in_flight,
+             (int)l->io_result_pending,
+             (unsigned)l->io_submit_count, (unsigned)l->io_reject_busy_count,
+             (unsigned)l->io_reject_pending_count,
+             (unsigned)l->io_success_count, (unsigned)l->io_failure_count,
+             (unsigned)l->io_timeout_count, (unsigned)l->io_discard_count,
+             (unsigned)l->io_consume_count,
+             weather_provider_result_str((WeatherProviderResult)l->io_last_result),
+             (unsigned)l->io_request_age_s, (unsigned)l->io_worker_count,
+             (unsigned)l->io_worker_stack_free);
 }
 
 void nx_weather_pilot_log_boot(void)
@@ -277,6 +446,7 @@ void nx_weather_pilot_log_boot(void)
         fill_resources(&line);
         fill_evidence(&line, NULL);
         fill_time(&line);
+        fill_io(&line);
         emit(&line);
     }
     /*
@@ -318,6 +488,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
             fill_resources(&line);
             fill_evidence(&line, posture);
             fill_time(&line);
+            fill_io(&line);
             emit(&line);
         }
     }
@@ -329,6 +500,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
             fill_resources(&line);
             fill_evidence(&line, posture);
             fill_time(&line);
+            fill_io(&line);
             emit(&line);
         }
     }
@@ -341,6 +513,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
             fill_resources(&line);
             fill_evidence(&line, posture);
             fill_time(&line);
+            fill_io(&line);
             emit(&line);
         }
     }
@@ -462,8 +635,48 @@ void nx_weather_pilot_observe(void)
      * substituting defaults.
      */
     if (wx_bind_runtime(&s_runtime_cfg)) {
+        const WeatherObservation *obs = NULL;
+
+#ifdef CONFIG_NX_WEATHER_IO_WORKER
+        /*
+         * GATE W6.3 — the asynchronous half, in the order that makes each step
+         * O(1) and non-blocking. NONE of this performs DNS, TCP, TLS, HTTP,
+         * parsing of network data, a retry sleep or a blocking wait. The only
+         * blocking operation in the whole design happens on the worker task.
+         */
+        uint64_t now_us = (uint64_t)esp_timer_get_time();
+
+        /* 1 — enforce the bounded deadline. This is what makes a wedged worker
+         *     unable to latch the pilot: the slot is released here, by the
+         *     consumer, without touching the worker at all. */
+        (void)nx_weather_io_worker_tick(now_us);
+
+        /* 2 — take at most one ready result. Consuming empties the slot, so a
+         *     duplicate tick cannot apply the same observation twice. */
+        if (!s_io_obs_present) {
+            NxWeatherIoResult got;
+
+            if (nx_weather_io_worker_consume(NULL, &got, now_us)) {
+                s_io_obs         = got.observation;
+                s_io_obs_present = true;
+            }
+        }
+        if (s_io_obs_present) {
+            obs = &s_io_obs;
+        }
+#endif
         memset(&s_rec, 0, sizeof(s_rec));
-        s_state = weather_runtime_step(&s_rt, NULL, NULL, &s_rec);
+        s_state = weather_runtime_step(&s_rt, NULL, obs, &s_rec);
+
+#ifdef CONFIG_NX_WEATHER_IO_WORKER
+        /* The step has consumed it; release the slot for the next window. */
+        if (s_io_obs_present) {
+            memset(&s_io_obs, 0, sizeof(s_io_obs));
+            s_io_obs_present = false;
+        }
+        /* 3 — submit, if and only if the runtime says a window is due. */
+        wx_io_submit_if_due(now_us);
+#endif
     }
 
     /* Re-gather from the authorities. Nothing here mutates the subsystems it

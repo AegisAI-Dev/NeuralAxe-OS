@@ -429,3 +429,72 @@ bool nx_weather_pilot_record(NxWeatherPilotDiag *d,
     out->uptime_us       = now_us;
     return true;
 }
+
+/* ------------------------------------------------------------------ */
+/* Gate W6.3 — async weather I/O projection                            */
+/* ------------------------------------------------------------------ */
+
+void nx_weather_pilot_io_project(const NxWeatherIoDiag *d, bool worker_linked,
+                                 uint32_t worker_count,
+                                 uint32_t worker_stack_free,
+                                 NxWeatherPilotLine *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    /*
+     * Fail closed FIRST, exactly as the W6.2 trusted-time projection does, so
+     * every early return below leaves an unreadable projection rather than a
+     * passing zero. WX_IO_UNINITIALIZED and ERR_UNCONFIGURED are the honest
+     * "nothing was read" tokens.
+     */
+    out->io_fact                = NX_WX_FACT_UNAVAILABLE;
+    out->io_state               = (uint8_t)WX_IO_UNINITIALIZED;
+    out->io_last_event          = (uint8_t)WX_IO_UNINITIALIZED;
+    out->io_generation          = 0u;
+    out->io_in_flight           = false;
+    out->io_result_pending      = false;
+    out->io_submit_count        = 0u;
+    out->io_reject_busy_count   = 0u;
+    out->io_reject_pending_count = 0u;
+    out->io_success_count       = 0u;
+    out->io_failure_count       = 0u;
+    out->io_timeout_count       = 0u;
+    out->io_discard_count       = 0u;
+    out->io_consume_count       = 0u;
+    out->io_last_result         = (uint8_t)WEATHER_PROVIDER_ERR_UNCONFIGURED;
+    out->io_request_age_s       = 0u;
+    out->io_worker_count        = 0u;
+    out->io_worker_stack_free   = 0u;
+
+    if (!worker_linked) {
+        /* No worker exists in this image, so no weather request can occur.
+         * A property of the LINK, not a reading — stronger than any value. */
+        out->io_fact = NX_WX_FACT_STRUCTURAL;
+        return;
+    }
+    if (d == NULL || !d->present) {
+        /* The worker is linked but the machine published nothing quotable.
+         * Say exactly that; do not invent a state on its behalf. */
+        return;
+    }
+
+    out->io_fact                 = NX_WX_FACT_OBSERVED;
+    out->io_state                = d->state;
+    out->io_last_event           = d->last_event;
+    out->io_generation           = d->generation;
+    out->io_in_flight            = d->in_flight;
+    out->io_result_pending       = d->result_pending;
+    out->io_submit_count         = d->submit_count;
+    out->io_reject_busy_count    = d->reject_busy_count;
+    out->io_reject_pending_count = d->reject_pending_count;
+    out->io_success_count        = d->success_count;
+    out->io_failure_count        = d->failure_count;
+    out->io_timeout_count        = d->timeout_count;
+    out->io_discard_count        = d->discard_count;
+    out->io_consume_count        = d->consume_count;
+    out->io_last_result          = d->last_result;
+    out->io_request_age_s        = d->request_age_s;
+    out->io_worker_count         = worker_count;
+    out->io_worker_stack_free    = worker_stack_free;
+}
