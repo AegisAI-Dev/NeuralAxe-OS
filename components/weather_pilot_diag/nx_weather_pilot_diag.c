@@ -411,8 +411,29 @@ bool nx_weather_pilot_record(NxWeatherPilotDiag *d,
         out->trusted_time_available    = rec->trusted_time_at_evaluation;
         out->recommendation_present    = rec->present;
         out->actionable_in_future_gate = rec->actionable_in_future_gate;
-        out->policy_evaluated          = rec->present ||
-                                         rec->not_executed == WEATHER_NOT_EXECUTED_NOT_DUE;
+        /*
+         * GATE W6.3.1 CORRECTION — this field used to report a FALSE POSITIVE
+         * on exactly the path where the policy did not run.
+         *
+         * The removed disjunct was `not_executed == WEATHER_NOT_EXECUTED_NOT_DUE`.
+         * That reason has exactly ONE producer in the tree
+         * (weather_runtime.c, inside `if (observation == NULL)`), and that
+         * branch RETURNS BEFORE tuning_policy_evaluate() is called. So the one
+         * line field that answers "did the committed W1 policy actually run on
+         * this device?" answered YES precisely when the answer was NO — and a
+         * device with no observation yet sits on that path indefinitely.
+         *
+         * `rec->present` is set on the single path downstream of
+         * tuning_policy_evaluate(), so it can never be true unless the policy
+         * genuinely evaluated. It is SOUND but deliberately INCOMPLETE: when
+         * the policy runs and the forecast is then judged STALE or REJECTED,
+         * the runtime refuses and this reports 0. Under-reporting is the
+         * fail-closed direction for a reachability claim — the line may fail to
+         * announce a success, but it may never announce one that did not happen.
+         * Which inputs the policy was given is reported separately by the
+         * WX_W1_INPUT line the adapter emits.
+         */
+        out->policy_evaluated          = rec->present;
     }
 
     /*

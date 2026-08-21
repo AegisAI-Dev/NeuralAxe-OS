@@ -30,9 +30,16 @@ set(EXTRA_COMPONENT_DIRS "../components")
 #   idf.py -B <dir2> -DSDKCONFIG=<sdk2> -DTEST_COMPONENTS="tuning_profile \
 #       tuning_store local_schedule weather_client weather_runtime \
 #       weather_source_policy weather_pilot_diag mutation_observability \
-#       weather_io" build
+#       weather_io telemetry_safety tuning_input_projection" build
 #
-set(TEST_COMPONENTS "stratum asic thermal_control pool_session pool_time pool_session_store pool_session_recovery pool_operation_coordinator pool_session_runtime pool_session_execution pool_session_api pool_session_preflight tuning_profile tuning_store local_schedule weather_client weather_runtime weather_source_policy weather_pilot_diag mutation_observability weather_io telemetry_safety" CACHE STRING "List of components to test")
+# The second list MUST stay in step with the weather half of the set() below.
+# It had already fallen behind by one suite (telemetry_safety, added by Gate
+# W6.3T-B), and a stale list here is silent: the override still builds, still
+# passes and simply never runs the missing suites, so the totals look healthy
+# while coverage has quietly shrunk. Anything added to the weather half below
+# belongs here in the same edit.
+#
+set(TEST_COMPONENTS "stratum asic thermal_control pool_session pool_time pool_session_store pool_session_recovery pool_operation_coordinator pool_session_runtime pool_session_execution pool_session_api pool_session_preflight tuning_profile tuning_store local_schedule weather_client weather_runtime weather_source_policy weather_pilot_diag mutation_observability weather_io telemetry_safety tuning_input_projection" CACHE STRING "List of components to test")
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 

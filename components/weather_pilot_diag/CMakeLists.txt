@@ -33,4 +33,10 @@ REQUIRES
     # CONFIG_NX_WEATHER_IO_WORKER off this adds the pure state machine and its
     # tokens only — no task, no stack, no transport reference.
     "weather_io"
+    # Gate W6.3.1. The pilot reads ONE telemetry snapshot and projects it into
+    # the W1 environment/input, so tuning_policy_evaluate() can genuinely run.
+    # Both are pure/read-only and neither grants any execution authority.
+    "telemetry_safety"
+    "tuning_input_projection"
+    "tuning_profile"
 )

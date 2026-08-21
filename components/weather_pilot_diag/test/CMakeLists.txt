@@ -3,6 +3,7 @@ SRCS
     "test_nx_weather_pilot_diag.c"
     "test_nx_weather_pilot_time.c"
     "test_nx_weather_pilot_wiring.c"
+    "test_nx_weather_pilot_w631_flow.c"
 
 REQUIRES
     "unity"
@@ -17,4 +18,12 @@ REQUIRES
     # Gate W6.2 production-wiring tests evaluate the committed W1 chain
     # against the real production registry.
     "tuning_profile"
+    # Gate W6.3.1 end-to-end flow test. It drives the committed async I/O
+    # machine, the telemetry store and the W1 input projection through the
+    # SAME entry points the adapter uses, and proves the mutation counters
+    # stayed clean across the whole sequence.
+    "weather_io"
+    "telemetry_safety"
+    "tuning_input_projection"
+    "mutation_observability"
 )

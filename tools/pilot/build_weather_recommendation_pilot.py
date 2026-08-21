@@ -120,6 +120,8 @@ FORBIDDEN_SYMBOL_PREFIXES = (
     "nx_pool_session_api_",      # Gate B8 command routes
     "nx_tps_preflight_",         # Gate B10.2 store preflight
     "nx_weather_apply_",         # any future weather hardware apply
+    "nx_tuning_apply_",          # any future tuning apply (Gate W6.3.1 emits
+    "tuning_profile_apply",      # INPUTS to a decision, never an action)
 )
 # A benign conflict-reporting helper, not a command route (the committed
 # Gate B10.1 helper allowlists the same symbol).
@@ -131,6 +133,14 @@ REQUIRED_SYMBOL_PREFIXES = (
     "weather_runtime_",          # Gate W4 runtime
     "pool_time_sntp_",           # the ONE committed trusted-time provider
     "nx_mutation_",              # Gate W6.1 mutation observability
+    # Gate W6.3.1. Without these five the artifact could pass every other gate
+    # while the whole W1 input chain had been garbage-collected out of it —
+    # which is exactly the claim this gate makes about the flashed image.
+    "nx_telemetry_safety_",      # Gate W6.3T-B coherent snapshot
+    "tuning_classify_",          # Gate W6.3T-A sensor classifiers
+    "nx_tuning_input_",          # Gate W6.3.1 projection
+    "tuning_registry_",          # the production Gamma 601 registry
+    "tuning_policy_",            # the committed W1 evaluator itself
 )
 
 # A deliberately strict decimal-degree grammar: optional sign, digits, an

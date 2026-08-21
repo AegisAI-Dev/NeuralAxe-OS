@@ -99,6 +99,12 @@ PRIV_REQUIRES
     # producers publish their already-computed facts into it; it acquires no
     # hardware, makes no decision and depends on no policy or weather code.
     "telemetry_safety"
+    # Gate W6.3.1's tuning_input_projection is deliberately NOT listed here.
+    # Every other entry above is a component main itself compiles against; no
+    # file under main/ includes nx_tuning_input.h or names any of its symbols.
+    # Its only consumer is weather_pilot_diag, whose public REQUIRES already
+    # brings it into the build closure, so a line here would be a dependency
+    # main does not have, justified by a reason that is not true of main.
     "driver"
     "thermal_control"
     "esp_adc"

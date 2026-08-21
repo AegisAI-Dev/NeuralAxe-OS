@@ -38,6 +38,8 @@
 #include "weather_open_meteo.h"
 #include "local_schedule.h"
 #include "brussels_time.h"
+#include "nx_telemetry_safety.h"
+#include "nx_tuning_input.h"
 
 static const char *TAG = "nx_wx_pilot";
 
@@ -95,6 +97,35 @@ static bool     s_io_started;
 static WeatherObservation s_io_obs;
 static bool               s_io_obs_present;
 #endif
+
+/*
+ * GATE W6.3.1 — the W1 projection outputs.
+ *
+ * Module statics rather than stack locals: TuningPolicyInput is ~250 bytes and
+ * this runs on the shared ~1 s statistics task. They are written only by the
+ * single observation path below and are never published anywhere.
+ */
+static TuningPolicyEnvironment s_policy_env;
+static TuningPolicyInput       s_policy_in;
+static WeatherRuntimeStepEnv   s_step_env;
+static NxTuningInputDiag       s_w1_diag;
+static NxTuningInputFact       s_w1_fact;
+static uint32_t                s_policy_generation;
+/*
+ * Has a projection run AT ALL this boot? This flag exists because
+ * NxTuningInputDiag is a zero-initialised static and TUNING_SENSOR_OK is the
+ * ZERO of the W1 sensor enum — so a diag nobody has written yet reads back as
+ * "every sensor healthy". That is precisely the failure this whole chain of
+ * gates exists to prevent, and it would be indefensible to reintroduce it in
+ * the line that reports on the chain. Until this is true, the line below quotes
+ * NOTHING, exactly as nx_weather_io_observe() refuses to quote a machine that
+ * has not run.
+ */
+static bool                    s_w1_projected;
+
+/* Floor between two W1 lines when the verdict has not changed. A frozen device
+ * must still speak, but once a minute is enough for a ~1 s observation. */
+#define NX_WX_W1_LINE_MIN_US (60ull * 1000000ull)
 
 /*
  * Bind the weather runtime to the PRODUCTION trusted-time authority.
@@ -431,6 +462,96 @@ static void emit(const NxWeatherPilotLine *l)
              (unsigned)l->io_worker_stack_free);
 }
 
+/*
+ * GATE W6.3.1 — the W1 PROJECTION line.
+ *
+ * WHY IT IS ITS OWN LINE. The pilot line's schema is the committed
+ * W6/W6.1/W6.2/W6.3 one and this gate changes no field of it. What W6.3.1 adds
+ * is a fact about the INPUTS the policy was given, and the honest home for that
+ * is a separate bounded line rather than a widened contract.
+ *
+ * WHY IT IS NEEDED. `policy=` reports whether a recommendation came out. It
+ * cannot report WHY none did, and this chain has several distinct SILENT
+ * stalls that look identical from outside: telemetry never published, only one
+ * producer publishing, or a perfectly good projection sitting behind an earlier
+ * link that never opened a window. Without this line an owner watching a
+ * stalled pilot cannot tell which of those they are looking at.
+ *
+ * PRIVACY. Enum tokens and counters only. NxTuningInputDiag has no pointer and
+ * no character array, so a coordinate, host, URL, identity or credential is not
+ * expressible here even by mistake.
+ *
+ * EDGE-TRIGGERED. Emitted when the VERDICT changes, plus a once-a-minute floor.
+ * The two generations are PRINTED but deliberately excluded from the change
+ * test: the producers advance them ~10x a second, so triggering on them would
+ * turn this into a flood while telling a reader nothing new. Printing them is
+ * still the point — they are how a reviewer sees whether the producers are
+ * still alive, which the published/unpublished booleans alone cannot say.
+ */
+static void emit_w1_input(uint64_t now_us)
+{
+    static bool              s_seen;
+    static uint64_t          s_last_us;
+    static NxTuningInputDiag s_last;
+    bool changed;
+
+    if (!s_w1_projected) {
+        /* Nothing has been projected yet, so nothing may be quoted. */
+        if (!s_seen || (now_us - s_last_us) >= NX_WX_W1_LINE_MIN_US) {
+            s_seen    = true;
+            s_last_us = now_us;
+            ESP_LOGI(TAG, "WX_W1_INPUT present=0 fact=%s "
+                          "(no projection this boot; nothing may be quoted)",
+                     nx_tuning_input_fact_str(NX_W1_INPUT_UNAVAILABLE));
+        }
+        return;
+    }
+
+    changed = !s_seen ||
+        s_last.fact                      != s_w1_diag.fact ||
+        s_last.telemetry_power_published != s_w1_diag.telemetry_power_published ||
+        s_last.telemetry_fan_published   != s_w1_diag.telemetry_fan_published ||
+        s_last.asic_temp_status          != s_w1_diag.asic_temp_status ||
+        s_last.vrm_temp_status           != s_w1_diag.vrm_temp_status ||
+        s_last.fan_tach_status           != s_w1_diag.fan_tach_status ||
+        s_last.fan_control_uncertain     != s_w1_diag.fan_control_uncertain ||
+        s_last.emergency_thermal_active  != s_w1_diag.emergency_thermal_active ||
+        s_last.sensors_integrity_failed  != s_w1_diag.sensors_integrity_failed ||
+        s_last.sensors_upgrade_ok        != s_w1_diag.sensors_upgrade_ok ||
+        s_last.mining_health             != s_w1_diag.mining_health ||
+        s_last.current_profile_known     != s_w1_diag.current_profile_known ||
+        s_last.profile_count             != s_w1_diag.profile_count;
+
+    if (!changed && (now_us - s_last_us) < NX_WX_W1_LINE_MIN_US) {
+        return;
+    }
+    s_seen    = true;
+    s_last    = s_w1_diag;
+    s_last_us = now_us;
+
+    ESP_LOGI(TAG,
+             "WX_W1_INPUT present=1 fact=%s usable=%d pwr_pub=%d fan_pub=%d "
+             "pwr_gen=%u fan_gen=%u asic=%s vrm=%s fan=%s fan_ctl_unc=%d "
+             "emerg=%d integrity_failed=%d upgrade_ok=%d mining=%s "
+             "cur_profile_known=%d profiles=%u",
+             nx_tuning_input_fact_str(s_w1_fact),
+             (int)nx_tuning_input_usable(s_w1_fact),
+             (int)s_w1_diag.telemetry_power_published,
+             (int)s_w1_diag.telemetry_fan_published,
+             (unsigned)s_w1_diag.telemetry_power_generation,
+             (unsigned)s_w1_diag.telemetry_fan_generation,
+             tuning_sensor_status_str((TuningSensorStatus)s_w1_diag.asic_temp_status),
+             tuning_sensor_status_str((TuningSensorStatus)s_w1_diag.vrm_temp_status),
+             tuning_sensor_status_str((TuningSensorStatus)s_w1_diag.fan_tach_status),
+             (int)s_w1_diag.fan_control_uncertain,
+             (int)s_w1_diag.emergency_thermal_active,
+             (int)s_w1_diag.sensors_integrity_failed,
+             (int)s_w1_diag.sensors_upgrade_ok,
+             tuning_mining_health_str((TuningMiningHealth)s_w1_diag.mining_health),
+             (int)s_w1_diag.current_profile_known,
+             (unsigned)s_w1_diag.profile_count);
+}
+
 void nx_weather_pilot_log_boot(void)
 {
     NxWeatherPilotLine line;
@@ -628,14 +749,26 @@ void nx_weather_pilot_observe(void)
      * schedule when time is trusted, and returns a state that can now
      * actually CHANGE — which is the whole point of the correction.
      *
-     * `observation` stays NULL because the transport is NULL, so no fetch is
-     * attempted and no network request is possible. `env` stays NULL because
-     * the W1 policy inputs belong to the integrator and are not wired yet;
-     * the runtime reports that honestly as NO_PROFILE_SELECTED rather than
-     * substituting defaults.
+     * WHY THIS PARAGRAPH IS NOT THE W6.2 ONE. Gate W6.2 stated here that
+     * `observation` and `env` both stay NULL. NEITHER is true any more, and
+     * leaving the claim standing would make this comment exactly the kind of
+     * stale contract W6.2 itself had to be corrected for:
+     *
+     *   - `observation` is supplied by the Gate W6.3 worker whenever a result
+     *     is ready. The RUNTIME's transport seam is still NULL, so this task
+     *     still cannot perform a fetch; the observation arrives from the single
+     *     worker task and from nowhere else.
+     *
+     *   - `env` is supplied by the Gate W6.3.1 projection below, and ONLY when
+     *     the telemetry is fully observable. That is what finally makes
+     *     tuning_policy_evaluate() reachable on a device. When the telemetry is
+     *     not fully observable the environment is withheld and the runtime
+     *     reports NO_PROFILE_SELECTED exactly as it did before — a refusal, not
+     *     a substituted default.
      */
     if (wx_bind_runtime(&s_runtime_cfg)) {
-        const WeatherObservation *obs = NULL;
+        const WeatherObservation    *obs = NULL;
+        const WeatherRuntimeStepEnv *step_env = NULL;
 
 #ifdef CONFIG_NX_WEATHER_IO_WORKER
         /*
@@ -665,8 +798,66 @@ void nx_weather_pilot_observe(void)
             obs = &s_io_obs;
         }
 #endif
+        /*
+         * GATE W6.3.1 — build the REAL W1 environment/input, replacing the
+         * `env = NULL` posture that made tuning_policy_evaluate() impossible to
+         * reach even on a perfectly healthy device.
+         *
+         * THIS ALONE DOES NOT MAKE THE EVALUATOR RUN. weather_runtime_step()
+         * refuses earlier, at `observation == NULL`, and no observation can
+         * arrive while the committed W3 schedule stays disabled — which it is
+         * in every posture this tree can build, because nothing sets
+         * `schedule.enabled`. Supplying `env` removes THIS obstacle and no
+         * other; the schedule seam is a separate, owner-facing decision.
+         *
+         * EXACTLY ONE telemetry snapshot read per evaluation cycle. Every
+         * sensor fact below comes from that one copy through the committed
+         * classifiers; nothing re-reads PowerManagementModule, SystemModule,
+         * DeviceConfig or the TPS546 globals afterwards. The snapshot is the
+         * authority for those facts.
+         *
+         * No lock is held here: nx_telemetry_safety_read() takes and releases
+         * the telemetry critical section around one bounded struct copy, and
+         * the policy evaluation below runs entirely outside it.
+         */
+        {
+            NxTelemetrySafetySnapshot snap;
+            NxTuningStructuralFacts   facts;
+            const TuningProfile      *reg;
+            size_t                    reg_count = 0;
+
+            nx_tuning_structural_facts_gamma601(&facts);
+            facts.policy_generation = s_policy_generation;
+            reg = tuning_registry_gamma601(&reg_count);
+
+            if (nx_telemetry_safety_read(&snap)) {
+                s_w1_fact = nx_tuning_input_project(&snap, &facts, reg, reg_count,
+                                                    &s_policy_env, &s_policy_in,
+                                                    &s_w1_diag);
+                /* The projection writes the fail-closed defaults into the diag
+                 * on EVERY path, so from here on it is safe to quote. */
+                s_w1_projected = true;
+            } else {
+                s_w1_fact = NX_W1_INPUT_UNAVAILABLE;
+            }
+            /*
+             * Only a fully published, projected input may be evaluated. A
+             * partial or absent one is refused here rather than handed to W1
+             * with fail-closed placeholders, so "not yet observable" never
+             * masquerades as "observed and safe".
+             */
+            if (nx_tuning_input_usable(s_w1_fact)) {
+                s_step_env.policy_env = &s_policy_env;
+                s_step_env.policy_in  = &s_policy_in;
+                step_env = &s_step_env;
+                if (s_policy_generation < 0xFFFFFFFFu) {
+                    s_policy_generation++;
+                }
+            }
+        }
+
         memset(&s_rec, 0, sizeof(s_rec));
-        s_state = weather_runtime_step(&s_rt, NULL, obs, &s_rec);
+        s_state = weather_runtime_step(&s_rt, step_env, obs, &s_rec);
 
 #ifdef CONFIG_NX_WEATHER_IO_WORKER
         /* The step has consumed it; release the slot for the next window. */
@@ -687,6 +878,9 @@ void nx_weather_pilot_observe(void)
     nx_weather_pilot_log_step(&s_cfg, s_status, s_state, &s_rec,
                               false /* the schedule gate is not evaluated here */,
                               &posture);
+
+    /* Gate W6.3.1: what the policy was GIVEN, next to what came out of it. */
+    emit_w1_input((uint64_t)esp_timer_get_time());
 }
 
 #endif /* CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS */

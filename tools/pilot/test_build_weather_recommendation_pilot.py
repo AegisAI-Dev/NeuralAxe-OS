@@ -503,6 +503,32 @@ class MutationObservabilityContract(unittest.TestCase):
             self.assertFalse("nx_mutation_".startswith(pfx))
             self.assertFalse(pfx.startswith("nx_mutation_"))
 
+    def test_w631_input_chain_is_required_in_the_pilot_image(self):
+        """Gate W6.3.1: the whole W1 input chain must survive into the artifact.
+
+        Without these the image could pass every other check while the
+        projection, the classifiers, the registry or the evaluator itself had
+        been garbage-collected out — and the gate's claim is precisely that
+        they are present in the flashed binary.
+        """
+        for pfx in ("nx_telemetry_safety_", "tuning_classify_",
+                    "nx_tuning_input_", "tuning_registry_", "tuning_policy_"):
+            self.assertIn(pfx, w5.REQUIRED_SYMBOL_PREFIXES)
+
+    def test_no_required_prefix_is_also_forbidden(self):
+        """A prefix cannot be both, in either direction.
+
+        Checked over the whole product rather than for one pair, so a later
+        prefix that accidentally shadows an existing one fails here instead of
+        failing a real pilot build.
+        """
+        for req in w5.REQUIRED_SYMBOL_PREFIXES:
+            for bad in w5.FORBIDDEN_SYMBOL_PREFIXES:
+                self.assertFalse(req.startswith(bad),
+                                 f"required {req!r} is shadowed by forbidden {bad!r}")
+                self.assertFalse(bad.startswith(req),
+                                 f"forbidden {bad!r} is shadowed by required {req!r}")
+
 
 class CanonicalIdentityRegression(unittest.TestCase):
     """The KeyError: 'describe' regression and the contract that prevents it.
