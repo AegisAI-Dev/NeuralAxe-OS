@@ -4,6 +4,7 @@ SRCS
     "test_nx_weather_pilot_time.c"
     "test_nx_weather_pilot_wiring.c"
     "test_nx_weather_pilot_w631_flow.c"
+    "test_nx_weather_pilot_w632_schedule.c"
 
 REQUIRES
     "unity"

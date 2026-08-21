@@ -21,17 +21,17 @@
  * into the two W1 structures.
  *
  * WHAT THIS DOES **NOT** ACHIEVE, STATED PLAINLY. Supplying `env` is NECESSARY
- * for the evaluator to run; it is not SUFFICIENT, and this gate does not make
- * tuning_policy_evaluate() reachable on a shipped device on its own. The step
- * refuses earlier, at `observation == NULL`, whenever no weather result has
- * arrived — and in every posture this tree can currently build, none ever can:
- * the committed W3 local schedule ships `enabled = false`, no Kconfig symbol
- * and no production assignment anywhere sets it true, so the schedule verdict
- * is permanently DISABLED, the W6.3 worker is never asked to fetch, and the
- * observation stays NULL forever. Opening that gate is a separate, owner-facing
- * configuration decision — it is what finally permits outbound requests — and
- * it deliberately is not taken here. Until it is taken, this projection is
- * correct, exercised by its tests, and dormant in production.
+ * for the evaluator to run; it is not SUFFICIENT. The step refuses earlier, at
+ * `observation == NULL`, whenever no weather result has arrived, and no result
+ * can arrive while the committed W3 local schedule stays disabled — which it
+ * ships as, and which THIS gate deliberately does not change.
+ *
+ * The second half is Gate W6.3.2: CONFIG_NX_WEATHER_PILOT_SCHEDULE, an
+ * explicitly built, default-off authorization that lets the committed Brussels
+ * schedule become DUE. The two are independent on purpose. An authorized image
+ * whose telemetry is not fully observable is still refused by the projection
+ * below; an image with perfect telemetry but no authorization never receives an
+ * observation at all. Baseline firmware has neither.
  *
  * IT FABRICATES NOTHING. Every field below is one of:
  *   A. an OBSERVED fact, classified by a committed W1 classifier;

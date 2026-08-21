@@ -67,5 +67,27 @@ void nx_weather_source_from_build_config(NxWeatherSourceConfig *out)
      * this off, so no build can request an execution through W5.
      */
     out->recommendation_only = true;
+
+#ifdef CONFIG_NX_WEATHER_PILOT_SCHEDULE
+    /*
+     * GATE W6.3.2 — THE ONE PRODUCTION ASSIGNMENT THAT AUTHORIZES THE SCHEDULE.
+     *
+     * Everything above answers WHERE weather would come from. This single line
+     * is the separate answer to WHETHER this device may go and ask, and it is
+     * reachable only from an explicitly built recommendation-pilot image
+     * (the symbol depends on the pilot diagnostics flag). A configured but
+     * unauthorized build leaves the committed `enabled = false` untouched and
+     * issues no request.
+     *
+     * ONLY `enabled` MOVES. The slot count, the three committed local slots
+     * and the catch-up window keep exactly the values
+     * weather_schedule_config_defaults() gave them, so this authorizes the
+     * committed Brussels schedule rather than redefining it. Nothing here adds
+     * a scheduler, a timer, a task or a clock, and the trusted-time refusal
+     * inside weather_schedule_evaluate() is untouched: with this true and
+     * trusted time absent the schedule still cannot become actionable.
+     */
+    out->schedule.enabled = true;
+#endif
 #endif /* CONFIG_NX_WEATHER_SOURCE_POLICY */
 }

@@ -397,7 +397,7 @@ static void emit(const NxWeatherPilotLine *l)
      */
     ESP_LOGI(TAG,
              "%s seq=%u src=%s state=%s provider_cfg=%d location_cfg=%d "
-             "tz_cfg=%d rec_only=%d trusted_time=%d schedule_due=%d "
+             "tz_cfg=%d rec_only=%d trusted_time=%d sched_en=%d schedule_due=%d "
              "policy=%d rec=%d actionable=%d executed=%d fresh=%s "
              "result=%s reason=%s inv=%s fetches=%u recs=%u "
              "heap=%u minheap=%u stack=%u up_us=%llu "
@@ -418,7 +418,8 @@ static void emit(const NxWeatherPilotLine *l)
              weather_runtime_state_str(l->runtime_state),
              (int)l->provider_configured, (int)l->location_configured,
              (int)l->timezone_configured, (int)l->recommendation_only,
-             (int)l->trusted_time_available, (int)l->schedule_due,
+             (int)l->trusted_time_available,
+             (int)l->schedule_enabled, (int)l->schedule_due,
              (int)l->policy_evaluated, (int)l->recommendation_present,
              (int)l->actionable_in_future_gate, (int)l->executed,
              weather_freshness_str(l->freshness),
@@ -805,10 +806,14 @@ void nx_weather_pilot_observe(void)
          *
          * THIS ALONE DOES NOT MAKE THE EVALUATOR RUN. weather_runtime_step()
          * refuses earlier, at `observation == NULL`, and no observation can
-         * arrive while the committed W3 schedule stays disabled — which it is
-         * in every posture this tree can build, because nothing sets
-         * `schedule.enabled`. Supplying `env` removes THIS obstacle and no
-         * other; the schedule seam is a separate, owner-facing decision.
+         * arrive while the committed W3 schedule stays disabled. Supplying
+         * `env` removes THIS obstacle and no other.
+         *
+         * The schedule obstacle is removed SEPARATELY, by the Gate W6.3.2
+         * authorization (CONFIG_NX_WEATHER_PILOT_SCHEDULE). Both are required:
+         * an authorized image with unobservable telemetry still refuses here,
+         * and a fully observable image whose schedule is unauthorized never
+         * gets an observation to refuse over.
          *
          * EXACTLY ONE telemetry snapshot read per evaluation cycle. Every
          * sensor fact below comes from that one copy through the committed
@@ -875,9 +880,31 @@ void nx_weather_pilot_observe(void)
     memset(&res, 0, sizeof(res));
     nx_weather_pilot_facts_gather(&s_cfg, s_status, &posture, &res);
 
-    nx_weather_pilot_log_step(&s_cfg, s_status, s_state, &s_rec,
-                              false /* the schedule gate is not evaluated here */,
-                              &posture);
+    /*
+     * GATE W6.3.2 — report the REAL schedule verdict.
+     *
+     * This argument used to be a hardcoded `false` ("the schedule gate is not
+     * evaluated here"). That was true of Gate W6.2 and became false at W6.3,
+     * when the step began retaining its plan; leaving it now would be a
+     * compile-time constant presented as an observation — exactly the defect
+     * Gate W6.2 was corrected for — and it would make WX_EV_SCHEDULE_DUE
+     * unreachable precisely when W6.3.2 first makes a window openable.
+     *
+     * It READS the plan the step already computed via the committed
+     * weather_runtime_last_plan() accessor; it evaluates no schedule of its
+     * own, so "exactly one scheduler" is unchanged.
+     */
+    {
+        WeatherSchedulePlan plan;
+        bool                due = false;
+
+        if (s_rt_bound && weather_runtime_last_plan(&s_rt, &plan)) {
+            due = (plan.decision == WEATHER_SCHEDULE_DUE ||
+                   plan.decision == WEATHER_SCHEDULE_CATCH_UP_DUE);
+        }
+        nx_weather_pilot_log_step(&s_cfg, s_status, s_state, &s_rec, due,
+                                  &posture);
+    }
 
     /* Gate W6.3.1: what the policy was GIVEN, next to what came out of it. */
     emit_w1_input((uint64_t)esp_timer_get_time());

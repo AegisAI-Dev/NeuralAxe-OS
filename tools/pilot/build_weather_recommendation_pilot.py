@@ -322,6 +322,12 @@ def pilot_defaults_text(cfg: dict) -> str:
         f"CONFIG_NX_WEATHER_PROVIDER_{cfg['provider']}=y",
         f"CONFIG_NX_WEATHER_TZ_{cfg['timezone']}=y",
         "CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS=y",
+        # Gate W6.3.2. The explicit authorization that lets the committed
+        # Brussels schedule become DUE. Without it the pilot is CONFIGURED but
+        # not AUTHORIZED: it composes no request, the W6.3 worker is never
+        # asked to fetch and the schedule evaluates to DISABLED forever. It is
+        # written ONLY here, so an ordinary build cannot acquire it.
+        "CONFIG_NX_WEATHER_PILOT_SCHEDULE=y",
         # Gate W6.1. Without this the pilot has NO authority to read at the
         # mutation boundaries, every mutation fact is stamped UNAVAILABLE and
         # the invariant monitor can never report a healthy pilot.
@@ -374,6 +380,11 @@ REQUIRED_SDKCONFIG = (
     "CONFIG_NX_WEATHER_AWARE_TUNING",
     "CONFIG_NX_WEATHER_SOURCE_POLICY",
     "CONFIG_NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS",
+    # Gate W6.3.2 schedule authorization, verified from the GENERATED header
+    # rather than from our own fragment: the fragment states intent, only
+    # sdkconfig.h proves the compiler agreed (the symbol depends on the pilot
+    # diagnostics flag, so a mis-ordered fragment could silently drop it).
+    "CONFIG_NX_WEATHER_PILOT_SCHEDULE",
     "CONFIG_NX_MUTATION_OBSERVABILITY",
 )
 FORBIDDEN_SDKCONFIG = (
@@ -611,6 +622,11 @@ def build_manifest(identity: canonical_revision.BuildIdentity, cfg: dict,
         "distributionMode": cfg["distribution"],
         "trustedTimeConfigured": True,
         "pilotDiagnosticsEnabled": True,
+        # Gate W6.3.2. CONFIGURED and AUTHORIZED are separate facts: the four
+        # *Configured booleans above say where weather would come from, this
+        # one says the owner permitted this image to ask. A bounded boolean —
+        # it names no slot time, no window and no timezone.
+        "scheduleEnabled": True,
         "sourceStatus": cfg["status"],          # a value-free token
         "recommendationOnly": True,
         "executionEnabled": False,

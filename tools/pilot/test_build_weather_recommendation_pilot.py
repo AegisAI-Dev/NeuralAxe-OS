@@ -421,6 +421,93 @@ class VerificationContracts(unittest.TestCase):
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+    # ---------------- Gate W6.3.2 schedule authorization ----------------
+
+    def test_pilot_defaults_carry_the_schedule_authorization(self):
+        """The explicit pilot fragment must REQUEST the capability."""
+        cfg = w5.read_private_config(env())
+        text = w5.pilot_defaults_text(cfg)
+        self.assertIn("CONFIG_NX_WEATHER_PILOT_SCHEDULE=y", text)
+        # And it stays a recommendation-only image.
+        self.assertNotIn("CONFIG_NX_TIMED_SESSIONS_EXECUTION=y", text)
+        self.assertNotIn("CONFIG_NX_TIMED_SESSIONS_API=y", text)
+
+    def test_baseline_defaults_do_not_carry_it(self):
+        """The TRACKED defaults must never authorize the schedule.
+
+        This is the default-off proof at the source: a normal build reads only
+        the repository's own defaults files, and none of them may mention the
+        capability at all.
+        """
+        repo = Path(__file__).resolve().parents[2]
+        for name in ("sdkconfig.defaults", "sdkconfig.ci"):
+            path = repo / name
+            if path.is_file():
+                self.assertNotIn("NX_WEATHER_PILOT_SCHEDULE",
+                                 path.read_text(encoding="utf-8"),
+                                 f"{name} must not authorize the pilot schedule")
+
+    def test_sdkconfig_contract_requires_the_schedule_capability(self):
+        self.assertIn("CONFIG_NX_WEATHER_PILOT_SCHEDULE", w5.REQUIRED_SDKCONFIG)
+
+    def test_a_pilot_without_schedule_authorization_is_rejected(self):
+        """The generated header is the evidence, not our own fragment.
+
+        A build whose posture is otherwise perfect but which silently dropped
+        the schedule capability must FAIL, because such an image is configured
+        and unauthorized — it would sit in WAITING forever while the manifest
+        claimed a working pilot.
+        """
+        import shutil
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="nx-w632-cfg-"))
+        try:
+            cfgdir = work / "config"
+            cfgdir.mkdir(parents=True)
+            ok = "\n".join("#define %s 1" % s for s in w5.REQUIRED_SDKCONFIG)
+            (cfgdir / "sdkconfig.h").write_text(ok, encoding="utf-8")
+            w5.verify_sdkconfig_h(work)
+
+            without = "\n".join(
+                "#define %s 1" % s for s in w5.REQUIRED_SDKCONFIG
+                if s != "CONFIG_NX_WEATHER_PILOT_SCHEDULE")
+            (cfgdir / "sdkconfig.h").write_text(without, encoding="utf-8")
+            with self.assertRaises(w5.PilotError):
+                w5.verify_sdkconfig_h(work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_schedule_capability_cannot_outlive_the_pilot_posture(self):
+        """Kconfig must make the capability DEPEND on the pilot posture.
+
+        Proven against the committed Kconfig source rather than asserted: the
+        symbol must declare `depends on
+        NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS`, so no fragment can turn
+        it on in a baseline image however it is ordered.
+        """
+        repo = Path(__file__).resolve().parents[2]
+        text = (repo / "main" / "Kconfig.projbuild").read_text(encoding="utf-8")
+        idx = text.index("config NX_WEATHER_PILOT_SCHEDULE")
+        block = text[idx:idx + 400]
+        self.assertIn("depends on NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS",
+                      block)
+        self.assertIn("default n", block)
+
+    def test_manifest_reports_schedule_authorization_and_no_execution(self):
+        ident = w5.canonical_revision.BuildIdentity(
+            revision="v0.0.0-0-gdeadbee", commit="d" * 40, dirty=False,
+            branch="t")
+        cfg = w5.read_private_config(env())
+        m = w5.build_manifest(ident, cfg, "digest")
+        self.assertTrue(m["scheduleEnabled"])
+        # Authorization of an OBSERVATION never implies an execution.
+        self.assertFalse(m["executionEnabled"])
+        self.assertFalse(m["hardwareTuningEnabled"])
+        self.assertFalse(m["timedSessionApiEnabled"])
+        self.assertTrue(m["recommendationOnly"])
+        # It is a bounded boolean, not a window or a slot time.
+        self.assertIsInstance(m["scheduleEnabled"], bool)
+
     def test_release_pair_reads_both_identities_from_the_built_images(self):
         """The pair is read from the artefacts, never assumed from the input."""
         import shutil

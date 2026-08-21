@@ -399,6 +399,14 @@ bool nx_weather_pilot_record(NxWeatherPilotDiag *d,
         out->location_configured  = cfg->latitude_e4 != 0 && cfg->longitude_e4 != 0;
         out->timezone_configured  = cfg->timezone != WEATHER_TZ_UNSPECIFIED;
         out->recommendation_only  = cfg->recommendation_only;
+        /*
+         * Gate W6.3.2 authorization, read as SHAPE from the same configuration
+         * the line already reports on — a bounded boolean, never a slot time,
+         * a timezone identity or a window instant. It is deliberately taken
+         * from `cfg` rather than from the runtime, because it states what the
+         * OWNER authorized, not what the scheduler happens to conclude now.
+         */
+        out->schedule_enabled     = cfg->schedule.enabled;
     }
     out->source_status = source;
     out->runtime_state = state;

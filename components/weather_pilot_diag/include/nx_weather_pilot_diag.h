@@ -301,6 +301,16 @@ typedef struct {
     WeatherProviderResult provider_result;
     WeatherNotExecutedReason not_executed;
     bool trusted_time_available;
+    /*
+     * GATE W6.3.2 — AUTHORIZATION and DUE-NESS are two different facts and are
+     * reported separately on purpose. `schedule_enabled` says the owner built
+     * an image permitted to ask for weather at all; `schedule_due` says the
+     * committed Brussels schedule has actually opened a window right now.
+     * Conflating them would make "nothing is happening" unreadable: an
+     * unauthorized image and an authorized one between windows look identical
+     * from the outside, and only the first is a configuration decision.
+     */
+    bool schedule_enabled;
     bool schedule_due;
     bool policy_evaluated;
     bool recommendation_present;

@@ -639,6 +639,57 @@ menu "Stratum Configuration"
             supervised pilot before treating this size as proven, and tighten
             it with that evidence rather than by assumption.
 
+    config NX_WEATHER_PILOT_SCHEDULE
+        bool "Authorize the weather recommendation-pilot schedule (Gate W6.3.2)"
+        depends on NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+        default n
+        help
+            EXPERIMENTAL, OWNER-SUPERVISED PILOT ONLY. This is the ONE
+            authority that lets the committed Gate W3 Brussels schedule become
+            DUE on a real device.
+
+            WHY IT EXISTS. The committed schedule ships enabled = false and
+            nothing in the tree could set it true: there was no Kconfig symbol,
+            no build-policy seam and no production assignment. The schedule
+            therefore evaluated to DISABLED forever, the Gate W6.3 worker was
+            never asked to fetch, no WeatherObservation could arrive, and the
+            Gate W6.3.1 projection - though correctly wired - could never reach
+            tuning_policy_evaluate() from a naturally due window. This flag
+            closes that authorization gap and nothing else.
+
+            CONFIGURED IS NOT AUTHORIZED. Selecting a distribution, a provider,
+            a location and a timezone says WHERE weather would come from. It
+            does NOT say that this device may go and ask. Those are separate
+            decisions on purpose, so a configured-but-unauthorized image issues
+            no request. There is no implicit enable: not from a valid
+            configuration, not from a selected provider, not from supplied
+            coordinates and not from trusted time becoming available.
+
+            WHAT IT AUTHORIZES. A WEATHER OBSERVATION, and only that. It grants
+            no tuning profile, no frequency, voltage, fan or thermal change, no
+            pool or protocol change, no lease, no session, no restart, no OTA
+            and no persistence. Every Gamma 601 profile remains UNVALIDATED and
+            therefore cannot become auto-eligible, so executed stays false.
+
+            IT WEAKENS NO TRUSTED-TIME RULE. weather_schedule_evaluate() still
+            refuses without operationally trusted Gate B2/B10 time; this flag
+            only removes the DISABLED short circuit that preceded that check.
+            It adds no clock, no SNTP provider, no scheduler, no timer, no task
+            and no queue - it authorizes the ONE committed scheduler that
+            already exists.
+
+            BUILD-TIME AND IMMUTABLE. There is no runtime toggle, no REST route,
+            no NVS setting and no remote command that can change it for a booted
+            image. It depends on the pilot diagnostics flag, so it cannot be
+            true in a baseline image.
+
+            NOT REBOOT-SAFE YET. The schedule's executed-window state is RAM
+            only, so a reboot inside an already-served window can serve it a
+            second time. Bounded duplicate protection across reboots is Gate
+            W6.4 and is deliberately NOT part of this flag.
+
+            Leave disabled for production.
+
     endif
 
     config NX_MUTATION_OBSERVABILITY
