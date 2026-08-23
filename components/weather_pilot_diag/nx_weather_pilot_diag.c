@@ -527,3 +527,62 @@ void nx_weather_pilot_io_project(const NxWeatherIoDiag *d, bool worker_linked,
     out->io_worker_count         = worker_count;
     out->io_worker_stack_free    = worker_stack_free;
 }
+
+void nx_weather_pilot_window_project(const NxWeatherWindowDiag *d,
+                                     bool dedup_linked,
+                                     NxWeatherPilotLine *out)
+{
+    if (out == NULL) {
+        return;
+    }
+    /*
+     * Fail closed FIRST, exactly as the W6.3 I/O projection above does, so
+     * every early return leaves an unreadable projection rather than a passing
+     * zero. NOT_LOADED and UNAVAILABLE are the honest "nothing was read"
+     * tokens, and both zeros mean "no usable dedup authority".
+     */
+    out->window_fact               = NX_WX_FACT_UNAVAILABLE;
+    out->window_dedup_enabled      = dedup_linked;
+    out->window_store_fact         = (uint8_t)NX_WX_WSTORE_NOT_LOADED;
+    out->window_ready              = false;
+    out->window_recovered          = false;
+    out->window_day_present        = false;
+    out->window_service_year       = 0u;
+    out->window_service_month      = 0u;
+    out->window_service_day        = 0u;
+    out->window_served_mask        = 0u;
+    out->window_last_decision      = (uint8_t)NX_WX_WINDOW_UNAVAILABLE;
+    out->window_claim_count        = 0u;
+    out->window_suppressed_count   = 0u;
+    out->window_persist_fail_count = 0u;
+
+    if (!dedup_linked) {
+        /*
+         * The authority does not exist in this image. Because the schedule
+         * DEPENDS on this flag, that also means no outbound window service
+         * exists — a property of the LINK, not a reading, and therefore
+         * stronger than any value could be.
+         */
+        out->window_fact = NX_WX_FACT_STRUCTURAL;
+        return;
+    }
+    if (d == NULL) {
+        /* Linked but nothing quotable was published. Say exactly that; do not
+         * invent a store state on the authority's behalf. */
+        return;
+    }
+
+    out->window_fact               = NX_WX_FACT_OBSERVED;
+    out->window_store_fact         = d->fact;
+    out->window_ready              = d->ready;
+    out->window_recovered          = d->recovered;
+    out->window_day_present        = d->day_present;
+    out->window_service_year       = d->service_year;
+    out->window_service_month      = d->service_month;
+    out->window_service_day        = d->service_day;
+    out->window_served_mask        = d->served_mask;
+    out->window_last_decision      = d->last_decision;
+    out->window_claim_count        = d->claim_count;
+    out->window_suppressed_count   = d->suppressed_count;
+    out->window_persist_fail_count = d->persist_fail_count;
+}

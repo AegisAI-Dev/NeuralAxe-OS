@@ -18,6 +18,15 @@
 #include "scoreboard.h"
 
 #include "nx_mutation_counters.h"
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+/*
+ * Gate W6.4.1. This task is the project's ONLY flash writer with an
+ * internal-RAM stack, so it is where the weather schedule-window transaction
+ * has to run. main -> component is the correct dependency direction; the
+ * component knows nothing about this file, the queue or the task.
+ */
+#include "nx_weather_window_runtime.h"
+#endif
 
 /*
  * NeuralAxe Gate W6.1 — CONFIGURATION MUTATION BOUNDARY.
@@ -324,11 +333,90 @@ static void nvs_config_apply_fallback(NvsConfigKey key, Settings * setting)
     }
 }
 
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+/*
+ * Gate W6.4.1 — the wake, and the ONE way a weather job enters this task.
+ *
+ * PAYLOAD-FREE BY DESIGN. The queue item carries nothing but a sentinel key;
+ * the job itself never leaves the weather component's single pending slot.
+ * That is what keeps ConfigUpdate — and therefore the whole queue and every
+ * existing producer — BYTE-IDENTICAL to the committed layout, makes "at most
+ * one weather job pending" structural rather than a convention, and means a
+ * dropped wake loses nothing: the job is still pending and a later tick simply
+ * wakes again.
+ *
+ * NVS_CONFIG_COUNT is deliberately NOT a settings key. A zero key would be
+ * NVS_CONFIG_WIFI_SSID with a NULL string, which the ordinary path would
+ * happily write over the cached SSID; the sentinel cannot be mistaken for any
+ * setting, and the dispatch below runs before the settings lookup anyway.
+ *
+ * NON-BLOCKING BY CONTRACT. Every other producer here uses portMAX_DELAY,
+ * which is right for them: they run on request-handling tasks where a stalled
+ * configuration write is acceptable. The weather caller is the ~1 s statistics
+ * task and must never wait on flash, so this uses a timeout of ZERO.
+ *
+ * HEADROOM. Weather work may never consume the queue slots configuration
+ * writes need — including the priority-10 overheat writes. It refuses while
+ * fewer than NX_WX_NVS_QUEUE_RESERVE slots remain, which is an ADMISSION
+ * failure, not a persistence failure: no flash operation has occurred and the
+ * caller may try again on a later tick while the window is still due.
+ *
+ * It deliberately does NOT count a mutation: a wake is not a configuration
+ * change, and counting it would destroy the W6.1 all-counters-zero baseline.
+ */
+#define NX_WX_NVS_QUEUE_RESERVE 4
+
+bool nvs_config_post_wx_wake(void)
+{
+    ConfigUpdate update;
+
+    if (nvs_save_queue == NULL) {
+        return false;
+    }
+    if (uxQueueSpacesAvailable(nvs_save_queue) <= NX_WX_NVS_QUEUE_RESERVE) {
+        return false;
+    }
+    memset(&update, 0, sizeof(update));
+    update.key = NVS_CONFIG_COUNT;   /* the sentinel: not a setting */
+    return xQueueSend(nvs_save_queue, &update, 0) == pdTRUE;
+}
+
+static bool nvs_wx_wake(void *ctx)
+{
+    (void)ctx;
+    return nvs_config_post_wx_wake();
+}
+
+static const NxWeatherWindowExecutorOps NVS_WX_EXECUTOR_OPS = {
+    .wake = nvs_wx_wake,
+};
+#endif
+
 static void nvs_task(void *pvParameters)
 {
     while (1) {
         ConfigUpdate update;
         if (xQueueReceive(nvs_save_queue, &update, portMAX_DELAY) == pdTRUE) {
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+            /*
+             * Gate W6.4.1 — run the weather schedule-window transaction HERE,
+             * on this task's internal-RAM stack, and nowhere else.
+             *
+             * FIRST STATEMENT AFTER THE RECEIVE, DELIBERATELY, and it never
+             * falls through: the settings lookup below would reject this
+             * sentinel key anyway, but only after logging an error every time.
+             *
+             * This is not a general-purpose callback executor: it calls one
+             * named, bounded transaction owned by one component. That component
+             * performs the committed W2 dual-slot commit and publishes a
+             * bounded result; it submits no weather, opens no socket and
+             * touches nothing in this namespace.
+             */
+            if (update.key == NVS_CONFIG_COUNT) {
+                nx_weather_window_runtime_execute();
+                continue;
+            }
+#endif
             Settings *setting = nvs_config_get_settings(update.key);
             if (setting && setting->type == update.type) {
                 esp_err_t ret = ESP_OK;
@@ -540,12 +628,27 @@ esp_err_t nvs_config_init(void)
     TaskHandle_t task_handle;
 
     // nvs_task heap _must_ be internal memory
-    BaseType_t task_result = xTaskCreate(nvs_task, "nvs_task", 8192, NULL, 5, &task_handle); 
+    BaseType_t task_result = xTaskCreate(nvs_task, "nvs_task", 8192, NULL, 5, &task_handle);
     if (task_result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create nvs_task");
 
         return ESP_FAIL;
     }
+
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+    /*
+     * Gate W6.4.1 — hand the weather window owner its transport, here and
+     * nowhere else.
+     *
+     * This is the earliest point at which the queue and the task provably
+     * exist, and it is still long before main.c creates the statistics task
+     * (nvs_config_init() at main.c:110, statistics_task at main.c:278), so the
+     * first observation can never find an unbound executor. Binding from the
+     * weather side instead would invert the dependency: the component would
+     * have to know this file owns a queue.
+     */
+    nx_weather_window_runtime_bind_executor(&NVS_WX_EXECUTOR_OPS, NULL);
+#endif
     return ESP_OK;
 }
 

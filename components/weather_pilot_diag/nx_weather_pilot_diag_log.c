@@ -40,6 +40,16 @@
 #include "brussels_time.h"
 #include "nx_telemetry_safety.h"
 #include "nx_tuning_input.h"
+/*
+ * Gate W6.4. Included UNCONDITIONALLY, because the line reports the window
+ * posture in every pilot image — a build with the diagnostics but without the
+ * dedup capability must still say so (wnd_fact=STRUCTURAL, wnd_dedup=0) rather
+ * than print nothing and leave the reader guessing. That posture links the two
+ * token-to-string helpers and nothing else: no store is opened, no NVS
+ * namespace is named and no claim path exists in it.
+ */
+#include "nx_weather_window.h"
+#include "nx_weather_window_runtime.h"
 
 static const char *TAG = "nx_wx_pilot";
 
@@ -126,6 +136,59 @@ static bool                    s_w1_projected;
 /* Floor between two W1 lines when the verdict has not changed. A frozen device
  * must still speak, but once a minute is enough for a ~1 s observation. */
 #define NX_WX_W1_LINE_MIN_US (60ull * 1000000ull)
+
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+/*
+ * GATE W6.4 — REQUEST the persistence authority; never touch flash from here.
+ *
+ * EXECUTION CONTEXT, STATED — AND WHY THIS IS A REQUEST (Gate W6.4.1).
+ *
+ * This runs on the ~1 s statistics task, which main.c creates with
+ * xTaskCreateWithCaps(..., MALLOC_CAP_SPIRAM): ITS STACK IS IN PSRAM. Every
+ * SPI-flash operation in this build disables the shared flash/PSRAM cache
+ * (SPI_FLASH_CACHE_NO_DISABLE is 0 — neither flash auto-suspend nor
+ * XIP-from-PSRAM is enabled), and ESP-IDF permits a PSRAM task stack only for
+ * tasks "where the stack is never accessed while the cache is disabled".
+ * Performing the load or the claim here would therefore be an INVALID
+ * EXECUTION CONTEXT, not a latency question.
+ *
+ * The committed project already answers this: main/nvs_config.c carries the
+ * comment "nvs_task heap _must_ be internal memory" above a dedicated
+ * internal-RAM writer task fed by a bounded queue. Gate W6.4.1 routes the
+ * window transaction through that SAME owner instead of inventing a second
+ * persistence task.
+ *
+ * So this call POSTS a load request and returns immediately. It performs no
+ * flash access, takes no lock that a flash operation could sit behind, and
+ * never blocks. Until the owner task has actually classified the store the
+ * fact stays NOT_LOADED, which is not serviceable — so nothing can be
+ * submitted in the meantime.
+ *
+ * It never calls nvs_flash_init and never erases: NVS is already initialized
+ * by main long before the first observation.
+ */
+/*
+ * THE BACKEND CONTEXT, WHICH IS NOT OPTIONAL.
+ *
+ * tuning_store_nvs_ops() is a stateless operations table; the NVS handle and
+ * its open flag live in a caller-owned TuningStoreNvsBackend. Passing NULL
+ * makes nvs_be_open() return TUNING_STORE_BACKEND_IO, tuning_store_init()
+ * return IO_ERROR, and the store classify permanently UNAVAILABLE — which
+ * silently disables the ENTIRE dedup chain in every buildable posture while
+ * every symbol audit still passes. That is precisely what this static fixes.
+ *
+ * It is file-static rather than a local because the store keeps the pointer
+ * for its whole lifetime, and it is touched only through the ops table — that
+ * is, only ever on the persistence owner task.
+ */
+static TuningStoreNvsBackend s_wx_backend;
+
+static bool wx_window_store_ready(void)
+{
+    return nx_weather_window_runtime_begin(tuning_store_nvs_ops(),
+                                           &s_wx_backend);
+}
+#endif
 
 /*
  * Bind the weather runtime to the PRODUCTION trusted-time authority.
@@ -231,6 +294,9 @@ static void wx_io_submit_if_due(uint64_t now_us)
     NxWeatherIoRequest   req;
     WeatherTimeView      tv;
     BrusselsLocalTime    local;
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+    NxWeatherWindowGrant grant;
+#endif
 
     if (!s_io_started) {
         return;   /* no worker: nothing may be submitted                    */
@@ -256,6 +322,43 @@ static void wx_io_submit_if_due(uint64_t now_us)
         return;   /* outside the supported band: refuse, never approximate  */
     }
 
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+    /*
+     * GATE W6.4 — THE DURABLE CLAIM, BEFORE ANYTHING GOES OUT.
+     *
+     * This is the ONLY production call site of the authorization gate. The
+     * decide-then-durably-claim ordering, the refusal directions and the
+     * no-retry/no-rollback rule all live inside nx_weather_window_authorize()
+     * so that the sequence which ships is the same sequence the tests drive.
+     *
+     * GATE W6.4.1 made the claim SPAN TICKS, because the durable write may not
+     * run on this task at all. The verdict is therefore three-valued:
+     *
+     *   SUBMIT — a verified durable commit for THIS window has been observed.
+     *            Exactly one submission is authorized, right now.
+     *   WAIT   — a transaction is in flight on the persistence owner. Submit
+     *            nothing, claim nothing, and simply come back next tick.
+     *   REFUSE — everything else. Zero outbound submissions.
+     *
+     * Only SUBMIT falls through. Both other verdicts return, so an in-flight
+     * claim can never be mistaken for a completed one.
+     */
+    if (nx_weather_window_authorize(&plan, s_rt.cfg.schedule.slot_count,
+                                    &grant) != NX_WX_GATE_SUBMIT) {
+        return;
+    }
+    /*
+     * FROM HERE THE GRANT NAMES THE WINDOW — not the clock, and not the plan.
+     *
+     * `local.date` and `plan.slot_index` were computed from a reading taken
+     * before the claim was requested, and the claim may have completed one or
+     * more ticks later. Across a midnight rollover those two disagree with what
+     * actually reached flash, and submitting for the re-derived window would be
+     * a request for a window that was never claimed. The durable record names
+     * the window; that is the whole point of claiming first.
+     */
+#endif /* CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP */
+
     memset(&req, 0, sizeof(req));
     /* The committed W3 builder owns the allowlisted host/path and the bounded
      * query; this adapter composes no URL and knows no hostname. */
@@ -264,10 +367,15 @@ static void wx_io_submit_if_due(uint64_t now_us)
         return;
     }
     req.generation         = ++s_io_generation;
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+    req.window.date        = grant.date;
+    req.window.slot_index  = grant.slot_index;
+#else
     req.window.date        = local.date;
     req.window.slot_index  = plan.slot_index;
+#endif
     req.window.provider    = s_rt.cfg.expected_provider;
-    req.parse.expected_date       = local.date;
+    req.parse.expected_date       = req.window.date;
     req.parse.fetch_epoch_s       = tv.trusted_utc_s;
     req.parse.fetch_epoch_trusted = true;
     req.parse.source_generation   = req.generation;
@@ -278,8 +386,15 @@ static void wx_io_submit_if_due(uint64_t now_us)
     if (nx_weather_io_worker_submit(&req, now_us) == WX_IO_SUBMIT_ACCEPTED) {
         /* accepted; the worker has been notified */
     } else {
-        /* Refused. Give the generation back so ids stay dense and a later
-         * tick can retry cleanly; the machine's own counters recorded why. */
+        /*
+         * Refused. Give the generation back so request ids stay dense; the
+         * machine's own counters recorded why.
+         *
+         * THIS IS NOT A RETRY, and under Gate W6.4 it cannot become one. The
+         * window was durably claimed above, so every later tick for it decides
+         * ALREADY_CLAIMED and submits nothing. The recommendation for this
+         * window is simply lost — the deliberate at-most-once cost.
+         */
         s_io_generation--;
     }
 }
@@ -389,6 +504,20 @@ static void fill_io(NxWeatherPilotLine *line)
 #endif
 }
 
+static void fill_window(NxWeatherPilotLine *line)
+{
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+    NxWeatherWindowDiag d;
+
+    nx_weather_window_runtime_observe(&d);
+    nx_weather_pilot_window_project(&d, true, line);
+#else
+    /* No dedup authority in this image: STRUCTURAL. Since the schedule depends
+     * on this flag, it also means no outbound window service exists. */
+    nx_weather_pilot_window_project(NULL, false, line);
+#endif
+}
+
 static void emit(const NxWeatherPilotLine *l)
 {
     /*
@@ -411,7 +540,13 @@ static void emit(const NxWeatherPilotLine *l)
              "io_fact=%s io=%s io_ev=%s io_gen=%u io_inflight=%d "
              "io_pending=%d io_sub=%u io_busy=%u io_pend_rej=%u io_ok=%u "
              "io_fail=%u io_to=%u io_disc=%u io_used=%u io_last=%s "
-             "io_age_s=%u io_workers=%u io_stack_free=%u",
+             "io_age_s=%u io_workers=%u io_stack_free=%u "
+             /* Gate W6.4 — tokens and bounded scalars only; the service day
+              * and slot mask are governed scheduling state, not private data. */
+             "wnd_fact=%s wnd_dedup=%d wnd_store=%s wnd_ready=%d "
+             "wnd_recovered=%d wnd_day=%d wnd_date=%04u-%02u-%02u "
+             "wnd_mask=0x%02x wnd_dec=%s wnd_claims=%u wnd_suppressed=%u "
+             "wnd_persist_fail=%u",
              nx_weather_pilot_event_str(l->event),
              (unsigned)l->sequence,
              nx_weather_source_status_str(l->source_status),
@@ -460,7 +595,22 @@ static void emit(const NxWeatherPilotLine *l)
              (unsigned)l->io_consume_count,
              weather_provider_result_str((WeatherProviderResult)l->io_last_result),
              (unsigned)l->io_request_age_s, (unsigned)l->io_worker_count,
-             (unsigned)l->io_worker_stack_free);
+             (unsigned)l->io_worker_stack_free,
+             nx_weather_fact_state_str(l->window_fact),
+             (int)l->window_dedup_enabled,
+             nx_weather_window_store_fact_str(
+                 (NxWeatherWindowStoreFact)l->window_store_fact),
+             (int)l->window_ready, (int)l->window_recovered,
+             (int)l->window_day_present,
+             (unsigned)l->window_service_year,
+             (unsigned)l->window_service_month,
+             (unsigned)l->window_service_day,
+             (unsigned)l->window_served_mask,
+             nx_weather_window_decision_str(
+                 (NxWeatherWindowDecision)l->window_last_decision),
+             (unsigned)l->window_claim_count,
+             (unsigned)l->window_suppressed_count,
+             (unsigned)l->window_persist_fail_count);
 }
 
 /*
@@ -569,6 +719,7 @@ void nx_weather_pilot_log_boot(void)
         fill_evidence(&line, NULL);
         fill_time(&line);
         fill_io(&line);
+        fill_window(&line);
         emit(&line);
     }
     /*
@@ -611,6 +762,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
             fill_evidence(&line, posture);
             fill_time(&line);
             fill_io(&line);
+            fill_window(&line);
             emit(&line);
         }
     }
@@ -623,6 +775,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
             fill_evidence(&line, posture);
             fill_time(&line);
             fill_io(&line);
+            fill_window(&line);
             emit(&line);
         }
     }
@@ -636,6 +789,7 @@ void nx_weather_pilot_log_step(const NxWeatherSourceConfig *cfg,
             fill_evidence(&line, posture);
             fill_time(&line);
             fill_io(&line);
+            fill_window(&line);
             emit(&line);
         }
     }
@@ -770,6 +924,22 @@ void nx_weather_pilot_observe(void)
     if (wx_bind_runtime(&s_runtime_cfg)) {
         const WeatherObservation    *obs = NULL;
         const WeatherRuntimeStepEnv *step_env = NULL;
+
+#ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP
+        /*
+         * GATE W6.4 — STARTUP ORDERING. Bring the persistence authority up (a
+         * no-op once loaded) BEFORE anything below can reach the submit gate.
+         *
+         * Trusted time becoming available first must not let the schedule race
+         * ahead of recovery: persistence readiness is an ADDITIONAL
+         * prerequisite, not an alternative one. The submit path re-checks
+         * readiness itself and refuses when this failed, so an unavailable or
+         * corrupt store produces zero outbound requests rather than a
+         * RAM-only fallback. Load happens once per boot; this is not a per-tick
+         * cost and it is not a busy loop.
+         */
+        (void)wx_window_store_ready();
+#endif
 
 #ifdef CONFIG_NX_WEATHER_IO_WORKER
         /*

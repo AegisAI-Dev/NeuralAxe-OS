@@ -38,5 +38,11 @@ REQUIRES
     # Both are pure/read-only and neither grants any execution authority.
     "telemetry_safety"
     "tuning_input_projection"
+    # Gate W6.4: the crash-safe schedule-window dedup authority. It is
+    # unconditional for the same ESP-IDF reason as the entries above —
+    # component requirements resolve before any CONFIG_* symbol exists —
+    # and every call site is compiled out without
+    # CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP.
+    "weather_window"
     "tuning_profile"
 )

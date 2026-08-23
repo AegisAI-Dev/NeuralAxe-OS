@@ -494,7 +494,9 @@ TEST_CASE("store: unsupported schema in the committed slot", "[tuning_store]")
     {
         FakeVal *v = &g_fake.committed[FK_A];
         uint32_t crc;
-        v->bytes[4] = 2u;
+        /* One past the current schema: v2 is SUPPORTED since Gate W6.4,
+         * so a literal 2 here would no longer be an unsupported schema. */
+        v->bytes[4] = (uint8_t)(TUNING_RECORD_SCHEMA_VERSION + 1u);
         crc = tuning_record_crc32(v->bytes, v->len - TUNING_RECORD_CRC_LEN);
         v->bytes[v->len - 4] = (uint8_t)(crc & 0xFFu);
         v->bytes[v->len - 3] = (uint8_t)((crc >> 8) & 0xFFu);

@@ -639,9 +639,58 @@ menu "Stratum Configuration"
             supervised pilot before treating this size as proven, and tighten
             it with that evidence rather than by assumption.
 
+    config NX_WEATHER_PILOT_WINDOW_DEDUP
+        bool "Crash-safe schedule-window deduplication (Gate W6.4)"
+        depends on NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+        default n
+        help
+            EXPERIMENTAL, OWNER-SUPERVISED PILOT ONLY. Compiles the crash-safe
+            record of WHICH schedule windows have already been claimed for
+            outbound service, so a reboot cannot re-serve a window that was
+            already spent.
+
+            WHY IT EXISTS. Until Gate W6.4 the served-window mask lived only in
+            RAM. A device that served the 05:00 window and rebooted at 05:03
+            reacquired trusted time, found itself still inside the same logical
+            window, and could serve it again. Nothing durable recorded that the
+            window had been spent.
+
+            THE CONTRACT, EXACTLY. At most ONE outbound submission per
+            persisted schedule window across reboots, subject to successful
+            durable claim persistence. It is NOT "exactly once" - exactly-once
+            external side effects cannot be guaranteed across a local flash
+            transaction and a remote HTTP request. It is also NOT at-least-once:
+            if power is lost after the durable claim but before the request, the
+            window is simply MISSED after reboot. For a recommendation-only
+            pilot that is strictly safer than issuing the same authorized window
+            twice after an ambiguous crash.
+
+            ORDERING. The window is durably claimed and the commit is verified
+            BEFORE the first outbound submission is permitted. A persistence
+            failure produces zero outbound requests and never falls back to
+            RAM-only deduplication.
+
+            IT REUSES THE COMMITTED STORE. Every byte goes through the Gate W2
+            crash-safe dual-slot algorithm in the existing "nx_wtp" namespace.
+            No second persistence authority is created, and the Gate B3 timed
+            session namespace "nx_tps" is never opened or referenced.
+
+            BOUNDED WRITES. At most one durable claim transaction per newly
+            claimed schedule slot - bounded by the committed slot count, never
+            by tick rate. Nothing is written for a disabled schedule, an
+            unconfigured source, untrusted time, a window that is not due, an
+            already-claimed window, or ordinary statistics ticks.
+
+            IT AUTHORIZES NOTHING. No tuning profile, no frequency, voltage,
+            fan or thermal change, no pool or protocol change, no restart, no
+            OTA and no execution. Every Gamma 601 profile remains UNVALIDATED.
+
+            Leave disabled for production.
+
     config NX_WEATHER_PILOT_SCHEDULE
         bool "Authorize the weather recommendation-pilot schedule (Gate W6.3.2)"
         depends on NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS
+        depends on NX_WEATHER_PILOT_WINDOW_DEDUP
         default n
         help
             EXPERIMENTAL, OWNER-SUPERVISED PILOT ONLY. This is the ONE
@@ -683,10 +732,13 @@ menu "Stratum Configuration"
             image. It depends on the pilot diagnostics flag, so it cannot be
             true in a baseline image.
 
-            NOT REBOOT-SAFE YET. The schedule's executed-window state is RAM
-            only, so a reboot inside an already-served window can serve it a
-            second time. Bounded duplicate protection across reboots is Gate
-            W6.4 and is deliberately NOT part of this flag.
+            REBOOT SAFETY IS PROVIDED BY GATE W6.4, NOT BY THIS FLAG. This
+            symbol authorizes the schedule; NX_WEATHER_PILOT_WINDOW_DEDUP makes
+            a claimed window survive a reboot. Because this symbol now DEPENDS
+            on that one, an image cannot authorize outbound schedule service
+            without also carrying the crash-safe deduplication authority - the
+            RAM-only window that Gate W6.3.2 shipped with is no longer
+            reachable in any buildable posture.
 
             Leave disabled for production.
 

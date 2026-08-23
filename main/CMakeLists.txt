@@ -95,6 +95,15 @@ PRIV_REQUIRES
     # reason; every increment compiles away without
     # CONFIG_NX_MUTATION_OBSERVABILITY, so the default image links nothing.
     "mutation_observability"
+    # Gate W6.4.1. main/nvs_config.c itself compiles against this component:
+    # nvs_task is the project's only internal-RAM flash writer, so it is where
+    # the weather schedule-window transaction executes, and nvs_config_init()
+    # hands the component its queue transport. Unconditional for the same
+    # ESP-IDF reason as the entries above — component requirements resolve
+    # before any CONFIG_* symbol exists. Both the dispatch and the binding are
+    # inside #ifdef CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP, so the default image
+    # links nothing from it.
+    "weather_window"
     # Gate W6.3T-B: the coherent telemetry safety snapshot. The power and fan
     # producers publish their already-computed facts into it; it acquires no
     # hardware, makes no decision and depends on no policy or weather code.

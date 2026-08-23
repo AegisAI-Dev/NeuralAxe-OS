@@ -5,6 +5,7 @@ SRCS
     "test_nx_weather_pilot_wiring.c"
     "test_nx_weather_pilot_w631_flow.c"
     "test_nx_weather_pilot_w632_schedule.c"
+    "test_nx_weather_pilot_w64_reboot.c"
 
 REQUIRES
     "unity"
@@ -27,4 +28,9 @@ REQUIRES
     "telemetry_safety"
     "tuning_input_projection"
     "mutation_observability"
+    # Gate W6.4 end-to-end reboot test. It drives the SHIPPING authorization
+    # gate against an in-memory model of the committed W2 backend, so the
+    # decide-then-durably-claim ordering it proves is the one that ships.
+    "weather_window"
+    "tuning_store"
 )

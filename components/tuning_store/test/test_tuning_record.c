@@ -697,9 +697,12 @@ TEST_CASE("codec: framing rejections (magic/schema/flags/length/kind)", "[tuning
     TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_BAD_MAGIC,
                       tuning_record_decode(g_buf2, len, &g_out));
 
-    /* unsupported schema (checked before the CRC) */
+    /* unsupported schema (checked before the CRC).
+     * Derived from the constant rather than hardcoded: Gate W6.4 made v2 a
+     * SUPPORTED schema, and a literal here silently became a no-op assertion.
+     * One past the current version is always unsupported by construction. */
     memcpy(g_buf2, g_buf, len);
-    g_buf2[4] = 2u;
+    g_buf2[4] = (uint8_t)(TUNING_RECORD_SCHEMA_VERSION + 1u);
     TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_UNSUPPORTED_SCHEMA,
                       tuning_record_decode(g_buf2, len, &g_out));
 
@@ -855,4 +858,227 @@ TEST_CASE("strings: record enums have distinct tokens", "[tuning_record]")
     }
     TEST_ASSERT_EQUAL_STRING("ERR_UNKNOWN", tuning_record_error_str((TuningRecordError)250));
     TEST_ASSERT_EQUAL_STRING("UNKNOWN", tuning_tx_state_str((TuningTxState)250));
+}
+
+/* ================================================================== */
+/* Gate W6.4 — schema v1 -> v2 evolution and window state              */
+/* ================================================================== */
+
+/*
+ * Re-frame a v2 encoding as a genuine v1 encoding by DROPPING the appended
+ * window bytes and repairing every length field and the CRC. This produces
+ * the exact bytes a pre-W6.4 firmware would have committed, so the migration
+ * test exercises a real old record rather than an approximation of one.
+ */
+static size_t w64_downgrade_to_v1(uint8_t *buf, size_t len)
+{
+    uint32_t payload_len;
+    size_t   new_len;
+
+    TEST_ASSERT_TRUE(len > TUNING_RECORD_WINDOW_V2_BYTES + TUNING_RECORD_CRC_LEN);
+    new_len = len - TUNING_RECORD_WINDOW_V2_BYTES;
+    payload_len = (uint32_t)(new_len - TUNING_RECORD_HEADER_LEN -
+                             TUNING_RECORD_CRC_LEN);
+
+    buf[4] = 1u; buf[5] = 0u;                       /* schema = 1          */
+    buf[8]  = (uint8_t)(new_len & 0xFFu);           /* total_len           */
+    buf[9]  = (uint8_t)((new_len >> 8) & 0xFFu);
+    buf[10] = (uint8_t)((new_len >> 16) & 0xFFu);
+    buf[11] = (uint8_t)((new_len >> 24) & 0xFFu);
+    buf[20] = (uint8_t)(payload_len & 0xFFu);       /* payload_len         */
+    buf[21] = (uint8_t)((payload_len >> 8) & 0xFFu);
+    buf[22] = (uint8_t)((payload_len >> 16) & 0xFFu);
+    buf[23] = (uint8_t)((payload_len >> 24) & 0xFFu);
+
+    {
+        uint32_t crc = tuning_record_crc32(buf, new_len - TUNING_RECORD_CRC_LEN);
+        size_t   o   = new_len - TUNING_RECORD_CRC_LEN;
+        buf[o]     = (uint8_t)(crc & 0xFFu);
+        buf[o + 1] = (uint8_t)((crc >> 8) & 0xFFu);
+        buf[o + 2] = (uint8_t)((crc >> 16) & 0xFFu);
+        buf[o + 3] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    return new_len;
+}
+
+TEST_CASE("w64: the encoder writes schema v2 and round-trips window state",
+          "[tuning_record]")
+{
+    TuningPolicyRecord rec, back;
+    size_t len = 0;
+
+    tuning_record_init_state(&rec);
+    rec.generation = 7u;
+    rec.window.present = true;
+    rec.window.year = 2026u; rec.window.month = 7u; rec.window.day = 15u;
+    rec.window.served_mask = 0x05u;
+
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK,
+                      tuning_record_encode(&rec, g_buf, sizeof(g_buf), &len));
+    TEST_ASSERT_EQUAL_UINT16(2u, (uint16_t)(g_buf[4] | (g_buf[5] << 8)));
+    TEST_ASSERT_TRUE(len <= TUNING_RECORD_MAX_ENCODED);
+
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK, tuning_record_decode(g_buf, len, &back));
+    TEST_ASSERT_TRUE(back.window.present);
+    TEST_ASSERT_EQUAL_UINT16(2026u, back.window.year);
+    TEST_ASSERT_EQUAL_UINT8(7u, back.window.month);
+    TEST_ASSERT_EQUAL_UINT8(15u, back.window.day);
+    TEST_ASSERT_EQUAL_UINT8(0x05u, back.window.served_mask);
+}
+
+TEST_CASE("w64: a valid pre-W6.4 v1 record still loads and is NOT served",
+          "[tuning_record]")
+{
+    TuningPolicyRecord rec, back;
+    size_t len = 0, v1_len;
+
+    tuning_record_init_state(&rec);
+    rec.generation = 3u;
+    rec.latest_trusted_epoch_s = TUNING_RECORD_EPOCH_MIN_S + 1000ull;
+    rec.consecutive_recovery_failures = 2u;
+    rec.window.present = true;
+    rec.window.year = 2026u; rec.window.month = 7u; rec.window.day = 15u;
+    rec.window.served_mask = 0x07u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK,
+                      tuning_record_encode(&rec, g_buf, sizeof(g_buf), &len));
+
+    v1_len = w64_downgrade_to_v1(g_buf, len);
+    TEST_ASSERT_EQUAL_UINT(len - TUNING_RECORD_WINDOW_V2_BYTES, v1_len);
+
+    /* THE migration rule: it decodes cleanly (not corrupt, not unsupported), */
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK,
+                      tuning_record_decode(g_buf, v1_len, &back));
+    /* every existing v1 field survives, */
+    TEST_ASSERT_EQUAL_UINT32(3u, back.generation);
+    TEST_ASSERT_EQUAL_UINT64(TUNING_RECORD_EPOCH_MIN_S + 1000ull,
+                             back.latest_trusted_epoch_s);
+    TEST_ASSERT_EQUAL_UINT8(2u, back.consecutive_recovery_failures);
+    /* and the absent window means NEVER CLAIMED, never already-served. */
+    TEST_ASSERT_FALSE(back.window.present);
+    TEST_ASSERT_EQUAL_UINT8(0u, back.window.served_mask);
+    TEST_ASSERT_EQUAL_UINT16(0u, back.window.year);
+}
+
+TEST_CASE("w64: a future schema is refused and the record is left intact",
+          "[tuning_record]")
+{
+    TuningPolicyRecord rec, back;
+    size_t len = 0;
+    uint8_t snapshot[TUNING_RECORD_MAX_ENCODED];
+
+    tuning_record_init_state(&rec);
+    rec.generation = 5u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK,
+                      tuning_record_encode(&rec, g_buf, sizeof(g_buf), &len));
+
+    g_buf[4] = 3u; g_buf[5] = 0u;              /* claim schema 3 */
+    memcpy(snapshot, g_buf, len);
+
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_UNSUPPORTED_SCHEMA,
+                      tuning_record_decode(g_buf, len, &back));
+    /* Fail closed means the bytes are untouched: no destructive rewrite. */
+    TEST_ASSERT_EQUAL_INT(0, memcmp(snapshot, g_buf, len));
+
+    g_buf[4] = 0u;                             /* below the minimum */
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_UNSUPPORTED_SCHEMA,
+                      tuning_record_decode(g_buf, len, &back));
+}
+
+TEST_CASE("w64: a v1 record carrying extra bytes is rejected, not guessed",
+          "[tuning_record]")
+{
+    TuningPolicyRecord rec, back;
+    size_t len = 0;
+
+    tuning_record_init_state(&rec);
+    rec.generation = 9u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK,
+                      tuning_record_encode(&rec, g_buf, sizeof(g_buf), &len));
+    /* Claim v1 while the payload still carries the v2 tail: the cursor cannot
+     * be exhausted, so this must be TRAILING_BYTES, never a silent short read. */
+    g_buf[4] = 1u; g_buf[5] = 0u;
+    {
+        uint32_t crc = tuning_record_crc32(g_buf, len - TUNING_RECORD_CRC_LEN);
+        size_t o = len - TUNING_RECORD_CRC_LEN;
+        g_buf[o] = (uint8_t)(crc & 0xFFu);
+        g_buf[o + 1] = (uint8_t)((crc >> 8) & 0xFFu);
+        g_buf[o + 2] = (uint8_t)((crc >> 16) & 0xFFu);
+        g_buf[o + 3] = (uint8_t)((crc >> 24) & 0xFFu);
+    }
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_TRAILING_BYTES,
+                      tuning_record_decode(g_buf, len, &back));
+}
+
+TEST_CASE("w64: window state validation enforces canonical zeros and bounds",
+          "[tuning_record]")
+{
+    TuningScheduleWindowState w;
+    TuningPolicyRecord rec;
+    size_t len = 0;
+
+    memset(&w, 0, sizeof(w));
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK, tuning_window_state_validate(&w));
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_INVALID_ARGUMENT,
+                      tuning_window_state_validate(NULL));
+
+    /* Absent must be canonically zero: a stray field is invalid. */
+    w.served_mask = 1u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_window_state_validate(&w));
+    memset(&w, 0, sizeof(w));
+    w.year = 2026u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_window_state_validate(&w));
+
+    /* Present must carry a plausible date. */
+    memset(&w, 0, sizeof(w));
+    w.present = true; w.year = 2026u; w.month = 7u; w.day = 15u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK, tuning_window_state_validate(&w));
+    w.month = 0u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_window_state_validate(&w));
+    w.month = 13u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_window_state_validate(&w));
+    w.month = 7u; w.day = 0u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_window_state_validate(&w));
+    w.day = 32u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_window_state_validate(&w));
+    w.day = 15u; w.year = 2024u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_window_state_validate(&w));
+
+    /* A present day with an EMPTY mask is legitimate and must stay encodable. */
+    memset(&w, 0, sizeof(w));
+    w.present = true; w.year = 2026u; w.month = 7u; w.day = 15u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK, tuning_window_state_validate(&w));
+
+    /* An invalid window makes the whole record refuse to encode. */
+    tuning_record_init_state(&rec);
+    rec.generation = 2u;
+    rec.window.present = false;
+    rec.window.served_mask = 0x01u;      /* absent but non-canonical */
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_WINDOW_INVALID,
+                      tuning_record_encode(&rec, g_buf, sizeof(g_buf), &len));
+}
+
+TEST_CASE("w64: a tombstone carries no window claim", "[tuning_record]")
+{
+    TuningPolicyRecord rec, back;
+    size_t len = 0;
+
+    tuning_record_init_tombstone(&rec);
+    rec.generation = 4u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK,
+                      tuning_record_encode(&rec, g_buf, sizeof(g_buf), &len));
+    TEST_ASSERT_EQUAL(TUNING_RECORD_OK, tuning_record_decode(g_buf, len, &back));
+    TEST_ASSERT_FALSE(back.window.present);
+
+    /* A tombstone that claims a window is not a tombstone. */
+    rec.window.present = true;
+    rec.window.year = 2026u; rec.window.month = 7u; rec.window.day = 15u;
+    TEST_ASSERT_EQUAL(TUNING_RECORD_ERR_TOMBSTONE_NOT_EMPTY,
+                      tuning_record_encode(&rec, g_buf, sizeof(g_buf), &len));
 }

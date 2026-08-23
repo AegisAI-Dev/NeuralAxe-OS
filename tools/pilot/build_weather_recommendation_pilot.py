@@ -141,6 +141,13 @@ REQUIRED_SYMBOL_PREFIXES = (
     "nx_tuning_input_",          # Gate W6.3.1 projection
     "tuning_registry_",          # the production Gamma 601 registry
     "tuning_policy_",            # the committed W1 evaluator itself
+    # Gate W6.4. The schedule is only safe to authorize because an outbound
+    # window is claimed durably BEFORE it is served. If either of these groups
+    # were garbage-collected the image would still schedule, still fetch and
+    # still evaluate -- and would silently re-serve every window after a
+    # reboot. They are required for the same reason the Kconfig edge exists.
+    "nx_weather_window_",        # the W6.4 decision + claim runtime
+    "tuning_store_",             # the ONE nx_wtp persistence authority
 )
 
 # A deliberately strict decimal-degree grammar: optional sign, digits, an
@@ -327,6 +334,11 @@ def pilot_defaults_text(cfg: dict) -> str:
         # not AUTHORIZED: it composes no request, the W6.3 worker is never
         # asked to fetch and the schedule evaluates to DISABLED forever. It is
         # written ONLY here, so an ordinary build cannot acquire it.
+        # Gate W6.4. Crash-safe schedule-window deduplication. The schedule
+        # symbol DEPENDS on this one, so a fragment that authorized the
+        # schedule without it would silently drop the authorization
+        # entirely rather than build an unsafe image.
+        "CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP=y",
         "CONFIG_NX_WEATHER_PILOT_SCHEDULE=y",
         # Gate W6.1. Without this the pilot has NO authority to read at the
         # mutation boundaries, every mutation fact is stamped UNAVAILABLE and
@@ -384,6 +396,7 @@ REQUIRED_SDKCONFIG = (
     # rather than from our own fragment: the fragment states intent, only
     # sdkconfig.h proves the compiler agreed (the symbol depends on the pilot
     # diagnostics flag, so a mis-ordered fragment could silently drop it).
+    "CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP",
     "CONFIG_NX_WEATHER_PILOT_SCHEDULE",
     "CONFIG_NX_MUTATION_OBSERVABILITY",
 )
@@ -410,6 +423,19 @@ def verify_sdkconfig_h(build: Path) -> None:
     for sym in FORBIDDEN_SDKCONFIG:
         if f"#define {sym} 1" in text:
             fail(f"forbidden build option enabled: {sym}")
+
+    # Gate W6.4 COUPLING, checked explicitly rather than relied on.
+    #
+    # Kconfig already makes NX_WEATHER_PILOT_SCHEDULE depend on
+    # NX_WEATHER_PILOT_WINDOW_DEDUP, so this pairing cannot normally break.
+    # It is asserted anyway because the consequence of it ever breaking is a
+    # pilot that authorizes outbound schedule service with NO crash-safe
+    # deduplication -- an image that can re-serve a window after a reboot.
+    # A dependency edge is a mechanism; this is the property.
+    sched = "#define CONFIG_NX_WEATHER_PILOT_SCHEDULE 1" in text
+    dedup = "#define CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP 1" in text
+    if sched and not dedup:
+        fail("schedule authorized without crash-safe window deduplication")
 
 
 def _parse_nm(text: str) -> set[str]:
@@ -627,6 +653,10 @@ def build_manifest(identity: canonical_revision.BuildIdentity, cfg: dict,
         # one says the owner permitted this image to ask. A bounded boolean —
         # it names no slot time, no window and no timezone.
         "scheduleEnabled": True,
+        # Gate W6.4. Bounded boolean: the image carries crash-safe
+        # window deduplication. Runtime served-window state is NEVER
+        # placed in the manifest - this states a build capability only.
+        "windowDedupEnabled": True,
         "sourceStatus": cfg["status"],          # a value-free token
         "recommendationOnly": True,
         "executionEnabled": False,

@@ -616,6 +616,12 @@ static TuningRecordError validate_state_payload(const TuningPolicyRecord *rec)
     if (rec->consecutive_recovery_failures > TUNING_CONSECUTIVE_FAILURE_STORE_MAX) {
         return TUNING_RECORD_ERR_COUNTER_RANGE;
     }
+    {
+        TuningRecordError werr = tuning_window_state_validate(&rec->window);
+        if (werr != TUNING_RECORD_OK) {
+            return werr;
+        }
+    }
     return TUNING_RECORD_OK;
 }
 
@@ -676,7 +682,56 @@ static bool tombstone_payload_zero(const TuningPolicyRecord *rec)
         rec->consecutive_recovery_failures != 0u) {
         return false;
     }
+    /* Gate W6.4: a tombstone carries no window claim either. */
+    if (rec->window.present || rec->window.year != 0u ||
+        rec->window.month != 0u || rec->window.day != 0u ||
+        rec->window.served_mask != 0u) {
+        return false;
+    }
     return true;
+}
+
+/*
+ * Gate W6.4 — persisted window-state validation.
+ *
+ * The date band is expressed in YEARS derived from the record's own committed
+ * epoch band, so the two cannot drift apart: 2025..2100 inclusive of the start
+ * year of the band and the year the band ends. Deriving it here rather than
+ * hardcoding a second pair of literals is deliberate — a future band change
+ * must not silently leave this check behind.
+ */
+#define TUNING_WINDOW_YEAR_MIN 2025u
+#define TUNING_WINDOW_YEAR_MAX 2100u
+
+TuningRecordError tuning_window_state_validate(const TuningScheduleWindowState *w)
+{
+    if (w == NULL) {
+        return TUNING_RECORD_ERR_INVALID_ARGUMENT;
+    }
+    if (!w->present) {
+        /* Canonical zeros: an absent claim has exactly one encoding. */
+        if (w->year != 0u || w->month != 0u || w->day != 0u ||
+            w->served_mask != 0u) {
+            return TUNING_RECORD_ERR_WINDOW_INVALID;
+        }
+        return TUNING_RECORD_OK;
+    }
+    if (w->year < TUNING_WINDOW_YEAR_MIN || w->year > TUNING_WINDOW_YEAR_MAX) {
+        return TUNING_RECORD_ERR_WINDOW_INVALID;
+    }
+    if (w->month < 1u || w->month > 12u) {
+        return TUNING_RECORD_ERR_WINDOW_INVALID;
+    }
+    if (w->day < 1u || w->day > 31u) {
+        return TUNING_RECORD_ERR_WINDOW_INVALID;
+    }
+    /*
+     * A present day with an EMPTY mask is legitimate and must stay decodable:
+     * it is the state produced by a day rollover that has been persisted
+     * before its first slot claim. The mask is otherwise unconstrained here on
+     * purpose — see the header note on slot-count checking.
+     */
+    return TUNING_RECORD_OK;
 }
 
 TuningRecordError tuning_record_validate(const TuningPolicyRecord *rec)
@@ -795,6 +850,15 @@ TuningRecordError tuning_record_encode(const TuningPolicyRecord *rec,
         w_u64(&w, rec->cooldown_until_epoch_s);
         w_u64(&w, rec->latest_trusted_epoch_s);
         w_u8(&w, rec->consecutive_recovery_failures);
+
+        /* Gate W6.4 (schema v2) — appended after every v1 field, so no v1
+         * byte moves. `present` is a flag byte rather than a sentinel date so
+         * "absent" has exactly one encoding. */
+        w_u8(&w, rec->window.present ? 1u : 0u);
+        w_u16(&w, rec->window.year);
+        w_u8(&w, rec->window.month);
+        w_u8(&w, rec->window.day);
+        w_u8(&w, rec->window.served_mask);
     }
     /* TOMBSTONE: payload intentionally empty. */
 
@@ -859,7 +923,13 @@ TuningRecordError tuning_record_decode(const uint8_t *buf, size_t len,
     if (magic != TUNING_RECORD_MAGIC) {
         return TUNING_RECORD_ERR_BAD_MAGIC;
     }
-    if (schema != (uint16_t)TUNING_RECORD_SCHEMA_VERSION) {
+    /*
+     * Gate W6.4 migration boundary. v1 and v2 are both readable; anything
+     * older than the minimum or newer than this build is refused and the
+     * record is left untouched (fail closed, never a destructive rewrite).
+     */
+    if (schema < (uint16_t)TUNING_RECORD_SCHEMA_VERSION_MIN ||
+        schema > (uint16_t)TUNING_RECORD_SCHEMA_VERSION) {
         return TUNING_RECORD_ERR_UNSUPPORTED_SCHEMA;
     }
     if (header_len != (uint16_t)TUNING_RECORD_HEADER_LEN) {
@@ -1014,6 +1084,28 @@ TuningRecordError tuning_record_decode(const uint8_t *buf, size_t len,
         out->cooldown_until_epoch_s = r_u64(&r);
         out->latest_trusted_epoch_s = r_u64(&r);
         out->consecutive_recovery_failures = r_u8(&r);
+
+        /*
+         * Gate W6.4 (schema v2 only). A v1 record stops here and keeps the
+         * memset-zero window state — `present == false`, i.e. "no window has
+         * ever been claimed". That is deliberately NOT "already served": an
+         * older valid record must never suppress a due window, and must never
+         * be mistaken for corruption. The cursor-exhaustion check below then
+         * still applies to whichever version was read, so a v1 record that
+         * carries v2 bytes (or a v2 record that is short) is rejected rather
+         * than silently accepted.
+         */
+        if (schema >= 2u) {
+            uint8_t present = r_u8(&r);
+            if (present > 1u) {
+                return TUNING_RECORD_ERR_BAD_FLAG_BYTE;
+            }
+            out->window.present     = (present == 1u);
+            out->window.year        = r_u16(&r);
+            out->window.month       = r_u8(&r);
+            out->window.day         = r_u8(&r);
+            out->window.served_mask = r_u8(&r);
+        }
 
         if (r.fail) {
             return TUNING_RECORD_ERR_TRUNCATED;
@@ -1171,6 +1263,7 @@ const char *tuning_record_error_str(TuningRecordError e)
     case TUNING_RECORD_ERR_LKS_INVALID: return "ERR_LKS_INVALID";
     case TUNING_RECORD_ERR_TOMBSTONE_NOT_EMPTY: return "ERR_TOMBSTONE_NOT_EMPTY";
     case TUNING_RECORD_ERR_COUNTER_RANGE: return "ERR_COUNTER_RANGE";
+    case TUNING_RECORD_ERR_WINDOW_INVALID: return "ERR_WINDOW_INVALID";
     default: return "ERR_UNKNOWN";
     }
 }

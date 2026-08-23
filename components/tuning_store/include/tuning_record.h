@@ -53,7 +53,34 @@
  * family with its own magic, schema and namespace.
  */
 
-#define TUNING_RECORD_SCHEMA_VERSION 1u
+/*
+ * SCHEMA EVOLUTION (Gate W6.4).
+ *
+ * v1 carried the weather-policy state only. v2 appends the persisted
+ * schedule-window deduplication state so a reboot cannot re-serve a window
+ * that was already durably claimed. The evolution is ADDITIVE and is the
+ * smallest one that can express the claim:
+ *
+ *  - The encoder always writes TUNING_RECORD_SCHEMA_VERSION (v2).
+ *  - The decoder ACCEPTS v1 and v2. A v1 record decodes cleanly and yields
+ *    `window.present == false` — "no window has ever been claimed", which is
+ *    NOT the same as "already served" and is NOT corruption. That distinction
+ *    is the load-bearing migration rule: an older valid record must never be
+ *    mistaken for a served window, and must never be mistaken for a corrupt
+ *    one.
+ *  - No existing v1 field is moved, resized or reinterpreted; v2 bytes are
+ *    appended after the v1 payload, inside the same self-describing framing
+ *    (explicit total_len/payload_len + CRC over everything).
+ *  - A FUTURE version (>= 3) is rejected with ERR_UNSUPPORTED_SCHEMA and the
+ *    record is preserved untouched — fail closed, never a destructive rewrite,
+ *    never a namespace erase.
+ */
+#define TUNING_RECORD_SCHEMA_VERSION 2u
+#define TUNING_RECORD_SCHEMA_VERSION_MIN 1u
+
+/* Bytes v2 appends to the v1 STATE payload: flags(1) + year(2) + month(1)
+ * + day(1) + served_mask(1). */
+#define TUNING_RECORD_WINDOW_V2_BYTES 6u
 
 /* Fixed wire framing (mirrors the proven B3 layout, new magic values). */
 #define TUNING_RECORD_MAGIC 0x4E585752u          /* "NXWR" */
@@ -188,6 +215,7 @@ typedef enum {
     TUNING_RECORD_ERR_LKS_INVALID,
     TUNING_RECORD_ERR_TOMBSTONE_NOT_EMPTY,
     TUNING_RECORD_ERR_COUNTER_RANGE,
+    TUNING_RECORD_ERR_WINDOW_INVALID,    /* Gate W6.4 window state (v2)    */
     TUNING_RECORD_ERR__COUNT
 } TuningRecordError;
 
@@ -267,6 +295,40 @@ typedef struct {
 } TuningTransaction;
 
 /*
+ * GATE W6.4 — persisted schedule-window deduplication state.
+ *
+ * WHAT IT IS. The durable answer to "has this schedule window already been
+ * claimed for outbound service?", carried inside the same crash-safe record
+ * so one dual-slot commit keeps it consistent with the rest of the policy
+ * state. It mirrors the committed W3 `WeatherScheduleProgress` shape
+ * (service-day identity + a per-slot mask) rather than inventing a second
+ * representation.
+ *
+ * WHY PRIMITIVES AND NOT `WeatherLocalDate`. This component deliberately does
+ * not depend on the W3 schedule component; persisting the three date
+ * primitives keeps `tuning_store`'s dependency set unchanged (it requires
+ * only `tuning_profile`). The W6.4 module converts in both directions and
+ * owns that mapping.
+ *
+ * PRIVACY. A schedule-local service day and a slot bitmask are governed
+ * scheduling state, not owner-private data. No timezone string, coordinate,
+ * hostname or epoch is added here — the day is the schedule's own local date,
+ * not a clock.
+ *
+ * `present == false` is the canonical "nothing claimed yet" value and is what
+ * a v1 record decodes to. When false, every other field MUST be zero
+ * (canonical-zero rule, enforced by validation) so the encoding is
+ * deterministic and a partially-filled absent state cannot exist.
+ */
+typedef struct {
+    bool     present;      /* false = no service day claimed yet          */
+    uint16_t year;         /* schedule-local service day; 0 iff !present  */
+    uint8_t  month;        /* 1..12; 0 iff !present                       */
+    uint8_t  day;          /* 1..31; 0 iff !present                       */
+    uint8_t  served_mask;  /* bit i => slot i durably claimed on that day */
+} TuningScheduleWindowState;
+
+/*
  * The persisted record. `generation` is store-assigned (>= 1). The manual
  * override is persisted WITHOUT its per-boot monotonic anchor
  * (monotonic_expiry_us must be 0 in any record; the runtime re-arms it
@@ -293,6 +355,10 @@ typedef struct {
     uint64_t latest_trusted_epoch_s;     /* 0 = never; else in band;
                                             monotonically advancing      */
     uint8_t consecutive_recovery_failures;
+
+    /* Gate W6.4 (schema v2). Absent in a v1 record, which decodes to
+     * present=false — "never claimed", never "already served". */
+    TuningScheduleWindowState window;
 } TuningPolicyRecord;
 
 /* Active-slot pointer (small, separately versioned encoding — never a
@@ -330,6 +396,17 @@ TuningEnableCheckResult tuning_settings_enable_check(const TuningPolicySettings 
 
 /* Transaction structural validation (state-dependent canonical rules). */
 TuningRecordError tuning_transaction_validate(const TuningTransaction *tx);
+
+/*
+ * Gate W6.4 — structural validation of the persisted window state. Pure.
+ * Absent: every field must be canonical zero. Present: the date must be
+ * plausible (year in the record's epoch band expressed as years, month 1..12,
+ * day 1..31). The mask is NOT range-checked against a slot count here — this
+ * layer does not know the schedule configuration, and a mask bit for a slot
+ * that no longer exists must fail closed at the W6.4 decision layer rather
+ * than make an otherwise valid persisted record undecodable.
+ */
+TuningRecordError tuning_window_state_validate(const TuningScheduleWindowState *w);
 
 /* Initialize a STATE record with safe defaults / a zero-payload tombstone. */
 void tuning_record_init_state(TuningPolicyRecord *rec);
@@ -429,7 +506,10 @@ _Static_assert(TUNING_RECORD_EPOCH_MIN_S < TUNING_RECORD_EPOCH_MAX_S,
                "epoch sanity band inverted");
 _Static_assert(TUNING_RECORD_MAX_ENCODED >= 448u,
                "encode buffer bound below the v1 worst case");
-_Static_assert(TUNING_RECORD_ERR__COUNT == 26,
+_Static_assert(TUNING_RECORD_SCHEMA_VERSION == 2u &&
+               TUNING_RECORD_SCHEMA_VERSION_MIN == 1u,
+               "W6.4 schema range changed — review migration and tests");
+_Static_assert(TUNING_RECORD_ERR__COUNT == 27,
                "codec error count changed — review tokens/tests");
 _Static_assert(TUNING_ENABLE__COUNT == 10,
                "enable-check result count changed — review tokens/tests");

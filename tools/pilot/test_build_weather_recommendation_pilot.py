@@ -508,6 +508,132 @@ class VerificationContracts(unittest.TestCase):
         # It is a bounded boolean, not a window or a slot time.
         self.assertIsInstance(m["scheduleEnabled"], bool)
 
+
+    # ---------------- Gate W6.4 window deduplication ----------------
+
+    def test_pilot_defaults_carry_window_dedup(self):
+        cfg = w5.read_private_config(env())
+        text = w5.pilot_defaults_text(cfg)
+        self.assertIn("CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP=y", text)
+        self.assertIn("CONFIG_NX_WEATHER_PILOT_SCHEDULE=y", text)
+
+    def test_baseline_defaults_do_not_carry_window_dedup(self):
+        repo = Path(__file__).resolve().parents[2]
+        for name in ("sdkconfig.defaults", "sdkconfig.ci"):
+            path = repo / name
+            if path.is_file():
+                self.assertNotIn("NX_WEATHER_PILOT_WINDOW_DEDUP",
+                                 path.read_text(encoding="utf-8"),
+                                 f"{name} must not enable window dedup")
+
+    def test_sdkconfig_contract_requires_window_dedup(self):
+        self.assertIn("CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP",
+                      w5.REQUIRED_SDKCONFIG)
+
+    def test_schedule_without_dedup_is_rejected(self):
+        """THE W6.4 build-posture safety property.
+
+        An image that authorizes outbound schedule service without crash-safe
+        deduplication can re-serve a window after a reboot. The helper must
+        refuse it even though Kconfig already makes the pairing structural.
+        """
+        import shutil
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="nx-w64-cfg-"))
+        try:
+            cfgdir = work / "config"
+            cfgdir.mkdir(parents=True)
+            ok = "\n".join("#define %s 1" % s for s in w5.REQUIRED_SDKCONFIG)
+            (cfgdir / "sdkconfig.h").write_text(ok, encoding="utf-8")
+            w5.verify_sdkconfig_h(work)
+
+            # Schedule authorized, dedup dropped.
+            without = "\n".join(
+                "#define %s 1" % s for s in w5.REQUIRED_SDKCONFIG
+                if s != "CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP")
+            (cfgdir / "sdkconfig.h").write_text(without, encoding="utf-8")
+            with self.assertRaises(w5.PilotError):
+                w5.verify_sdkconfig_h(work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def test_kconfig_makes_schedule_depend_on_window_dedup(self):
+        """Proven against the committed Kconfig, not asserted.
+
+        The dependency edge is what makes the RAM-only window unreachable in
+        every buildable posture.
+        """
+        repo = Path(__file__).resolve().parents[2]
+        text = (repo / "main" / "Kconfig.projbuild").read_text(encoding="utf-8")
+        idx = text.index("config NX_WEATHER_PILOT_SCHEDULE")
+        block = text[idx:idx + 500]
+        self.assertIn("depends on NX_WEATHER_PILOT_WINDOW_DEDUP", block)
+
+        didx = text.index("config NX_WEATHER_PILOT_WINDOW_DEDUP")
+        dblock = text[didx:didx + 400]
+        self.assertIn("depends on NX_WEATHER_RECOMMENDATION_PILOT_DIAGNOSTICS",
+                      dblock)
+        self.assertIn("default n", dblock)
+
+    def test_manifest_reports_window_dedup_and_no_runtime_state(self):
+        ident = w5.canonical_revision.BuildIdentity(
+            revision="v0.0.0-0-gdeadbee", commit="d" * 40, dirty=False,
+            branch="t")
+        cfg = w5.read_private_config(env())
+        m = w5.build_manifest(ident, cfg, "digest")
+        self.assertTrue(m["windowDedupEnabled"])
+        self.assertTrue(m["scheduleEnabled"])
+        self.assertFalse(m["executionEnabled"])
+        self.assertFalse(m["hardwareTuningEnabled"])
+        self.assertIsInstance(m["windowDedupEnabled"], bool)
+        # Runtime served-window state must never reach the manifest.
+        blob = json.dumps(m)
+        for token in ("servedMask", "served_mask", "serviceDay",
+                      "windowMask", "executedMask"):
+            self.assertNotIn(token, blob)
+
+    def test_symbol_audit_requires_the_window_dedup_groups(self):
+        """The image must be proven to CONTAIN the dedup, not just declare it.
+
+        Kconfig and sdkconfig.h prove the capability was requested. Neither
+        proves it survived the link. Without these two groups an image could
+        pass every other check while the decision path or the persistence
+        authority had been garbage-collected out of it -- and it would then
+        schedule, fetch and evaluate exactly as before while silently
+        re-serving every window after a reboot.
+        """
+        self.assertIn("nx_weather_window_", w5.REQUIRED_SYMBOL_PREFIXES)
+        self.assertIn("tuning_store_", w5.REQUIRED_SYMBOL_PREFIXES)
+
+    def test_symbol_audit_rejects_an_image_missing_the_dedup(self):
+        """Proven by running the audit, not by reading its table."""
+        import shutil
+        import tempfile
+        work = Path(tempfile.mkdtemp(prefix="nx-w64-sym-"))
+        try:
+            elf = work / "fake.elf"
+            elf.write_bytes(b"")
+
+            full = {p + "x" for p in w5.REQUIRED_SYMBOL_PREFIXES}
+            # The audit also demands EXACTLY ONE trusted-time initializer, so a
+            # fixture built only from prefixes would fail for the wrong reason.
+            full.add("pool_time_sntp_init")
+            missing = {s for s in full
+                       if not s.startswith("nx_weather_window_")}
+
+            saved = w5.elf_symbols
+            try:
+                w5.elf_symbols = lambda *a, **k: full
+                w5.verify_symbols(elf)          # complete -> passes
+
+                w5.elf_symbols = lambda *a, **k: missing
+                with self.assertRaises(w5.PilotError):
+                    w5.verify_symbols(elf)      # dedup dropped -> refused
+            finally:
+                w5.elf_symbols = saved
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
     def test_release_pair_reads_both_identities_from_the_built_images(self):
         """The pair is read from the artefacts, never assumed from the input."""
         import shutil

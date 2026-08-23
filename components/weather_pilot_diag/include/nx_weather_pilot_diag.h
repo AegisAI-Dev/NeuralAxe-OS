@@ -8,6 +8,7 @@
 #include "weather_runtime.h"     /* WeatherRuntimeState, recommendation */
 #include "pool_time_source.h"    /* Gate B10 sanitized trusted-time model */
 #include "nx_weather_io.h"       /* Gate W6.3 bounded async I/O model    */
+#include "nx_weather_window_runtime.h" /* Gate W6.4 bounded window model  */
 
 /*
  * NeuralAxe Weather-Aware Tuning — RECOMMENDATION-ONLY PILOT DIAGNOSTICS
@@ -428,6 +429,47 @@ typedef struct {
     uint32_t io_request_age_s;      /* MONOTONIC, saturating, never an epoch */
     uint32_t io_worker_count;       /* structurally 0 or 1; proves unicity  */
     uint32_t io_worker_stack_free;  /* high-water headroom, 0 when no worker */
+
+    /*
+     * GATE W6.4 — the crash-safe window deduplication, made visible.
+     *
+     * Without these, a pilot that stops submitting is indistinguishable from a
+     * pilot that is correctly suppressing an already-served window, and the
+     * two demand opposite responses. Worse, the FAILURE direction is silent by
+     * design: an unreadable store refuses outbound service and produces
+     * exactly the same "nothing happened" as a healthy quiet device.
+     *
+     * `window_fact` is the provenance, exactly as `io_fact` is for W6.3:
+     * STRUCTURAL when CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP is not in the image
+     * at all, UNAVAILABLE when the authority exists but is not serviceable,
+     * OBSERVED otherwise. A zeroed line is ABSENT and can never look healthy.
+     *
+     * `window_store_fact` is the NxWeatherWindowStoreFact token, whose zero is
+     * NOT_LOADED — so a zeroed line never claims a usable store either.
+     *
+     * `window_served_mask` is the DURABLE slot mask for the claimed service
+     * day, not a RAM view of it: it is what would survive a power cut.
+     *
+     * PRIVACY. Scalars and token ids only, as above. The service day and slot
+     * mask are governed scheduling state, not owner-private data — they say
+     * WHEN this device was permitted to ask, never where it is or what it
+     * asked. There is no host, no URL, no coordinate and no credential here,
+     * and no string field in which one could be smuggled.
+     */
+    NxWeatherFactState window_fact;
+    bool     window_dedup_enabled;  /* the capability is compiled in        */
+    uint8_t  window_store_fact;     /* NxWeatherWindowStoreFact token id    */
+    bool     window_ready;          /* persistence permits outbound service */
+    bool     window_recovered;      /* a durable claim was read at boot     */
+    bool     window_day_present;    /* a service day is durably claimed     */
+    uint16_t window_service_year;   /* 0 when absent                        */
+    uint8_t  window_service_month;
+    uint8_t  window_service_day;
+    uint8_t  window_served_mask;    /* durably claimed slots for that day   */
+    uint8_t  window_last_decision;  /* NxWeatherWindowDecision token id     */
+    uint32_t window_claim_count;        /* saturating                       */
+    uint32_t window_suppressed_count;   /* saturating                       */
+    uint32_t window_persist_fail_count; /* saturating                       */
 } NxWeatherPilotLine;
 
 /*
@@ -488,6 +530,30 @@ void nx_weather_pilot_time_project(const PoolTimeSourceDiagnostics *d,
 void nx_weather_pilot_io_project(const NxWeatherIoDiag *d, bool worker_linked,
                                  uint32_t worker_count, uint32_t worker_stack_free,
                                  NxWeatherPilotLine *out);
+
+/*
+ * Project the Gate W6.4 window-deduplication observation onto the line.
+ *
+ * `dedup_linked` states whether CONFIG_NX_WEATHER_PILOT_WINDOW_DEDUP put the
+ * authority in the image at all:
+ *   dedup_linked == false  -> STRUCTURAL: no durable claim exists, and
+ *                             because the schedule DEPENDS on this flag, no
+ *                             outbound window service exists either.
+ *   dedup_linked == true   -> OBSERVED when the authority published a reading,
+ *                             UNAVAILABLE when it did not.
+ *
+ * Pure and total: `d` may be NULL, and every field is written on every path so
+ * a refusal can never be read as a healthy zero.
+ *
+ * It takes the observation as an ARGUMENT rather than reading the authority
+ * itself. That keeps the projection pure — every posture, including the
+ * unavailable one, is reachable in a test with no store, no backend and no
+ * flash model at all — and it keeps this component from becoming a second
+ * reader of persistence state.
+ */
+void nx_weather_pilot_window_project(const NxWeatherWindowDiag *d,
+                                     bool dedup_linked,
+                                     NxWeatherPilotLine *out);
 
 /*
  * Classify one runtime observation into an event. Pure: it maps the W5 status
